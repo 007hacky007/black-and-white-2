@@ -801,6 +801,17 @@ def _sse_forms():
         for tag, data in (('', ps), ('.int', ints)):
             out.append(Case('sse.%s%s' % (name, tag), load + bytes.fromhex(op) + store,
                             regs={'eax': 0xFFFFFF85, 'ecx': 0x12345678}, mem={SCRATCH: data + extra}))
+    # bw2: the packed-integer SSE2 forms BW2 uses (1,523 sites, mostly pmaddwd),
+    # on float/int data and on words that hit the saturation and sign limits.
+    sat = struct.pack('<8h', 0x7FFF, -0x8000, -0x8000, 0x1234, -1, 0x4000, 0x7FFF, -0x7FFF) + \
+          struct.pack('<8h', 0x0001, -0x8000, -1, -0x5678, -1, 0x4000, 0x7FFF, -2)
+    for name, op in {'pmaddwd': '660ff5c1', 'pmaddwd.mem': '660ff54620', 'paddsw': '660fedc1',
+                     'pmulhw': '660fe5c1', 'punpckldq': '660f62c1', 'punpckhdq': '660f6ac1',
+                     'punpcklwd': '660f61c1', 'punpckhwd': '660f69c1',
+                     'punpckldq.mem': '660f624620'}.items():
+        for tag, data in (('', ps), ('.int', ints), ('.sat', sat)):
+            out.append(Case('sse.%s%s' % (name, tag), load + bytes.fromhex(op) + store,
+                            regs={'eax': 0xFFFFFF85, 'ecx': 0x12345678}, mem={SCRATCH: data + extra}))
     # double precision on its own data
     for name, op in {'addsd': 'f20f58c1', 'subsd': 'f20f5cc1', 'mulsd': 'f20f59c1', 'divsd': 'f20f5ec1',
                      'minsd': 'f20f5dc1', 'maxsd': 'f20f5fc1', 'comisd': '660f2fc1', 'ucomisd': '660f2ec1',

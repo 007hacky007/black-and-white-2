@@ -2,3 +2,4 @@
 tools/lift/lift32.py, tools/lift/lift32_sse.py - emit RECOMP_TRAP(va, "mnem") instead of the UNIMPLEMENTED comment - lifter gaps must stop the run and name the address (difftest 374/375 before and after; sse.sqrtps fails before and after)
 runtime/recomp32/recomp_types.h - declare recomp_trap/recomp_unresolved_icall, RECOMP_TRAP macro; unresolved ICALL/ITAIL call recomp_unresolved_icall instead of printing and returning 0 - no silent eax = 0 (spec anti-goal: fail loudly)
 tools/lift/lift32.py, tools/lift/difftest.py - lift 16-bit pushf/popf; difftest cases pushfd.id-roundtrip, pushf16.after-cmp, popf16.restores-cf; difftest harness defines the bw2 trap hooks - the BW2 protection VM uses 66 9C (difftest 377/378, sqrtps pre-existing)
+tools/lift/lift32_sse.py, tools/lift/difftest.py - lift xmm forms of pmaddwd, paddsw, pmulhw, punpckl/hdq, punpckl/hwd; difftest cases incl. saturation/sign words - BW2 has 1,523 such sites (difftest 404/405, sqrtps pre-existing)

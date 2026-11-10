@@ -236,6 +236,24 @@ def lift_sse(L, m, ops, comment):
         dd = f"(int8_t)_xmm[{di}].u8[_k]" if k == 'i8' else f"_xmm[{di}].{k}[_k]"
         return one(f"{{ xmm_t _s = {X(s)}; for (int _k = 0; _k < {n}; _k++) "
                    f"_xmm[{di}].{uk}[_k] = ({dd} {o} {rd}) ? ({_CT[uk]})~0u : 0; }}")
+    # bw2: packed-integer SSE2 forms BW2 uses. The source is read whole first, so
+    # `op xmm, same xmm` and memory sources see the original lanes.
+    if m == 'pmaddwd' and di is not None:
+        return one(f"{{ xmm_t _s = {X(s)}, _d = _xmm[{di}]; for (int _k = 0; _k < 4; _k++) "
+                   f"_xmm[{di}].u32[_k] = (uint32_t)((int64_t)_d.i16[2*_k] * _s.i16[2*_k] "
+                   f"+ (int64_t)_d.i16[2*_k+1] * _s.i16[2*_k+1]); }}")
+    if m == 'paddsw' and di is not None:
+        return one(f"{{ xmm_t _s = {X(s)}; for (int _k = 0; _k < 8; _k++) {{ "
+                   f"int32_t _r = (int32_t)_xmm[{di}].i16[_k] + _s.i16[_k]; "
+                   f"_xmm[{di}].i16[_k] = (int16_t)(_r > 32767 ? 32767 : _r < -32768 ? -32768 : _r); }} }}")
+    if m == 'pmulhw' and di is not None:
+        return one(f"{{ xmm_t _s = {X(s)}; for (int _k = 0; _k < 8; _k++) "
+                   f"_xmm[{di}].u16[_k] = (uint16_t)(((int32_t)_xmm[{di}].i16[_k] * _s.i16[_k]) >> 16); }}")
+    if m in ('punpckldq', 'punpckhdq', 'punpcklwd', 'punpckhwd') and di is not None:
+        k, n = ('u32', 4) if m.endswith('dq') else ('u16', 8)
+        base = 0 if 'punpckl' in m else n // 2
+        return one(f"{{ xmm_t _s = {X(s)}, _d = _xmm[{di}]; for (int _k = 0; _k < {n // 2}; _k++) {{ "
+                   f"_xmm[{di}].{k}[2*_k] = _d.{k}[{base} + _k]; _xmm[{di}].{k}[2*_k+1] = _s.{k}[{base} + _k]; }} }}")
     if m in ('pmaxsw', 'pminsw') and di is not None:
         o = '>' if m == 'pmaxsw' else '<'
         return one(f"{{ xmm_t _s = {X(s)}; for (int _k = 0; _k < 8; _k++) "
