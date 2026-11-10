@@ -38,3 +38,87 @@ def zip_bincue(cue: Path) -> Path:
         zf.write(cue.with_suffix(".bin"), cue.with_suffix(".bin").name)
         zf.write(cue, cue.name)
     return z
+
+
+# ---- minimal PE32 builder -------------------------------------------------
+import struct as _st
+
+IMAGE_BASE, SECT_ALIGN, FILE_ALIGN = 0x400000, 0x1000, 0x200
+CODE = 0x60000020   # code | execute | read
+DATA = 0xC0000040   # initialised data | read | write
+
+
+def _align(n, a):
+    return (n + a - 1) // a * a
+
+
+def _idata(imports: dict[str, list[str]], rva: int) -> bytes:
+    """Import directory, ILTs, IATs, hint/names and DLL names, laid out at `rva`."""
+    dlls = list(imports)
+    desc_size = 20 * (len(dlls) + 1)
+    thunks = sum(len(f) + 1 for f in imports.values()) * 4
+    ilt_off, iat_off = desc_size, desc_size + thunks
+    str_off = iat_off + thunks
+    strings, names = bytearray(), {}
+    for dll, funcs in imports.items():
+        for fn in funcs:
+            names[(dll, fn)] = str_off + len(strings)
+            strings += b"\0\0" + fn.encode() + b"\0"
+            if len(strings) % 2:
+                strings += b"\0"
+        names[dll] = str_off + len(strings)
+        strings += dll.encode() + b"\0"
+    desc, ilt = bytearray(), bytearray()
+    k = 0
+    for dll, funcs in imports.items():
+        desc += _st.pack("<IIIII", rva + ilt_off + k * 4, 0, 0, rva + names[dll],
+                         rva + iat_off + k * 4)
+        for fn in funcs:
+            ilt += _st.pack("<I", rva + names[(dll, fn)])
+        ilt += b"\0\0\0\0"
+        k += len(funcs) + 1
+    desc += b"\0" * 20
+    return bytes(desc + ilt + ilt + strings)
+
+
+def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]],
+            entry_rva: int) -> bytes:
+    secs = list(sections)
+    rva = SECT_ALIGN
+    layout = []
+    for name, data, flags in secs:
+        layout.append([name, data, flags, rva])
+        rva += _align(max(len(data), 1), SECT_ALIGN)
+    imp_rva = imp_size = 0
+    if imports:
+        imp_rva = rva
+        data = _idata(imports, rva)
+        imp_size = 20 * (len(imports) + 1)
+        layout.append([".idata", data, DATA, rva])
+        rva += _align(len(data), SECT_ALIGN)
+    size_of_image = rva
+    headers = 0x400
+    raw = headers
+    for s in layout:
+        s.append(raw)
+        raw += _align(len(s[1]), FILE_ALIGN)
+    out = bytearray(raw)
+    out[0:2] = b"MZ"
+    _st.pack_into("<I", out, 0x3C, 0x40)
+    out[0x40:0x44] = b"PE\0\0"
+    _st.pack_into("<HHIIIHH", out, 0x44, 0x14C, len(layout), 0, 0, 0, 224, 0x010F)
+    opt = 0x58
+    dirs = [(0, 0)] * 16
+    dirs[1] = (imp_rva, imp_size)
+    _st.pack_into("<HBBIIIIIIIIIHHHHHHIIIIHHIIIIII", out, opt,
+                  0x10B, 7, 10, 0, 0, 0, entry_rva, SECT_ALIGN, 0, IMAGE_BASE,
+                  SECT_ALIGN, FILE_ALIGN, 4, 0, 0, 0, 4, 0, 0, size_of_image, headers,
+                  0, 2, 0, 0x100000, 0x1000, 0x100000, 0x1000, 0, 16)
+    for i, (r, s) in enumerate(dirs):
+        _st.pack_into("<II", out, opt + 96 + i * 8, r, s)
+    sh = opt + 224
+    for i, (name, data, flags, srva, sraw) in enumerate(layout):
+        _st.pack_into("<8sIIIIIIHHI", out, sh + i * 40, name.encode()[:8], len(data), srva,
+                      _align(len(data), FILE_ALIGN), sraw, 0, 0, 0, 0, flags)
+        out[sraw:sraw + len(data)] = data
+    return bytes(out)
