@@ -160,7 +160,7 @@ What we expect to take from it (each to be confirmed by trying it):
 | Need | pcrecomp piece |
 |---|---|
 | Read BIN/CUE, ISO | `tools/assets/bin2iso.js`, `iso_peek.py` |
-| InstallShield 9 multi-volume | `tools/assets/isextract.py` (support for v9 multi-volume to be confirmed) |
+| InstallShield 9 multi-volume | **unshield** (MIT, Homebrew) instead: `isextract.py` fails on files spanning cabinets (phase 0) |
 | PE analysis, imports, resources | `tools/pe/*` |
 | Function discovery | `tools/disasm/disasm32.py`, `cpp/rtti.py`, `cpp/vtable_scan.py`, `lift/recover`, scoring tools |
 | SafeDisc leftovers | `tools/drm/*` (for understanding `stxt774`/`.name0`) |
@@ -195,7 +195,10 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
 - **D3D9 -> Metal:** device, swap chain, render states, textures (incl. cube,
   DXT), vertex/index buffers, fixed function, and VS/PS bytecode translated to
   MSL on the GPU. Shader cache on disk, compiled asynchronously.
-- **D3DX 9:** the 60 imported functions, natively. `D3DXCompileShader` and
+- **D3DX 9:** the 60 imported functions, natively. **Phase 0:** most rendering goes through
+  `ID3DXEffect` on 59 precompiled fx_2_0 effects (`Data/effects/*.sdv`), so the
+  effect framework is the largest D3DX item; HLSL is needed only for 7 `.fx`
+  sources, and 29 shaders are text assembly (`docs/research/d3dx-usage.md`). `D3DXCompileShader` and
   `D3DXAssembleShader` produce D3D9 bytecode the rest of the D3D9 layer
   already understands. The HLSL compiler is a library choice left to the
   builder (vkd3d-shader is the obvious candidate: it compiles SM1-3 HLSL;
@@ -243,11 +246,24 @@ protection code, stop and report the findings to the user before doing
 anything else** (decided by the user). This decides whether the fan exe is
 liftable at all, so it comes first.
 
+**Phase 0 answer** (`docs/research/safedisc-leftovers.md`): LIVE. `.name0`
+holds a code-virtualization VM (about 2.2 KB of interpreter, 191 handlers)
+running 18 game functions from encrypted bytecode, called from 46 sites.
+**Decided by the user: run the VM as shipped**, i.e. lift its interpreter
+like game code and let it interpret its bytecode; nothing is decrypted or
+removed. A trial lift of the interpreter needs only `pushf`. If the
+virtualized functions turn out to ask for disc or driver checks, stop and ask
+the user again before answering them.
+
 ### 6.3 Size
 
 8.4 MB of code is 2.3x NFSU2. Budget for build time (NFSU2: about 2 minutes
 for lift + compile on an M1 Pro), shard the generated C, and keep generation
-byte-reproducible so rebuilds and diffs are cheap.
+byte-reproducible so rebuilds and diffs are cheap. **Phase 0:** a trial lift
+of all 49,323 function starts produces 458 MB of C (NFSU2: 137 MB); compile
+time on the user's Mac is the first thing the lifter plan measures. The game
+also loads a second module, `PlugIns/ScriptLibraryR.dll` (32-bit, replaced by
+patch 1.2), which must be lifted too.
 
 ### 6.4 Runtime HLSL compile
 
@@ -259,7 +275,11 @@ See 5.2.
 Neither NFSU2 nor pcrecomp's win32hle implements guest SEH; both stop on
 `RaiseException`. BW2 is C++-heavy (MSVC 7.1). Measure early whether it uses
 exceptions on normal paths; if it does, implement guest SEH and
-`__CxxFrameHandler` early, not after weeks of play-testing.
+`__CxxFrameHandler` early, not after weeks of play-testing. **Phase 0:** 271
+`_CxxThrowException` call sites and 1,892 functions with unwind tables, 7
+`__try` blocks: guest C++ EH is required. pcrecomp has a 32-bit scheme for it
+(`tools/lift/eh32.py` with `runtime/native32/eh32.c`) to port onto the
+win32hle host.
 
 ## 7. Lessons carried in from NFSU2
 
@@ -378,10 +398,14 @@ Rows:
    then take `white.exe` from the fan patch; lift; compile; assemble and sign
    the app; show Play.
 
-How the official 1.1 and 1.2 patches are applied without running them is an
-open investigation (formats unknown; see 10). If only data files matter to
-us (the exe comes from the fan patch), the Builder only needs to extract and
-apply their data changes.
+**Phase 0** (`docs/research/official-patches.md`): both are InstallShield 11
+setup launchers whose appended files are an ordinary InstallShield cabinet
+set (unshield reads it). Their changes are partly whole files and partly an
+**RTPatch** binary diff (Pocket Soft's proprietary format; no open macOS
+applier known). The Builder needs an RTPatch applier: first candidate
+RTPatchX (Apache-2.0, C source); otherwise our own decoder or lifting
+`patchw32.dll`. PCGamingWiki serves both patches through a three-step
+terms/confirm flow with no login.
 
 ## 9. Repo and identity
 
@@ -426,6 +450,12 @@ the game files.
    which files), and whether a capture-and-precompile route is viable.
 8. Check `isextract.py` handles InstallShield 9 multi-volume; if not, pick an
    open alternative (e.g. unshield) that fits section 9.
+
+**Status 2026-11-10: all eight answered**, see
+`docs/research/phase0-summary.md` and the reports beside it:
+1 `install-tree.md`, 2 `official-patches.md`, 3 `safedisc-leftovers.md`,
+4-5 `function-discovery.md`, 6 `white-exe-survey.md`, 7 `d3dx-usage.md`,
+8 `install-tree.md`.
 
 ## 11. Decided vs left to the builder
 
