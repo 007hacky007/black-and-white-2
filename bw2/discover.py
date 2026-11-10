@@ -60,6 +60,31 @@ def _seed_list(path: Path) -> list[int]:
     return out
 
 
+def _reloc_targets_from(pe: pefile.PE, entries: list[tuple[int, int]]) -> list[int]:
+    """HIGHLOW relocation sites in non-executable sections whose value points into .text."""
+    base = pe.OPTIONAL_HEADER.ImageBase
+    text = next(s for s in pe.sections if _sname(s.Name) == ".text")
+    lo, hi = base + text.VirtualAddress, base + text.VirtualAddress + text.Misc_VirtualSize
+    data_secs = [s for s in pe.sections if not s.Characteristics & 0x20000000]
+    out = set()
+    for rva, typ in entries:
+        if typ != 3 or not any(s.VirtualAddress <= rva < s.VirtualAddress + s.Misc_VirtualSize
+                                 for s in data_secs):
+            continue
+        v = pe.get_dword_at_rva(rva)
+        if v is not None and lo <= v < hi:
+            out.add(v)
+    return sorted(out)
+
+
+def reloc_data_targets(exe: Path) -> list[int]:
+    """Exact code pointers stored in data, for images that keep their relocations (DLLs)."""
+    pe = pefile.PE(str(exe))
+    entries = [(e.rva, e.type) for blk in getattr(pe, "DIRECTORY_ENTRY_BASERELOC", [])
+               for e in blk.entries]
+    return _reloc_targets_from(pe, entries) if entries else []
+
+
 def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
              code_sections: tuple[str, ...] = (".text",), max_rounds: int = 4) -> Path:
     """Run discovery; the compact catalog goes to `out`, the full one stays in GAMEFILES."""
@@ -70,6 +95,8 @@ def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
     pcr.run("tools/cpp/rtti.py", str(exe), "--seeds", str(s_rtti))
     pcr.run("tools/cpp/vtable_scan.py", str(exe), "--seeds", str(s_vt))
     rtti, vt = _seed_list(s_rtti), _seed_list(s_vt)
+    relocs = reloc_data_targets(exe) if ".text" in code_sections else []
+    extra_seeds = tuple(extra_seeds) + tuple(relocs)
     ranges = _ranges(exe, code_sections)
     inside = lambda a: any(lo <= a < hi for lo, hi in ranges)
     seeds = sorted({a for a in [*rtti, *vt, *extra_seeds] if inside(a)})
@@ -98,7 +125,7 @@ def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
     doc["exe"] = exe.name
     doc["bw2_seeds"] = {"rtti": len(rtti), "vtable": len(vt), "extra": len(extra_seeds),
                         "used": len(seeds), "code_sections": list(code_sections),
-                        "rounds": rounds, "gap_seeds": len(added)}
+                        "rounds": rounds, "gap_seeds": len(added), "reloc_seeds": len(relocs)}
     full.write_text(json.dumps(doc, indent=0))
     from .releases import sha256_file
     return compact_catalog(full, out, sha256_file(exe))

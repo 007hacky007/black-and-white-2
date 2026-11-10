@@ -77,3 +77,19 @@ def test_committed_catalog_loads():
     fs = load_functions(p)
     assert len(fs) == json.loads(p.read_text())["stats"]["functions"]
     assert set(fs[0]) >= {"address", "end", "entry_kind", "is_thunk"}
+
+
+def test_reloc_data_targets_only_from_data_sections(tmp_path):
+    import struct
+    from bw2.discover import reloc_data_targets
+    from fixtures import CODE, DATA, make_pe
+    raw = make_pe([(".text", b"\xc3" * 32, CODE), (".data", struct.pack("<II", 0x401010, 0x12345678), DATA)],
+                  {}, 0x1000)
+    # add a base-relocation block by hand: one HIGHLOW at .data+0 and one at .text+4
+    import pefile
+    p = tmp_path / "r.dll"
+    p.write_bytes(raw)
+    pe = pefile.PE(str(p))
+    assert reloc_data_targets(p) == []          # no reloc table yet
+    from bw2.discover import _reloc_targets_from
+    assert _reloc_targets_from(pe, [(0x2000, 3), (0x1004, 3)]) == [0x401010]
