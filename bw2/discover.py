@@ -16,6 +16,7 @@ import pefile
 from capstone import x86
 
 from . import pcr
+from .catclean import clean_full, seed_classes
 from .gaps import code_seeds, gaps
 from .paths import GAMEFILES
 
@@ -91,7 +92,7 @@ def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
     exe, out = Path(exe).resolve(), Path(out).resolve()
     work = GAMEFILES / "discover"
     work.mkdir(parents=True, exist_ok=True)
-    s_rtti, s_vt = work / "seeds_rtti.json", work / "seeds_vtable.json"
+    s_rtti, s_vt = work / f"{out.stem}.seeds_rtti.json", work / f"{out.stem}.seeds_vtable.json"
     pcr.run("tools/cpp/rtti.py", str(exe), "--seeds", str(s_rtti))
     pcr.run("tools/cpp/vtable_scan.py", str(exe), "--seeds", str(s_vt))
     rtti, vt = _seed_list(s_rtti), _seed_list(s_vt)
@@ -100,7 +101,7 @@ def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
     ranges = _ranges(exe, code_sections)
     inside = lambda a: any(lo <= a < hi for lo, hi in ranges)
     seeds = sorted({a for a in [*rtti, *vt, *extra_seeds] if inside(a)})
-    merged = work / ("seeds_" + "_".join(s.strip(".") for s in code_sections) + ".json")
+    merged = work / f"{out.stem}.seeds_used.json"
     merged.write_text(json.dumps(seeds))
     view = code_view(exe, code_sections, work / ("view_" + "_".join(s.strip(".") for s in code_sections) + ".exe"))
     log = work / (out.stem + ".log")
@@ -127,6 +128,8 @@ def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
                         "used": len(seeds), "code_sections": list(code_sections),
                         "rounds": rounds, "gap_seeds": len(added), "reloc_seeds": len(relocs)}
     full.write_text(json.dumps(doc, indent=0))
+    merged.write_text(json.dumps(sorted(set(seeds) | set(added))))
+    clean_full(full, exe, *seed_classes(rtti, vt, extra_seeds, added))
     from .releases import sha256_file
     return compact_catalog(full, out, sha256_file(exe))
 

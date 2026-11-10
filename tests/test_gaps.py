@@ -55,3 +55,25 @@ def test_reseed_adds_function(tmp_path, monkeypatch):
     starts = {f["address"] for f in disc_mod.load_functions(out)}
     assert 0x401020 in starts
     assert json.loads(out.read_text())["bw2_seeds"]["rounds"] >= 2
+
+
+def test_discover_cleans_catalog(tmp_path, monkeypatch):
+    monkeypatch.setattr(disc_mod, "GAMEFILES", tmp_path / "gf")
+    exe = _exe(tmp_path, b"\x33\xc0\xc3" + b"\xcc" * 13)
+    monkeypatch.setattr(disc_mod, "code_seeds", lambda g: [])
+    disc_mod.discover(exe, tmp_path / "cat.json")
+    full = json.loads((tmp_path / "gf" / "discover" / "cat.full.json").read_text())
+    assert full["bw2_clean"]["after"] == len(full["functions"])
+
+
+def test_discover_keeps_seed_files_per_module(tmp_path, monkeypatch):
+    # The DLL's run used to overwrite white.exe's seeds_*.json.
+    monkeypatch.setattr(disc_mod, "GAMEFILES", tmp_path / "gf")
+    exe = _exe(tmp_path, b"\x33\xc0\xc3" + b"\xcc" * 13)
+    monkeypatch.setattr(disc_mod, "code_seeds", lambda g: [])
+    disc_mod.discover(exe, tmp_path / "one.json")
+    disc_mod.discover(exe, tmp_path / "two.json")
+    work = tmp_path / "gf" / "discover"
+    for stem in ("one", "two"):
+        for kind in ("rtti", "vtable", "used"):
+            assert (work / f"{stem}.seeds_{kind}.json").exists(), (stem, kind)
