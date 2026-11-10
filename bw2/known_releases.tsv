@@ -7,3 +7,4 @@ disc	Black & White 2 (USA) (Disc 3)	782552736	17d65988484e085f6f6a2a90b75bff7252
 disc	Black & White 2 (USA) (Disc 4)	652846992	960f9a9f87017febaa6a230a04c09cc54265d3360e1518bc58f3fe9d6a9dbf58	redump bin
 patch-1.1	BW2Patch1_1.exe	111641849	dd90b3aa303f8dd7fff24e6d6afd77252a05f643f3a880770d37c62f628d3863	InstallShield 11 setup, RTPatch inside
 patch-1.2	BW2Patch1_2.exe	33336733	d2d907cd742289b722e4920563a7e37b2c1f3fefdf719b1c07c48a19dd6cd9fe	InstallShield 11 setup, RTPatch inside
+script-dll	ScriptLibraryR.dll 1.2	655360	f9670f04b8d4cf435cf71397927a17fa6dba0351a2596fdeb8723453600e84b3	from patch 1.2 ScriptDLL group
