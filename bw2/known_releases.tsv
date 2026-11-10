@@ -1,3 +1,7 @@
 # kind	name	size	sha256	note
 fanpatch-installer	B&W2 Fan Patch v1.42 Installer.exe	20266576	2bb875a10b8e10eaca2fcaee8be0e91bf037cda3af161e2700834e023a237bec	Inno Setup 6.0.0
 white-exe	white.exe 1.42	20828160	ca745211ac9c63c439493ff14fa27507c4b99d199af4fd2b48577bccfd851db2	from fan patch 1.42
+disc	Black & White 2 (USA) (Disc 1)	788886672	923833d0d0ab843eba1079da698b4e357232796b63db69edffe544293a9d4abe	redump bin
+disc	Black & White 2 (USA) (Disc 2)	782552736	d87878485e9852829a837e6ec5d01d1a6f96c84d4fbdd19a55d3c3958f0c0931	redump bin
+disc	Black & White 2 (USA) (Disc 3)	782552736	17d65988484e085f6f6a2a90b75bff72525b7fa58e7e2665c4edfca736b6b245	redump bin
+disc	Black & White 2 (USA) (Disc 4)	652846992	960f9a9f87017febaa6a230a04c09cc54265d3360e1518bc58f3fe9d6a9dbf58	redump bin
