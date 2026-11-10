@@ -1153,6 +1153,12 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
  * function whose first `je` tests the helper's ZF (Bunghole in One's ball
  * never moved). */
 
+/* bw2: loud failures. The host defines these; by default they print the guest
+ * address and abort. RECOMP_TRAP replaces the lifter's UNIMPLEMENTED comment. */
+void recomp_trap(uint32_t va, const char *mnem);
+void recomp_unresolved_icall(uint32_t va, uint32_t from);
+#define RECOMP_TRAP(va, mnem) recomp_trap((uint32_t)(va), (mnem))
+
 /* Direct call to a known recompiled function */
 #define RECOMP_CALL(func) do { \
     uint32_t _caller = g_cur_func; \
@@ -1187,8 +1193,7 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
          * `esp += 4` here shifted the caller's stack by one slot per miss. \
          * (Nocturne's CRT init runner lost its saved registers that way and \
          * skipped ~90 static constructors after its first unlifted entry.) */ \
-        fprintf(stderr, "ICALL: unresolved VA 0x%08X from 0x%08X\n", _va, g_cur_func); \
-        eax = 0; \
+        recomp_unresolved_icall(_va, g_cur_func); /* bw2: replaces a print that returned zero */ \
     } \
 } while(0)
 
@@ -1205,7 +1210,7 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
     if (_fn) { RECOMP_FLAGS_OUT(); RECOMP_REGS_OUT(); _fn(); RECOMP_REGS_IN(); } \
     else if (_va == RECOMP_RETADDR) { /* setjmp and friends return by jumping \
         to the saved return address; that is a return, not a missing target. */ } \
-    else { fprintf(stderr, "ITAIL: unresolved VA 0x%08X from 0x%08X\n", _va, g_cur_func); } \
+    else { recomp_unresolved_icall(_va, g_cur_func); /* bw2: replaces a print */ } \
 } while(0)
 
 /* `push target; ret` (Lifter dos=True): a jump to a computed address. Its own

@@ -14,3 +14,28 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "gamefiles" in item.keywords:
             item.add_marker(skip)
+
+
+REPO = Path(__file__).resolve().parents[1]
+_PCR_TOOLS = REPO / "third_party" / "pcrecomp" / "tools"
+
+
+@pytest.fixture
+def lifted_c(tmp_path):
+    """lifted_c(pe_bytes, va) -> C text of the function at va, lifted by pcrecomp."""
+    for sub in ("pe", "disasm", "lift"):
+        p = str(_PCR_TOOLS / sub)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    from pe_analyze import analyze_pe, build_iat_map
+    from disasm32 import Disassembler
+    from lift32 import Lifter
+
+    def lift(pe_bytes: bytes, va: int) -> str:
+        exe = tmp_path / f"lift_{va:x}.exe"
+        exe.write_bytes(pe_bytes)
+        info = analyze_pe(str(exe))
+        iat = build_iat_map(info)
+        dis = Disassembler(pe_bytes, info.image_base, info.sections)
+        return Lifter(iat_map=iat, func_names={}).lift_function(dis.disassemble_function(va, iat))
+    return lift

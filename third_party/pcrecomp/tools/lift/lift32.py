@@ -2173,7 +2173,9 @@ class Lifter:
         else:
             # A null statement, not a bare comment: this may be the only thing
             # after a label, and C requires a label to be followed by a statement.
-            lines.append(f"; /* UNIMPLEMENTED: {insn.mnemonic} {insn.op_str} */ {comment}")
+            # bw2: a trap, not a comment, so an instruction the lifter lacks stops the
+            # run and names its address instead of being skipped silently.
+            lines.append(f'RECOMP_TRAP(0x{insn.address:08X}, "{insn.mnemonic}"); {comment}')
 
         return lines
 

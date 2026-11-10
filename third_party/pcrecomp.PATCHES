@@ -1,0 +1,3 @@
+# Changes on top of pcrecomp 2adc02f. One line each: file - what - why.
+tools/lift/lift32.py, tools/lift/lift32_sse.py - emit RECOMP_TRAP(va, "mnem") instead of the UNIMPLEMENTED comment - lifter gaps must stop the run and name the address (difftest 374/375 before and after; sse.sqrtps fails before and after)
+runtime/recomp32/recomp_types.h - declare recomp_trap/recomp_unresolved_icall, RECOMP_TRAP macro; unresolved ICALL/ITAIL call recomp_unresolved_icall instead of printing and returning 0 - no silent eax = 0 (spec anti-goal: fail loudly)

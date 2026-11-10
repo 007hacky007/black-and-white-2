@@ -287,7 +287,10 @@ def lift_sse(L, m, ops, comment):
     # Anything else with an xmm operand is counted, never handed back: lift32's
     # MMX forms share these mnemonics (psrlq, pcmpeqd) and would lift the xmm
     # register as "unknown reg", a silent wrong value instead of a counted gap.
-    return [f"; /* UNIMPLEMENTED: {m} */ {comment}"]
+    # bw2: trap with the address (taken from the comment, which starts with it).
+    import re as _re
+    _va = _re.search(r"0x([0-9A-Fa-f]{8})", comment)
+    return [f'RECOMP_TRAP(0x{_va.group(1).upper() if _va else "00000000"}, "{m}"); {comment}']
 
 
 def _bitwise(fmt, di, src, comment):
