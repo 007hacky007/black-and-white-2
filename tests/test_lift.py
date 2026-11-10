@@ -101,3 +101,21 @@ def test_dispatch_sorted_and_reproducible(tmp_path):
     assert "const uint32_t bw2_entry_va = 0x00401000u;" in d
     for f in ("recomp_dispatch.c", "recomp_funcs.h", "recomp_unresolved.c", "link.json"):
         assert (tmp_path / "x" / f).read_bytes() == (tmp_path / "y" / f).read_bytes(), f
+
+
+def test_huge_function_gets_own_cold_shard(tmp_path):
+    # white.exe 0xB84D70 lifts to ~152k lines; clang -O1 ran over 28 minutes on it.
+    exe, cat = _module(tmp_path)
+    out = tmp_path / "gen"
+    m = lift_module("game", exe, cat, out, (".text",), cold_lines=0)
+    assert sorted(p.name for p in out.glob("game_*.c")) == [
+        "game_cold_00401000.c", "game_cold_00401006.c"]
+    assert m.cold == ["game_cold_00401000.c", "game_cold_00401006.c"]
+    assert "void sub_00401000(void)" in (out / "game_cold_00401000.c").read_text()
+    assert m.functions == 2
+
+
+def test_normal_functions_stay_in_shards(tmp_path):
+    exe, cat = _module(tmp_path)
+    m = lift_module("game", exe, cat, tmp_path / "gen", (".text",))
+    assert m.cold == [] and m.shards == 1

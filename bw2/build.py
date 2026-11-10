@@ -9,6 +9,7 @@ from pathlib import Path
 from .paths import REPO
 
 RECOMP32 = REPO / "third_party" / "pcrecomp" / "runtime" / "recomp32"
+COLD_OPT = "-O0"          # for <module>_cold_<va>.c, see lift.COLD_LINES
 FLAGS = ("-fno-strict-aliasing", "-mcpu=apple-m1", "-mmacosx-version-min=13.0", "-w")
 OPT_LEVELS = ("-O0", "-O1", "-O2", "-O3", "-Os")
 
@@ -70,9 +71,10 @@ def build(gen_dir: Path, out: Path, opt: str = "-O2", jobs: int | None = None,
     for stale in obj_dir.glob("*.part"):
         stale.unlink()
     sdk = sdk_path()
-    cflags = [opt, *FLAGS, "-isysroot", str(sdk), "-I", str(RECOMP32), "-I", str(gen_dir)]
+    cflags = [*FLAGS, "-isysroot", str(sdk), "-I", str(RECOMP32), "-I", str(gen_dir)]
+    level = lambda src: COLD_OPT if "_cold_" in src.stem else opt
     stamp = obj_dir / "flags.txt"
-    stamp_text = " ".join([str(clang), *cflags]) + "\n"
+    stamp_text = " ".join([str(clang), opt, COLD_OPT, *cflags]) + "\n"
     flags_changed = not stamp.exists() or stamp.read_text() != stamp_text
     sources = sorted(gen_dir.glob("*.c")) + [Path(host)]
     objects = [obj_dir / (s.stem + ".o") for s in sources]
@@ -84,7 +86,7 @@ def build(gen_dir: Path, out: Path, opt: str = "-O2", jobs: int | None = None,
     def compile_one(job):
         src, obj = job
         part = obj.with_name(obj.name + ".part")
-        r = subprocess.run([str(clang), "-c", *cflags, str(src), "-o", str(part)],
+        r = subprocess.run([str(clang), "-c", level(src), *cflags, str(src), "-o", str(part)],
                            capture_output=True, text=True)
         if r.returncode != 0 or not part.exists() or part.stat().st_size == 0:
             part.unlink(missing_ok=True)

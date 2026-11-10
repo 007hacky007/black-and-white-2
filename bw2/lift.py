@@ -4,7 +4,7 @@ import re
 import sys
 import time
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .discover import code_view, load_functions
@@ -17,6 +17,9 @@ for _sub in ("pe", "disasm", "lift"):
 
 SYM = re.compile(r"\bsub_[0-9A-F]{8}\b")
 TRAP = re.compile(r'RECOMP_TRAP\(0x[0-9A-F]{8}, "([^"]+)"\)')
+# A function this long goes to its own shard, which build() compiles at -O0: clang -O1
+# ran over 28 minutes on white.exe 0xB84D70 (~152k lines), -O0 takes 8 s.
+COLD_LINES = 50_000
 HEADER = '#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "recomp_funcs.h"\n\n'
 
 
@@ -30,6 +33,7 @@ class ModuleLift:
     defined: list
     referenced: list
     seconds: float
+    cold: list = field(default_factory=list)
 
 
 def _tools(exe: Path):
@@ -49,7 +53,8 @@ def _write(path: Path, text: str) -> None:
 
 
 def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
-                code_sections: tuple = (".text",), shard_size: int = 500) -> ModuleLift:
+                code_sections: tuple = (".text",), shard_size: int = 500,
+                cold_lines: int = COLD_LINES) -> ModuleLift:
     t0 = time.time()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -59,7 +64,7 @@ def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
     dis, lifter, iat = _tools(view)
     starts = sorted({f["address"] for f in load_functions(catalog) if f.get("entry_kind") != "alias"})
     defined, referenced, traps = [], set(), Counter()
-    shards, c_bytes, chunk = 0, 0, []
+    shards, c_bytes, chunk, cold = 0, 0, [], []
 
     def flush():
         nonlocal shards, c_bytes, chunk
@@ -78,13 +83,20 @@ def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
         defined.append(sym)
         referenced.update(s for s in SYM.findall(code) if s != sym)
         traps.update(TRAP.findall(code))
+        if code.count("\n") > cold_lines:
+            fname = f"{name}_cold_{va:08X}.c"
+            text = HEADER + code
+            _write(out_dir / fname, text)
+            c_bytes += len(text.encode())
+            cold.append(fname)
+            continue
         chunk.append(code)
         if len(chunk) >= shard_size:
             flush()
     if chunk:
         flush()
     m = ModuleLift(name, len(defined), shards, c_bytes, dict(sorted(traps.items())),
-                   defined, sorted(referenced), round(time.time() - t0, 1))
+                   defined, sorted(referenced), round(time.time() - t0, 1), cold)
     doc = {k: v for k, v in asdict(m).items() if k != "seconds"}   # reproducible
     _write(out_dir / f"{name}.json", json.dumps(doc, indent=0, sort_keys=True))
     return m

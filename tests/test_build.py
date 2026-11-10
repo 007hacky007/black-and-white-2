@@ -77,3 +77,14 @@ def test_lifted_module_compiles_and_links(tmp_path):
     st = build(g, tmp_path / "lc")
     r = subprocess.run([str(st.binary)], capture_output=True, text=True)
     assert r.returncode == 0 and "4 functions" in r.stdout, r.stdout + r.stderr
+
+
+def test_cold_shard_compiled_without_optimisation(tmp_path):
+    g = _gen(tmp_path)
+    plain = build(g, tmp_path / "lc0", opt="-O2").objects
+    (g / "w_cold_00403000.c").write_text("#ifdef __OPTIMIZE__\n#error optimised\n#endif\nint w_cold_marker;\n")
+    st = build(g, tmp_path / "lc", opt="-O2")
+    assert st.objects == plain + 1
+    (g / "w_0001.c").write_text("#ifdef __OPTIMIZE__\n#error optimised\n#endif\n" + SHARD.format(s="sub_00402000"))
+    with pytest.raises(BuildError, match="w_0001.c"):
+        build(g, tmp_path / "lc", opt="-O2")
