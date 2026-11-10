@@ -40,7 +40,8 @@ def test_unknown_group_is_an_error(tmp_path):
 
 @pytest.mark.gamefiles
 def test_install_tree_complete():
-    discs = {n: paths.GAMEFILES / "discs" / f"Black & White 2 (USA) (Disc {n}).bin"
+    from bw2.disc import unpacked_bin
+    discs = {n: unpacked_bin(paths.discs_dir() / f"Black & White 2 (USA) (Disc {n}).zip")
              for n in range(1, 5)}
     out = extract_install(discs, paths.GAMEFILES / "install")
     have = {p.relative_to(out).as_posix(): p for p in out.rglob("*") if p.is_file()}
@@ -52,3 +53,22 @@ def test_install_tree_complete():
     from bw2.releases import sha256_file
     bad = [r for r, (s, h) in want.items() if sha256_file(have[r]) != h]
     assert bad == []
+
+
+def test_extract_install_checks_space_before_writing(tmp_path, monkeypatch):
+    import shutil as _sh
+    from collections import namedtuple
+    from bw2 import disc as _disc
+    from bw2.diskspace import NotEnoughSpace
+    from fixtures import make_iso
+    g = tmp_path / "gamefiles"
+    monkeypatch.setattr(install, "GAMEFILES", g)
+    monkeypatch.setattr(_disc, "GAMEFILES", g)
+    files = {f.upper(): b"x" * 4096 for f in install.IS_FILES}
+    iso = make_iso(tmp_path, files)
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(_sh, "disk_usage", lambda p: Usage(10**12, 0, 10**6))
+    with pytest.raises(NotEnoughSpace) as ei:
+        extract_install({1: iso}, g / "install")
+    assert "need" in str(ei.value)
+    assert not g.exists() or not any(p.is_file() for p in g.rglob("*"))

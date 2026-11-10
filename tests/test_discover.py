@@ -58,3 +58,22 @@ def test_seed_list_reads_pcrecomp_and_plain_formats(tmp_path):
     p.write_text(json.dumps([{"address": 4198528, "address_hex": "0x00401080", "note": "x"},
                              "0x401090", 4198576]))
     assert _seed_list(p) == [0x401080, 0x401090, 0x4010B0]
+
+
+def test_compact_catalog_reads_like_full(tmp_path):
+    from bw2.discover import compact_catalog
+    exe = _exe(tmp_path)
+    full = _catalog(tmp_path, [(0x401000, 0x401006), (0x401004, 0x40100c)],
+                    {"rtti": 3, "vtable": 5, "extra": 0})
+    small = compact_catalog(full, tmp_path / "small.json", sha256="ab" * 32)
+    assert coverage(small, exe) == coverage(full, exe)
+    assert opcode_mix(small, exe) == opcode_mix(full, exe)
+
+
+def test_committed_catalog_loads():
+    from bw2 import paths
+    from bw2.discover import load_functions
+    p = paths.REPO / "bw2" / "catalog" / "white-1.42.functions.json"
+    fs = load_functions(p)
+    assert len(fs) == json.loads(p.read_text())["stats"]["functions"]
+    assert set(fs[0]) >= {"address", "end", "entry_kind", "is_thunk"}

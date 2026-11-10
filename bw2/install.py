@@ -9,7 +9,8 @@ import subprocess
 from pathlib import Path
 
 from . import disc
-from .paths import GAMEFILES
+from .diskspace import ensure_free
+from .paths import GAMEFILES, REPO
 from .releases import sha256_file
 
 
@@ -84,8 +85,34 @@ def gather(discs: dict[int, Path], dest: Path) -> Path:
     return dest
 
 
-def extract_install(discs: dict[int, Path], out: Path = GAMEFILES / "install") -> Path:
-    is_dir = gather(discs, GAMEFILES / "is")
+MANIFEST = REPO / "bw2" / "manifests" / "install-usa.tsv"
+
+
+def _tree_bytes(root: Path) -> int:
+    return sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) if root.exists() else 0
+
+
+def needed_bytes(discs: dict[int, Path], out: Path, is_dir: Path) -> int:
+    """Cabinets still to copy, plus the new tree, plus the old tree kept until the swap."""
+    cabs = 0
+    for n in sorted(discs):
+        with disc.open_disc(discs[n]) as d:
+            for e in disc.list_files(d):
+                name = e.path.lower()
+                if not e.is_dir and "/" not in name and name in IS_FILES:
+                    t = is_dir / name
+                    if not (t.exists() and t.stat().st_size == e.size):
+                        cabs += e.size
+    total_cabs = cabs + _tree_bytes(is_dir)
+    tree = sum(s for s, _ in read_manifest(MANIFEST).values()) if MANIFEST.exists() else 0
+    return cabs + max(tree, total_cabs) + _tree_bytes(out)
+
+
+def extract_install(discs: dict[int, Path], out: Path | None = None) -> Path:
+    out = GAMEFILES / "install" if out is None else out
+    is_dir = GAMEFILES / "is"
+    ensure_free(GAMEFILES, needed_bytes(discs, out, is_dir))
+    is_dir = gather(discs, is_dir)
     part = out.with_name(out.name + ".part")
     shutil.rmtree(part, ignore_errors=True)
     raw = part / "_groups"

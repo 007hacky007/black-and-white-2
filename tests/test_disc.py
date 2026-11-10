@@ -120,3 +120,55 @@ def test_real_disc1_has_installshield():
 def test_real_discs_identify():
     bins = [disc.unpacked_bin(_real_zip(n)) for n in range(1, 5)]
     assert sorted(identify_discs(bins)) == [1, 2, 3, 4]
+
+
+def test_truncated_raw_image_raises_not_hangs(iso, tmp_path):
+    cue = iso_to_bincue(iso)
+    b = cue.with_suffix(".bin")
+    b.write_bytes(b.read_bytes()[: 2352 * 18])
+    with open_disc(cue) as d:
+        with pytest.raises(DiscFormatError, match="LBA"):
+            d.read(17, 3 * 2048)
+
+
+def test_truncated_iso_extract_raises_and_leaves_nothing(iso, tmp_path):
+    with open_disc(iso) as d:
+        e = find(list_files(d), "sub/data1.cab")
+    iso.write_bytes(iso.read_bytes()[: (e.lba + 2) * 2048])
+    dest = tmp_path / "cab"
+    with open_disc(iso) as d:
+        with pytest.raises(DiscFormatError):
+            extract(d, e, dest)
+    assert not dest.exists() and not dest.with_name("cab.part").exists()
+
+
+def test_zips_with_same_inner_names_do_not_collide(tmp_path, gamefiles):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a = make_iso(tmp_path / "a", {"A.TXT": b"a" * 3000})
+    b = make_iso(tmp_path / "b", {"B.TXT": b"b" * 3000})
+    za = zip_bincue(iso_to_bincue(a, stem="game"))
+    zb = zip_bincue(iso_to_bincue(b, stem="game"))
+    za = za.rename(tmp_path / "Disc A.zip")
+    zb = zb.rename(tmp_path / "Disc B.zip")
+    with open_disc(za) as d:
+        assert find(list_files(d), "a.txt")
+    with open_disc(zb) as d:
+        assert find(list_files(d), "b.txt")
+
+
+def test_whole_set_space_checked_before_any_unpack(iso, tmp_path, gamefiles, monkeypatch):
+    zips = []
+    for n in (1, 2):
+        (tmp_path / f"s{n}").mkdir()
+        i = make_iso(tmp_path / f"s{n}", {f"F{n}.TXT": bytes([n]) * 5000})
+        zips.append(zip_bincue(iso_to_bincue(i, stem=f"d{n}")))
+    import zipfile
+    sizes = [sum(i.file_size for i in zipfile.ZipFile(z).infolist()) for z in zips]
+    Usage = namedtuple("Usage", "total used free")
+    # the first disc alone fits, the set does not
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: Usage(10**12, 0, sizes[0] + 1))
+    with pytest.raises(NotEnoughSpace) as ei:
+        identify_discs(zips, releases=[])
+    assert f"need {sum(sizes)} bytes" in str(ei.value)
+    assert not gamefiles.exists() or not any(p.is_file() for p in gamefiles.rglob("*"))

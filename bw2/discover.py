@@ -59,8 +59,9 @@ def _seed_list(path: Path) -> list[int]:
     return out
 
 
-def discover(exe: Path, out: Path, extra_seeds: list[int] = [],
-             code_sections: list[str] = [".text"]) -> Path:
+def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
+             code_sections: tuple[str, ...] = (".text",)) -> Path:
+    """Run discovery; the compact catalog goes to `out`, the full one stays in GAMEFILES."""
     exe, out = Path(exe).resolve(), Path(out).resolve()
     work = GAMEFILES / "discover"
     work.mkdir(parents=True, exist_ok=True)
@@ -75,18 +76,44 @@ def discover(exe: Path, out: Path, extra_seeds: list[int] = [],
     merged.write_text(json.dumps(seeds))
     view = code_view(exe, code_sections, work / ("view_" + "_".join(s.strip(".") for s in code_sections) + ".exe"))
     log = work / (out.stem + ".log")
+    full = work / (out.stem + ".full.json")
     r = pcr.run("tools/disasm/disasm32.py", str(view), "--seed-functions", str(merged),
-                "-o", str(out), check=False)
+                "-o", str(full), check=False)
     log.write_text(r.stdout + r.stderr)
     if r.returncode != 0:
         raise RuntimeError(f"disasm32 failed, see {log}")
-    doc = json.loads(out.read_text())
+    doc = json.loads(full.read_text())
     doc["exe"] = exe.name
     doc["bw2_seeds"] = {"rtti": len(rtti), "vtable": len(vt), "extra": len(extra_seeds),
-                        "used": len(seeds), "code_sections": code_sections}
-    for f in doc["functions"]:
-        f.pop("blocks", None)  # facts only: never instruction bytes
-    out.write_text(json.dumps(doc, indent=0))
+                        "used": len(seeds), "code_sections": list(code_sections)}
+    full.write_text(json.dumps(doc, indent=0))
+    from .releases import sha256_file
+    return compact_catalog(full, out, sha256_file(exe))
+
+
+COMPACT_COLUMNS = ["address", "end", "entry_kind", "is_thunk"]
+
+
+def load_functions(catalog: Path) -> list[dict]:
+    """Functions from a full disasm32 catalog or from our compact one."""
+    doc = json.loads(Path(catalog).read_text())
+    if doc.get("columns"):
+        cols = doc["columns"]
+        return [dict(zip(cols, row)) for row in doc["functions"]]
+    return doc["functions"]
+
+
+def compact_catalog(full: Path, out: Path, sha256: str) -> Path:
+    """The committed form: address, end, entry kind, thunk flag. No bytes, no names."""
+    doc = json.loads(Path(full).read_text())
+    small = {"exe": doc.get("exe"), "sha256": sha256, "image_base": doc.get("image_base"),
+             "stats": doc.get("stats"), "bw2_seeds": doc.get("bw2_seeds"),
+             "columns": COMPACT_COLUMNS,
+             "functions": [[f["address"], f["end"], f["entry_kind"], int(f["is_thunk"])]
+                           for f in doc["functions"]]}
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(small, separators=(",", ":")))
     return out
 
 
@@ -111,11 +138,12 @@ def _union(intervals):
 
 def coverage(catalog: Path, exe: Path) -> Coverage:
     doc = json.loads(Path(catalog).read_text())
+    fs = load_functions(catalog)
     (lo, hi), = _ranges(exe, [".text"])
-    iv = [(max(f["address"], lo), min(f["end"], hi)) for f in doc["functions"]]
+    iv = [(max(f["address"], lo), min(f["end"], hi)) for f in fs]
     covered = sum(b - a for a, b in _union([(a, b) for a, b in iv if b > a]))
-    s = doc.get("bw2_seeds", {})
-    return Coverage(hi - lo, covered, len(doc["functions"]), s.get("rtti", 0), s.get("vtable", 0))
+    s = doc.get("bw2_seeds") or {}
+    return Coverage(hi - lo, covered, len(fs), s.get("rtti", 0), s.get("vtable", 0))
 
 
 _GROUPS = [(x86.X86_GRP_FPU, "x87"), (x86.X86_GRP_SSE1, "sse"), (x86.X86_GRP_SSE2, "sse2"),
@@ -124,14 +152,14 @@ _GROUPS = [(x86.X86_GRP_FPU, "x87"), (x86.X86_GRP_SSE1, "sse"), (x86.X86_GRP_SSE
 
 
 def opcode_mix(catalog: Path, exe: Path) -> dict[str, int]:
-    doc = json.loads(Path(catalog).read_text())
+    fs = load_functions(catalog)
     pe = pefile.PE(str(exe), fast_load=True)
     base = pe.OPTIONAL_HEADER.ImageBase
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
     md.detail = True
     mix = collections.Counter({k: 0 for k in ("x87", "sse", "sse2", "mmx", "3dnow", "other")})
     mnem = collections.Counter()
-    for lo, hi in _union([(f["address"], f["end"]) for f in doc["functions"] if f["end"] > f["address"]]):
+    for lo, hi in _union([(f["address"], f["end"]) for f in fs if f["end"] > f["address"]]):
         code = pe.get_data(lo - base, hi - lo)
         pos = 0
         while pos < len(code):

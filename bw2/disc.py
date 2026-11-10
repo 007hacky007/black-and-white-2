@@ -29,14 +29,23 @@ class DiscImage:
         self._size, self._off = sector_size, data_offset
         self.sectors = self.path.stat().st_size // sector_size
 
+    def _short(self, lba: int) -> DiscFormatError:
+        return DiscFormatError(f"{self.path.name}: image ends early (short read at LBA {lba})")
+
     def read_sector(self, lba: int) -> bytes:
         self._f.seek(lba * self._size + self._off)
-        return self._f.read(COOKED)
+        data = self._f.read(COOKED)
+        if len(data) < COOKED:
+            raise self._short(lba)
+        return data
 
     def read(self, lba: int, length: int) -> bytes:
         if self._size == COOKED:
             self._f.seek(lba * COOKED)
-            return self._f.read(length)
+            data = self._f.read(length)
+            if len(data) < length:
+                raise self._short(lba + len(data) // COOKED)
+            return data
         out = bytearray()
         while len(out) < length:
             out += self.read_sector(lba)
@@ -65,18 +74,29 @@ def _parse_cue(cue: Path) -> Path:
     return cue.with_name(files[0])
 
 
-def unpacked_bin(zpath: Path) -> Path:
-    """Unpack a zipped BIN/CUE once into GAMEFILES/discs and return the .bin."""
+def _zip_plan(zf: zipfile.ZipFile, zpath: Path):
+    """(targets, still-to-unpack) for a zipped BIN/CUE; one folder per zip."""
+    members = [i for i in zf.infolist() if not i.is_dir()]
+    bins = [i for i in members if i.filename.lower().endswith(".bin")]
+    cues = [i for i in members if i.filename.lower().endswith(".cue")]
+    if len(bins) != 1 or len(cues) != 1:
+        raise DiscFormatError(f"{zpath.name}: expected one .bin and one .cue")
+    out = GAMEFILES / "discs" / Path(zpath).stem
+    targets = [(i, out / Path(i.filename).name) for i in (cues[0], bins[0])]
+    todo = [(i, t) for i, t in targets if not (t.exists() and t.stat().st_size == i.file_size)]
+    return targets, todo
+
+
+def pending_unpack_bytes(zpath: Path) -> int:
     with zipfile.ZipFile(zpath) as zf:
-        members = [i for i in zf.infolist() if not i.is_dir()]
-        bins = [i for i in members if i.filename.lower().endswith(".bin")]
-        cues = [i for i in members if i.filename.lower().endswith(".cue")]
-        if len(bins) != 1 or len(cues) != 1:
-            raise DiscFormatError(f"{zpath.name}: expected one .bin and one .cue")
-        out = GAMEFILES / "discs"
-        targets = [(i, out / Path(i.filename).name) for i in (cues[0], bins[0])]
-        todo = [(i, t) for i, t in targets
-                if not (t.exists() and t.stat().st_size == i.file_size)]
+        return sum(i.file_size for i, _ in _zip_plan(zf, zpath)[1])
+
+
+def unpacked_bin(zpath: Path) -> Path:
+    """Unpack a zipped BIN/CUE once into GAMEFILES/discs/<zip stem>/ and return the .bin."""
+    with zipfile.ZipFile(zpath) as zf:
+        targets, todo = _zip_plan(zf, zpath)
+        out = targets[1][1].parent
         if todo:
             ensure_free(out, sum(i.file_size for i, _ in todo))
             out.mkdir(parents=True, exist_ok=True)
@@ -165,21 +185,30 @@ def extract(disc: DiscImage, entry: IsoEntry, dest: Path) -> None:
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
-    with open(part, "wb") as f:
-        left, lba = entry.size, entry.lba
-        while left > 0:
-            n = min(left, 512 * COOKED)
-            f.write(disc.read(lba, n))
-            left -= n
-            lba += n // COOKED
-    part.rename(dest)
+    try:
+        with open(part, "wb") as f:
+            left, lba = entry.size, entry.lba
+            while left > 0:
+                n = min(left, 512 * COOKED)
+                f.write(disc.read(lba, n))
+                left -= n
+                lba += n // COOKED
+        if part.stat().st_size != entry.size:
+            raise DiscFormatError(f"{entry.path}: wrote {part.stat().st_size} of {entry.size} bytes")
+        part.rename(dest)
+    finally:
+        part.unlink(missing_ok=True)
 
 
 def identify_discs(paths: list[Path], releases: list[Release] | None = None) -> dict[int, Path]:
     """Map disc number (1-4) to image. Zips and cues resolve to their .bin."""
+    paths = [Path(p) for p in paths]
+    zips = [p for p in paths if p.suffix.lower() == ".zip"]
+    if zips:
+        ensure_free(GAMEFILES / "discs", sum(pending_unpack_bytes(z) for z in zips))
     found: dict[int, list[Path]] = {}
     unknown = []
-    for p in map(Path, paths):
+    for p in paths:
         b = unpacked_bin(p) if p.suffix.lower() == ".zip" else (
             _parse_cue(p) if p.suffix.lower() == ".cue" else p)
         rel = identify(b, kind="disc", releases=releases)
