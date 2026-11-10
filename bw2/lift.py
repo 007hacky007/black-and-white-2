@@ -96,3 +96,31 @@ def lift_one(exe: Path, va: int, code_sections: tuple = (".text",)) -> str:
         view = code_view(exe, list(code_sections), Path(td) / "view.exe")
         dis, lifter, iat = _tools(view)
         return lifter.lift_function(dis.disassemble_function(va, iat))
+
+
+def link_tables(out_dir: Path, modules: list, entry: int) -> dict:
+    """One header, one dispatch table and loud stubs for targets nothing lifted."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    defined = sorted({s for m in modules for s in m.defined})
+    dset = set(defined)
+    unresolved = sorted({s for m in modules for s in m.referenced} - dset)
+    va = lambda s: int(s[4:], 16)
+    hdr = ["#pragma once", "#include <stdint.h>", "",
+           "void recomp_unresolved_call(uint32_t va);", "extern const uint32_t bw2_entry_va;", ""]
+    hdr += [f"void {s}(void);" for s in sorted(defined + unresolved, key=va)]
+    _write(out_dir / "recomp_funcs.h", "\n".join(hdr) + "\n")
+    disp = ['#include "recomp_types.h"', '#include "recomp_funcs.h"', "",
+            "const recomp_dispatch_entry_t recomp_dispatch_table[] = {"]
+    disp += [f"    {{ 0x{va(s):08X}u, {s} }}," for s in sorted(defined, key=va)]
+    disp += ["};", f"const uint32_t recomp_dispatch_count = {len(defined)};",
+             f"const uint32_t bw2_entry_va = 0x{entry:08X}u;", ""]
+    _write(out_dir / "recomp_dispatch.c", "\n".join(disp))
+    stubs = ['#include <stdint.h>', '#include "recomp_funcs.h"', ""]
+    stubs += [f"void {s}(void) {{ recomp_unresolved_call(0x{va(s):08X}u); }}"
+              for s in sorted(unresolved, key=va)]
+    _write(out_dir / "recomp_unresolved.c", "\n".join(stubs) + "\n")
+    result = {"functions": len(defined), "unresolved": unresolved,
+              "modules": sorted(m.name for m in modules)}
+    _write(out_dir / "link.json", json.dumps(result, indent=0, sort_keys=True))
+    return result

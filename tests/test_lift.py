@@ -66,3 +66,38 @@ def test_interrupted_shard_not_reused(tmp_path):
 def test_lift_one(tmp_path):
     exe, _ = _module(tmp_path)
     assert "RECOMP_CALL(sub_00401006)" in lift_one(exe, 0x401000)
+
+
+def _ml(name, defined, referenced):
+    from bw2.lift import ModuleLift
+    return ModuleLift(name, len(defined), 1, 0, {}, defined, referenced, 0.0)
+
+
+def test_cross_module_call_resolves(tmp_path):
+    from bw2.lift import link_tables
+    a = _ml("a", ["sub_00401000"], ["sub_00402000", "sub_00401100"])
+    b = _ml("b", ["sub_00402000"], [])
+    r = link_tables(tmp_path, [a, b], entry=0x401000)
+    stubs = (tmp_path / "recomp_unresolved.c").read_text()
+    assert "sub_00402000" not in stubs
+    assert r["unresolved"] == ["sub_00401100"]
+
+
+def test_unresolved_gets_loud_stub(tmp_path):
+    from bw2.lift import link_tables
+    link_tables(tmp_path, [_ml("a", ["sub_00401000"], ["sub_00401100"])], entry=0x401000)
+    stubs = (tmp_path / "recomp_unresolved.c").read_text()
+    assert "void sub_00401100(void) { recomp_unresolved_call(0x00401100u); }" in stubs
+    assert "void recomp_unresolved_call(uint32_t va);" in (tmp_path / "recomp_funcs.h").read_text()
+
+
+def test_dispatch_sorted_and_reproducible(tmp_path):
+    from bw2.lift import link_tables
+    mods = [_ml("b", ["sub_00402000"], []), _ml("a", ["sub_00401000", "sub_00400500"], [])]
+    link_tables(tmp_path / "x", mods, entry=0x401000)
+    link_tables(tmp_path / "y", list(reversed(mods)), entry=0x401000)
+    d = (tmp_path / "x" / "recomp_dispatch.c").read_text()
+    assert d.index("0x00400500u") < d.index("0x00401000u") < d.index("0x00402000u")
+    assert "const uint32_t bw2_entry_va = 0x00401000u;" in d
+    for f in ("recomp_dispatch.c", "recomp_funcs.h", "recomp_unresolved.c", "link.json"):
+        assert (tmp_path / "x" / f).read_bytes() == (tmp_path / "y" / f).read_bytes(), f
