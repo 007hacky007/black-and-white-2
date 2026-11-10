@@ -16,6 +16,7 @@ import pefile
 from capstone import x86
 
 from . import pcr
+from .gaps import code_seeds, gaps
 from .paths import GAMEFILES
 
 EXEC_FLAGS = 0x20000020  # IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE
@@ -60,7 +61,7 @@ def _seed_list(path: Path) -> list[int]:
 
 
 def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
-             code_sections: tuple[str, ...] = (".text",)) -> Path:
+             code_sections: tuple[str, ...] = (".text",), max_rounds: int = 4) -> Path:
     """Run discovery; the compact catalog goes to `out`, the full one stays in GAMEFILES."""
     exe, out = Path(exe).resolve(), Path(out).resolve()
     work = GAMEFILES / "discover"
@@ -77,15 +78,27 @@ def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
     view = code_view(exe, code_sections, work / ("view_" + "_".join(s.strip(".") for s in code_sections) + ".exe"))
     log = work / (out.stem + ".log")
     full = work / (out.stem + ".full.json")
-    r = pcr.run("tools/disasm/disasm32.py", str(view), "--seed-functions", str(merged),
-                "-o", str(full), check=False)
-    log.write_text(r.stdout + r.stderr)
-    if r.returncode != 0:
-        raise RuntimeError(f"disasm32 failed, see {log}")
+    rounds, added = 0, []
+    while True:
+        rounds += 1
+        merged.write_text(json.dumps(sorted(set(seeds) | set(added))))
+        r = pcr.run("tools/disasm/disasm32.py", str(view), "--seed-functions", str(merged),
+                    "-o", str(full), check=False)
+        log.write_text(r.stdout + r.stderr)
+        if r.returncode != 0:
+            raise RuntimeError(f"disasm32 failed, see {log}")
+        if ".text" not in code_sections or rounds >= max_rounds:
+            break
+        have = {f["address"] for f in load_functions(full)}
+        new = [a for a in code_seeds(gaps(full, exe)) if a not in have and a not in added]
+        if not new:
+            break
+        added += new
     doc = json.loads(full.read_text())
     doc["exe"] = exe.name
     doc["bw2_seeds"] = {"rtti": len(rtti), "vtable": len(vt), "extra": len(extra_seeds),
-                        "used": len(seeds), "code_sections": list(code_sections)}
+                        "used": len(seeds), "code_sections": list(code_sections),
+                        "rounds": rounds, "gap_seeds": len(added)}
     full.write_text(json.dumps(doc, indent=0))
     from .releases import sha256_file
     return compact_catalog(full, out, sha256_file(exe))
