@@ -900,6 +900,20 @@ class Lifter:
             # everything the arithmetic flags derive from, so hand it over.
             lines.append(f"PUSH32(esp, recomp_eflags(_flag_k, _flag_a, _flag_b, _cf, _df)); {comment}")
 
+        elif m == 'pushf':
+            # bw2: 66 9C, the 16-bit form (the BW2 protection VM uses it): the low
+            # word of the same EFLAGS image pushfd pushes.
+            lines.append(f"PUSH16(esp, (uint16_t)recomp_eflags(_flag_k, _flag_a, _flag_b, _cf, _df)); {comment}")
+
+        elif m == 'popf':
+            # bw2: 66 9D. Replaces the low word only; the high word (ID, AC, VM...)
+            # comes from the current image, as on hardware.
+            lines.append(f"{{ uint32_t _fl = (recomp_eflags(_flag_k, _flag_a, _flag_b, _cf, _df) & 0xFFFF0000u)"
+                         f" | (uint32_t)POP16_VAL(esp); {comment}")
+            lines.append(f"  _flag_k = FK_EFLAGS; _flag_a = _fl; _flag_b = 0;")
+            lines.append(f"  _cf = _fl & 1u; _df = (_fl & 0x400u) ? -1 : 1; }}")
+            self._flag_state = None
+
         elif m == 'popfd':
             lines.append(f"{{ uint32_t _fl = POP32_VAL(esp); {comment}")
             lines.append(f"  _flag_k = FK_EFLAGS; _flag_a = _fl; _flag_b = 0;")

@@ -478,6 +478,16 @@ CASES = [
          # std; pushfd; cld; popfd; lodsb -- DF decides which way esi moves.
          bytes.fromhex('fd9cfc9dac'), undef=('CF', 'PF', 'AF', 'ZF', 'SF', 'OF')),
 
+    # bw2: the ID bit (21) has to survive pushfd/popfd, and the 16-bit forms
+    # (66 9C / 66 9D) that the BW2 protection VM uses must lift at all.
+    Case('pushfd.id-roundtrip',
+         # pushfd; or dword [esp], 0x200000; popfd; pushfd; pop ecx
+         bytes.fromhex('9c810c24000020009d9c59')),
+    Case('pushf16.after-cmp', bytes.fromhex('39c8669c6659'), {'eax': 1, 'ecx': 0x12340002}),
+    Case('popf16.restores-cf',
+         # stc; pushf; clc; popf; adc ebx, 0
+         bytes.fromhex('f9669cf8669d83d300'), {'ebx': 0}),
+
     # --- memory operands, so the comparison covers stores too ---
     Case('store', bytes.fromhex('8906'), {'eax': 0xAABBCCDD}),          # mov [esi], eax
     Case('add.mem', bytes.fromhex('0106'), mem={SCRATCH: (0x11).to_bytes(4, 'little')}),
@@ -926,6 +936,9 @@ int      g_fp_top;
 uint16_t g_fpu_cw = 0x027F;
 uint16_t g_seg_cs, g_seg_ds, g_seg_es, g_seg_fs, g_seg_gs, g_seg_ss;
 uint32_t g_fs_base, g_gs_base, g_cur_func;
+/* bw2: the loud-failure hooks the lifted code may call */
+void recomp_trap(uint32_t va, const char *m) { fprintf(stderr, "TRAP 0x%%08X %%s\n", va, m); abort(); }
+void recomp_unresolved_icall(uint32_t va, uint32_t from) { fprintf(stderr, "ICALL 0x%%08X from 0x%%08X\n", va, from); abort(); }
 uint64_t g_mm[8];
 xmm_t    g_xmm[8];
 uint32_t g_mxcsr = 0x1F80;

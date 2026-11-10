@@ -26,3 +26,8 @@ def test_unresolved_icall_calls_hook():
         assert "eax = 0" not in body, name
     assert "void recomp_trap(uint32_t va, const char *mnem);" in text
     assert "#define RECOMP_TRAP(va, mnem)" in text
+
+
+def test_pushf_lifts_without_trap(lifted_c):
+    c = lifted_c(make_pe([(".text", b"\x9c\x66\x9c\x66\x9d\x9d\xc3", CODE)], {}, 0x1000), 0x401000)
+    assert "RECOMP_TRAP" not in c, c
