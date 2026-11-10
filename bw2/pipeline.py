@@ -1,6 +1,6 @@
 """Lift the game, the VM interpreter and ScriptLibraryR.dll, then build the link check.
 
-    python -m bw2.pipeline [--opt O2] [--lift-only] [--build-only]
+    python -m bw2.pipeline [--opt O3] [--lift-only] [--build-only]
 """
 import argparse
 import json
@@ -45,7 +45,7 @@ def load_lifted(gen: Path) -> list[ModuleLift]:
 
 
 def run_pipeline(gen: Path = REPO / "gen", out: Path = REPO / "out" / "bw2-linkcheck",
-                 opt: str = "-O2", lift: bool = True, do_build: bool = True) -> dict:
+                 opt: str = "-O3", lift: bool = True, do_build: bool = True) -> dict:
     t0 = time.time()
     mods = lift_all(gen) if lift else load_lifted(gen)
     link = link_tables(gen, mods, entry=ENTRY)
@@ -65,7 +65,7 @@ def run_pipeline(gen: Path = REPO / "gen", out: Path = REPO / "out" / "bw2-linkc
 
 def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="python -m bw2.pipeline")
-    ap.add_argument("--opt", default="-O2", type=lambda v: v if v.startswith("-") else "-" + v,
+    ap.add_argument("--opt", default="-O3", type=lambda v: v if v.startswith("-") else "-" + v,
                     help="O1, O2 or O3 (or --opt=-O3)")
     ap.add_argument("--lift-only", action="store_true")
     ap.add_argument("--build-only", action="store_true")

@@ -88,3 +88,27 @@ def test_cold_shard_compiled_without_optimisation(tmp_path):
     (g / "w_0001.c").write_text("#ifdef __OPTIMIZE__\n#error optimised\n#endif\n" + SHARD.format(s="sub_00402000"))
     with pytest.raises(BuildError, match="w_0001.c"):
         build(g, tmp_path / "lc", opt="-O2")
+
+
+def test_header_change_recompiles_everything(tmp_path):
+    # Review: an edited header (e.g. MEM32 in recomp_types.h) must not reuse stale objects.
+    g = _gen(tmp_path)
+    first = build(g, tmp_path / "lc")
+    h = g / "recomp_funcs.h"
+    h.write_text(h.read_text() + "/* changed */\n")
+    again = build(g, tmp_path / "lc")
+    assert again.compiled == again.objects == first.objects
+
+
+def test_signed_overflow_wraps_like_x86(tmp_path):
+    # Review: lifted imul is (int32_t)a * (int32_t)b; x86 code overflows on purpose
+    # (hashes, LCGs), and without -fwrapv clang -O3 may assume it cannot.
+    from bw2.build import FLAGS, sdk_path
+    src = tmp_path / "w.c"
+    src.write_text("#include <limits.h>\n"
+                   "__attribute__((noinline)) int gt(int x) { return x + 1 > x; }\n"
+                   "int main(void) { return gt(INT_MAX); }\n")
+    exe = tmp_path / "w"
+    subprocess.run([str(check_tools()), "-O3", *FLAGS, "-isysroot", str(sdk_path()), str(src),
+                    "-o", str(exe)], check=True)
+    assert subprocess.run([str(exe)]).returncode == 0

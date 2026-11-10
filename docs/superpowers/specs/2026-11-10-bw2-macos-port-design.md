@@ -264,11 +264,11 @@ of all 49,323 function starts produces 458 MB of C (NFSU2: 137 MB); compile
 time on the user's Mac is the first thing the lifter plan measures. The game
 also loads a second module, `PlugIns/ScriptLibraryR.dll` (32-bit, replaced by
 patch 1.2), which must be lifted too. **Plan 1, measured:** after the
-catalog cleanup (`bw2/catclean.py`), the lift is 46,853 `white` functions
-(251 MB of C), 228 VM functions (19 MB) and 1,876 DLL functions (15 MB). The
-link set has 48,957 functions and 5 wild unresolved targets. The lift takes
-about 86 s; the -O3 build takes 69 s of wall time (503 s CPU) on an M1 Pro,
-with a 1.55 GB peak, 177 MB of objects and a 91 MB link-check binary. The one
+catalog cleanup (`bw2/catclean.py`), the lift is 47,179 `white` functions
+(253 MB of C), 228 VM functions (19 MB) and 1,876 DLL functions (15 MB). The
+link set has 49,283 functions and 5 wild unresolved targets. The lift takes
+about 88 s; the -O3 build takes 79 s of wall time (506 s CPU) on an M1 Pro,
+with a 1.60 GB peak, 181 MB of objects and a 92 MB link-check binary. The one
 152k-line function (`0xB84D70`) is compiled at -O0 in its own cold shard. See
 `docs/research/build-pipeline.md`.
 

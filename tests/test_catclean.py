@@ -152,3 +152,32 @@ def test_clean_full_updates_function_count(tmp_path):
     clean_full(full, exe)
     doc = json.loads(full.read_text())
     assert doc["stats"]["functions"] == len(doc["functions"]) == 1
+
+
+def test_untrusted_walk_does_not_alias():
+    # Review: an unaligned, uncalled, unseeded start is the garbage class itself;
+    # its walk must not turn the entries it runs into (363 on white.exe) into aliases.
+    blob = b"\x90" + PUSH * 2 + b"\x6a\x00" * 3 + PUSH + b"\xc3"
+    junk = BASE + 1
+    label_a = BASE + 11                     # unaligned, after push
+    label_b = BASE + 16                     # aligned, weak seed, after push 0
+    fns = [_fn(BASE, junk), _fn(junk, label_a), _fn(label_a, label_b),
+           _fn(label_b, BASE + len(blob))]
+    fns[0]["entry_kind"] = "alias"          # keep the aligned BASE out of the walk
+    out = _by(_run(blob, fns, weak=[label_b]))
+    assert out[label_a]["entry_kind"] == "start"
+    assert out[label_b]["entry_kind"] == "start"
+
+
+def test_reclean_refuses_cleaned_catalog_without_uncleaned_copy(tmp_path):
+    import json
+    import pytest
+    from bw2.catclean import main
+    from fixtures import CODE, make_pe
+    exe = tmp_path / "x.exe"
+    exe.write_bytes(make_pe([(".text", PUSH + b"\xc3", CODE)], {}, 0x1000))
+    full = tmp_path / "f.full.json"
+    full.write_text(json.dumps({"code_start": 0x401000, "code_end": 0x401006, "bw2_clean": {},
+                                "functions": [_fn(0x401000, 0x401006)]}))
+    with pytest.raises(SystemExit, match="uncleaned"):
+        main([str(full), str(exe), str(tmp_path / "out.json")])

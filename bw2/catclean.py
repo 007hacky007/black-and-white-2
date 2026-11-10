@@ -95,7 +95,8 @@ def _fold_into_bodies(fns, read_va, code_start, code_end, strong) -> None:
         if start in walked or f["entry_kind"] == "alias" or inside(start):
             continue
         walked.add(start)
-        trusted = start in protected or start % 16 == 0
+        if not (start in protected or start % 16 == 0):
+            continue                     # an untrusted body is evidence of nothing
         prev = None
         for ins in _walk(read_va, start, code_end, md):
             a = ins.address
@@ -110,10 +111,9 @@ def _fold_into_bodies(fns, read_va, code_start, code_end, strong) -> None:
                 else:
                     fns[a]["entry_kind"] = "alias"
                     walked.add(a)
-            if trusted:
-                lo = max(ins.address + 1, code_start)
-                hi = min(ins.address + ins.size, code_end)
-                interior[lo - code_start:hi - code_start] = b"\x01" * max(0, hi - lo)
+            lo = max(ins.address + 1, code_start)
+            hi = min(ins.address + ins.size, code_end)
+            interior[lo - code_start:hi - code_start] = b"\x01" * max(0, hi - lo)
             prev = ins
     for a in list(fns):
         if inside(a) and a not in protected:
@@ -179,8 +179,9 @@ def clean_full(full: Path, exe: Path, seeds=frozenset(), weak_seeds=frozenset())
 def main(argv=None) -> int:
     """Re-clean an existing full catalog without rerunning discovery.
 
-    Seeds are seed_classes() of the RTTI and vtable scans plus any --seeds file; the gap seeds of
-    the original run are not recorded, so they get no protection here.
+    Seeds are seed_classes() of the RTTI and vtable scans, --seeds (strong) and
+    --gap-seeds (weak). Catalogs discovered before seeds_gap.json existed have
+    no gap-seed record, so their gap seeds get no protection.
     """
     import argparse
     import shutil
@@ -194,7 +195,10 @@ def main(argv=None) -> int:
     ap.add_argument("full", type=Path)
     ap.add_argument("exe", type=Path)
     ap.add_argument("out", type=Path)
-    ap.add_argument("--seeds", type=Path, action="append", default=[])
+    ap.add_argument("--seeds", type=Path, action="append", default=[],
+                    help="strong seeds (explicit evidence, e.g. the VM thunk targets)")
+    ap.add_argument("--gap-seeds", type=Path, action="append", default=[],
+                    help="weak seeds, e.g. <stem>.seeds_gap.json from discover()")
     a = ap.parse_args(argv)
     found = {}
     with tempfile.TemporaryDirectory() as td:
@@ -203,9 +207,13 @@ def main(argv=None) -> int:
             pcr.run(tool, str(a.exe.resolve()), "--seeds", str(s))
             found[name] = _seed_list(s)
     extra = [x for s in a.seeds for x in _seed_list(s)]
-    seeds, weak = seed_classes(found["rtti"], found["vt"], extra)
+    gap = [x for s in a.gap_seeds for x in _seed_list(s)]
+    seeds, weak = seed_classes(found["rtti"], found["vt"], extra, gap)
+    # discover() writes this copy on every run, so it is always the latest discovery.
     backup = a.full.with_suffix(".uncleaned.json")
     if not backup.exists():
+        if "bw2_clean" in json.loads(a.full.read_text()):
+            raise SystemExit(f"{a.full} is already cleaned and has no uncleaned copy; rerun discovery")
         shutil.copyfile(a.full, backup)
     shutil.copyfile(backup, a.full)
     stats = clean_full(a.full, a.exe, seeds, weak)

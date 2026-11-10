@@ -129,6 +129,8 @@ def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
                         "rounds": rounds, "gap_seeds": len(added), "reloc_seeds": len(relocs)}
     full.write_text(json.dumps(doc, indent=0))
     merged.write_text(json.dumps(sorted(set(seeds) | set(added))))
+    (work / f"{out.stem}.seeds_gap.json").write_text(json.dumps(sorted(added)))
+    full.with_suffix(".uncleaned.json").write_text(full.read_text())
     clean_full(full, exe, *seed_classes(rtti, vt, extra_seeds, added))
     from .releases import sha256_file
     return compact_catalog(full, out, sha256_file(exe))

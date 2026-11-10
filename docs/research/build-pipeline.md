@@ -10,11 +10,11 @@ No game code runs.
 
 | module | source | functions lifted | shards | C | traps | lift |
 |---|---|---|---|---|---|---|
-| `white` | `white.exe` `.text` | 46,853 | 94 + 1 cold | 251.3 MB | 99 | 75.8 s |
+| `white` | `white.exe` `.text` | 47,179 | 95 + 1 cold | 252.9 MB | 100 | 77.8 s |
 | `vm` | `white.exe` `stxt774` + `.name0` | 228 | 1 | 18.8 MB | 0 | 5.1 s |
 | `slr` | `ScriptLibraryR.dll` 1.2 `.text` | 1,876 | 4 | 15.2 MB | 39 | 4.6 s |
 
-Link set: 48,957 functions, 5 unresolved direct targets. All five are wild
+Link set: 49,283 functions, 5 unresolved direct targets. All five are wild
 addresses outside any image (`0x347DB478`, `0x47239E12`, `0x83B279A0`,
 `0xC76E37E3`, `0xDDBD7AA5`), so they come from data decoded as code. Each one
 gets a stub that aborts loudly.
@@ -25,7 +25,7 @@ re-cleaned; that happens on its next discovery run.
 
 ### Traps by mnemonic
 
-`white`: int 17, iretd 14, insd 13, insb 11, int1 9, aad 8, cli 4, lcall 4,
+`white`: int 17, iretd 14, insd 13, insb 11, int1 10, aad 8, cli 4, lcall 4,
 salc 4, aam 3, fldenv 2, fnstenv 2, hlt 2, fbld 1, fbstp 1, into 1, invlpg 1,
 pinsrw 1, sti 1.
 
@@ -65,15 +65,16 @@ some of them mid-instruction, and each one lifted as a near-full copy.
 
    RTTI seeds are 99.8% 16-byte aligned. Vtable-scan-only seeds are 73%.
 3. It walks each trusted body straight on, with no instruction cap. A body
-   is trusted if it is called, strongly seeded, or aligned. disasm32's own
-   walk stops after about 8k instructions.
+   is trusted if it is called, strongly seeded, or aligned. Untrusted bodies
+   are not walked at all. disasm32's own walk stops after about 8k
+   instructions.
    - An uncalled entry the walk falls into becomes an alias. After a `call`,
      this applies only if the entry is unaligned.
    - An entry inside one of the walk's instructions is dropped.
 
 Effect on `white`: 65,747 catalog entries became 64,473, and aliases went
-from 16,247 to 17,620. The lift went from 461 MB to 251 MB, traps from 212
-to 99, and unresolved targets from 10 to 5.
+from 16,247 to 17,294. The lift went from 461 MB to 253 MB, traps from 212
+to 100, and unresolved targets from 10 to 5.
 
 If one of these rules is wrong, a real function that is only reached through
 a data pointer and sits inside another body becomes an alias or is dropped.
@@ -106,18 +107,27 @@ nothing noticeable.
 `/usr/bin/time -l python -m bw2.pipeline --build-only --opt O3`, from a clean
 `gen/obj`:
 
-- 103 objects compiled; build step 69.3 s.
-- 69.45 s wall, 503.2 s user, 11.6 s sys.
-- Maximum resident set 1.55 GB. This is `time`'s figure for the largest
+- 104 objects compiled; build step 79.2 s.
+- 79.38 s wall, 506.2 s user, 12.3 s sys.
+- Maximum resident set 1.60 GB. This is `time`'s figure for the largest
   child process, the cold shard's clang.
-- Objects 177 MB; `out/bw2-linkcheck` is 91.3 MB.
-- Output: `linkcheck: 48957 functions, entry 0x00AD8FA3 -> found`.
+- Objects 181 MB; `out/bw2-linkcheck` is 91.8 MB.
+- Output: `linkcheck: 49283 functions, entry 0x00AD8FA3 -> found`.
 
-A full lift of all three modules takes about 86 s. Lift plus build from
-scratch takes about 2.6 minutes. That is in line with the spec's budget,
+`FLAGS` include `-fwrapv`. Lifted `imul` multiplies as `int32_t`, and x86
+code overflows on purpose, so signed overflow must wrap rather than be
+undefined behaviour at -O3. The build stamp hashes the headers and the host
+source, so editing `recomp_types.h` recompiles everything.
+
+A full lift of all three modules takes about 88 s. Lift plus build from
+scratch takes about 2.8 minutes. That is in line with the spec's budget,
 NFSU2's roughly 2 minutes for 2.3x less code.
 
-## Known performance item
+## Known items for later plans
+
+The cold shard's host function has a 557 KB stack frame at -O0. That is
+above macOS's 512 KB default for secondary threads, so guest threads need
+large stacks (plan 3).
 
 pcrecomp's `MEM8`/`MEM16`/`MEM32` cast through `volatile`. That forces every
 guest memory access to be a real load or store, so clang cannot keep values

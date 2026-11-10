@@ -77,3 +77,17 @@ def test_discover_keeps_seed_files_per_module(tmp_path, monkeypatch):
     for stem in ("one", "two"):
         for kind in ("rtti", "vtable", "used"):
             assert (work / f"{stem}.seeds_{kind}.json").exists(), (stem, kind)
+
+
+def test_discover_keeps_uncleaned_catalog_and_gap_seeds(tmp_path, monkeypatch):
+    # Review: catclean's backup must follow each new discovery, and the gap seeds
+    # must be recorded so a re-clean can keep them weak.
+    monkeypatch.setattr(disc_mod, "GAMEFILES", tmp_path / "gf")
+    text = b"\xc3".ljust(0x20, b"\xcc") + b"\x33\xc0\x40\x40\xc3" + b"\xcc" * 11
+    exe = _exe(tmp_path, text)
+    monkeypatch.setattr(disc_mod, "code_seeds", lambda g: [0x401020])
+    disc_mod.discover(exe, tmp_path / "cat.json")
+    work = tmp_path / "gf" / "discover"
+    raw = json.loads((work / "cat.full.uncleaned.json").read_text())
+    assert "bw2_clean" not in raw and raw["functions"]
+    assert json.loads((work / "cat.seeds_gap.json").read_text()) == [0x401020]

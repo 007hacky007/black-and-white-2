@@ -1,4 +1,5 @@
 """Compile lifted shards with clang in parallel and link them with a host."""
+import hashlib
 import os
 import subprocess
 import time
@@ -10,7 +11,7 @@ from .paths import REPO
 
 RECOMP32 = REPO / "third_party" / "pcrecomp" / "runtime" / "recomp32"
 COLD_OPT = "-O0"          # for <module>_cold_<va>.c, see lift.COLD_LINES
-FLAGS = ("-fno-strict-aliasing", "-mcpu=apple-m1", "-mmacosx-version-min=13.0", "-w")
+FLAGS = ("-fno-strict-aliasing", "-fwrapv", "-mcpu=apple-m1", "-mmacosx-version-min=13.0", "-w")
 OPT_LEVELS = ("-O0", "-O1", "-O2", "-O3", "-Os")
 
 
@@ -59,7 +60,7 @@ def _tail(text: str, n: int = 40) -> str:
     return "\n".join(text.splitlines()[-n:])
 
 
-def build(gen_dir: Path, out: Path, opt: str = "-O2", jobs: int | None = None,
+def build(gen_dir: Path, out: Path, opt: str = "-O3", jobs: int | None = None,
           host: Path = REPO / "runtime" / "bw2" / "linkcheck.c") -> BuildStats:
     if opt not in OPT_LEVELS:
         raise ValueError(f"optimisation level must be one of {OPT_LEVELS}, got {opt!r}")
@@ -74,7 +75,10 @@ def build(gen_dir: Path, out: Path, opt: str = "-O2", jobs: int | None = None,
     cflags = [*FLAGS, "-isysroot", str(sdk), "-I", str(RECOMP32), "-I", str(gen_dir)]
     level = lambda src: COLD_OPT if "_cold_" in src.stem else opt
     stamp = obj_dir / "flags.txt"
-    stamp_text = " ".join([str(clang), opt, COLD_OPT, *cflags]) + "\n"
+    # Headers are not in the mtime check, so their content is in the stamp.
+    inputs = sorted([*gen_dir.glob("*.h"), *Path(RECOMP32).glob("*.h"), Path(host)])
+    digest = hashlib.sha256(b"".join(p.name.encode() + b"\0" + p.read_bytes() for p in inputs)).hexdigest()
+    stamp_text = " ".join([str(clang), opt, COLD_OPT, *cflags, digest]) + "\n"
     flags_changed = not stamp.exists() or stamp.read_text() != stamp_text
     sources = sorted(gen_dir.glob("*.c")) + [Path(host)]
     objects = [obj_dir / (s.stem + ".o") for s in sources]
