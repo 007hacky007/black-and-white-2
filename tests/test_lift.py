@@ -27,7 +27,7 @@ def test_lift_module_writes_shards_and_json(tmp_path):
     m = lift_module("game", exe, cat, out, (".text",))
     c = (out / "game_0000.c").read_text()
     assert "void sub_00401000(void)" in c and "void sub_00401006(void)" in c
-    assert c.startswith('#include "recomp_types.h"\n#include "recomp_funcs.h"\n')
+    assert c.startswith('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "recomp_funcs.h"\n')
     doc = json.loads((out / "game.json").read_text())
     assert doc["defined"] == ["sub_00401000", "sub_00401006"]
     assert "sub_00401100" in doc["referenced"]

@@ -17,7 +17,7 @@ for _sub in ("pe", "disasm", "lift"):
 
 SYM = re.compile(r"\bsub_[0-9A-F]{8}\b")
 TRAP = re.compile(r'RECOMP_TRAP\(0x[0-9A-F]{8}, "([^"]+)"\)')
-HEADER = '#include "recomp_types.h"\n#include "recomp_funcs.h"\n\n'
+HEADER = '#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "recomp_funcs.h"\n\n'
 
 
 @dataclass

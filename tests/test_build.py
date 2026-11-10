@@ -65,3 +65,15 @@ def test_tools_missing(monkeypatch):
     monkeypatch.setattr(build_mod.subprocess, "run", fake)
     with pytest.raises(ToolsMissing, match="xcode-select --install"):
         check_tools()
+
+
+def test_lifted_module_compiles_and_links(tmp_path):
+    from bw2.lift import lift_module
+    from test_lift import _module
+    exe, cat = _module(tmp_path, n_extra=2)
+    g = tmp_path / "gen"
+    m = lift_module("w", exe, cat, g, (".text",))
+    link_tables(g, [m], entry=0x401000)
+    st = build(g, tmp_path / "lc")
+    r = subprocess.run([str(st.binary)], capture_output=True, text=True)
+    assert r.returncode == 0 and "4 functions" in r.stdout, r.stdout + r.stderr
