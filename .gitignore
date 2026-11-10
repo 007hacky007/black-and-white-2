@@ -1,0 +1,10 @@
+# Game files and anything derived from them never go in the repo
+*.zip
+*.bin
+*.cue
+*.iso
+*.exe
+/gamefiles/
+/out/
+/gen/
+.DS_Store
