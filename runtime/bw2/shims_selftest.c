@@ -118,6 +118,14 @@ int main(void) {
         CHECK(call("CloseHandle", 1, MEM32(tok)) == 1);
     }
 
+    /* ws2_32 (by ordinal): no network stack; the game carries on offline */
+    {
+        uint32_t wsa = gmem(400);
+        CHECK(call("ws2_32.dll#115", 2, 0x202u, wsa) == 10091u);                    /* WSAStartup: WSASYSNOTREADY */
+        CHECK(call("ws2_32.dll#111", 0) == 10093u);                                 /* WSAGetLastError: not initialised */
+        CHECK(call("ws2_32.dll#116", 0) == 0xFFFFFFFFu);                            /* WSACleanup: SOCKET_ERROR */
+    }
+
     printf("shims selftest: %d failed\n", fails);
     return fails != 0;
 }
