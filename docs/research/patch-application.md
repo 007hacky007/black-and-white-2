@@ -91,11 +91,27 @@ new files phase 0 listed. Anything else stops the build.
 
 ## Verification
 
-Without a Windows reference, correctness rests on two checks:
+Without a Windows reference, correctness rests on a chain of checks. Each
+link is anchored either in a public reference or in the patch itself:
 
-1. **RTPatch's own verification of every file it writes.** It reports
+1. **The discs** match the redump hashes in `bw2/known_releases.tsv`, which
+   are an independent public reference.
+2. **The 1.0 install** extracted from them must match
+   `bw2/manifests/install-usa.tsv` (773 files) before any patch is applied.
+   The build stops on any changed, missing or extra file, which takes about
+   2 s. The manifest comes from our own extraction, but that extraction is
+   a deterministic unpack of the redump-verified discs.
+3. **The patch installers, `patchw32.dll`, both `.RTP` files and the fan
+   patch** each match a known size and SHA-256.
+4. **RTPatch's own verification of every file it writes.** It reports
    "Verifying - Passed" for all 78 patched files. It also refuses old files
    that are not the expected 1.0 bytes. The applier treats a missing or
    invalid old file as an error.
-2. **The committed manifest of the finished tree** (paths, sizes, SHA-256).
+5. **The committed manifest of the finished tree** (paths, sizes, SHA-256).
    Every later build must match it exactly, or it is not renamed into place.
+   It was written from our first build, so on its own it only catches drift.
+   What vouches for that first build is links 1-4: the 78 files RTPatch
+   wrote were verified against checksums inside the diffs. The 22 group
+   files and the fan `white.exe` were copied byte for byte from fingerprinted
+   installers. Their destinations come from the setups' own `data1.hdr`
+   (table above).

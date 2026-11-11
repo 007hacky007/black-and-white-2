@@ -46,12 +46,15 @@ def test_interrupted_build_not_reused(tmp_path, monkeypatch):
     stale.mkdir()
     (stale / "half-patched.bin").write_bytes(b"x")
 
+    im = tmp_path / "install.tsv"
+    write_manifest(install, im)
+
     def boom(*a, **k):
         raise RuntimeError("boom after the clone")
     monkeypatch.setattr(gametree, "patch_inputs", boom)
     with pytest.raises(RuntimeError, match="boom"):
         gametree.build_game_tree(install, tmp_path / "p11", tmp_path / "p12", tmp_path / "fan",
-                                 out=out, work=tmp_path / "work")
+                                 out=out, work=tmp_path / "work", install_manifest=im)
     assert not out.exists()
     assert not (stale / "half-patched.bin").exists()
 
@@ -105,3 +108,20 @@ def test_clonefile_clones_a_tree(tmp_path):
     (src / "sub" / "f.bin").write_bytes(b"xyz")
     assert gametree._clonefile(src, tmp_path / "b") is True     # tmp is on APFS here
     assert (tmp_path / "b" / "sub" / "f.bin").read_bytes() == b"xyz"
+
+
+def test_install_checked_before_patching(tmp_path, monkeypatch):
+    install = tmp_path / "install"
+    (install / "Data").mkdir(parents=True)
+    (install / "white.exe").write_bytes(b"MZ")
+    (install / "Data" / "a.txt").write_bytes(b"abc")
+    im = tmp_path / "install.tsv"
+    write_manifest(install, im)
+    (install / "Data" / "a.txt").write_bytes(b"abd")
+    called = []
+    monkeypatch.setattr(gametree, "patch_inputs", lambda *a, **k: called.append(a))
+    with pytest.raises(gametree.ManifestMismatch, match="Data/a.txt"):
+        gametree.build_game_tree(install, tmp_path / "p11", tmp_path / "p12", tmp_path / "fan",
+                                 out=tmp_path / "game", work=tmp_path / "work", install_manifest=im)
+    assert called == []
+    assert not (tmp_path / "game.part").exists() and not (tmp_path / "game").exists()

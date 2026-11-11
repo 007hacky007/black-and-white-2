@@ -1,5 +1,6 @@
 """Build the game data tree: 1.0 install + official 1.1 + 1.2 + fan patch 1.42 white.exe.
 
+The 1.0 install is checked against its committed manifest before anything is patched.
 The tree is built in `<out>.part` and renamed to `<out>` only after it matches the
 committed manifest, so an interrupted build is never mistaken for a finished one.
 
@@ -15,7 +16,7 @@ from pathlib import Path
 
 from .diskspace import ensure_free
 from .fanpatch import extract_fan_exe
-from .install import read_manifest, write_manifest
+from .install import MANIFEST as INSTALL_MANIFEST, read_manifest, write_manifest
 from .patches import patch_inputs
 from .paths import GAMEFILES, REPO
 from .releases import sha256_file
@@ -126,10 +127,13 @@ def verify_manifest(root: Path, tsv: Path) -> None:
 
 def build_game_tree(install: Path, patch11: Path, patch12: Path, fan_installer: Path,
                     out: Path = GAMEFILES / "game", work: Path = GAMEFILES / "patches",
-                    write: bool = False, manifest: Path = MANIFEST) -> Path:
+                    write: bool = False, manifest: Path = MANIFEST,
+                    install_manifest: Path = INSTALL_MANIFEST) -> Path:
     out, work = Path(out), Path(work)
     part = out.with_name(out.name + ".part")
     shutil.rmtree(part, ignore_errors=True)
+    verify_manifest(Path(install), install_manifest)   # the 1.0 files, before any patch touches them
+    print(f"[game] 1.0 install matches {install_manifest.name}", flush=True)
     clone_tree(Path(install), part)
     for kind, exe in (("patch-1.1", patch11), ("patch-1.2", patch12)):
         tag = kind.split("-")[1].replace(".", "_")
