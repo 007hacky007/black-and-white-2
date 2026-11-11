@@ -69,7 +69,7 @@ void d3d_fill_caps(uint32_t c) {
     MEM32(c + 0x20) = 0x2 | 0x10 | 0x20 | 0x40 | 0x80 | 0x200 | 0x400 | 0x800 | 0x4000 | 0x8000 | 0x10000 |
                       0x20000 | 0x80000;           /* PrimitiveMiscCaps */
     MEM32(c + 0x24) = 0x10 | 0x80 | 0x100 | 0x2000 | 0x10000 | 0x20000 | 0x200000 | 0x400000 | 0x1000000 |
-                      0x2000000 | 0x4000000;       /* RasterCaps: ZTEST, FOGVERTEX/TABLE/RANGE, LODBIAS, ANISOTROPY, ZFOG, SCISSOR, DEPTHBIAS */
+                      0x2000000 | 0x4000000 | 0x100000;   /* RasterCaps: ZTEST, FOGVERTEX/TABLE/RANGE, LODBIAS, ANISOTROPY, ZFOG, WFOG, SCISSOR, DEPTHBIAS */
     MEM32(c + 0x28) = 0xFF;                        /* ZCmpCaps */
     MEM32(c + 0x2C) = 0x3FFF;                      /* SrcBlendCaps */
     MEM32(c + 0x30) = 0x3FFF;                      /* DestBlendCaps */

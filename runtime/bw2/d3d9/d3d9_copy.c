@@ -32,7 +32,7 @@ static void dv_StretchRect(void) {         /* (this, src, RECT* src, dst, RECT* 
         struct mtl_target dst = { t->tex, t->slice, t->level };
         mtl_stretch(d->mtl, s->tex, s->f->swizzle, s->slice, s->level, &a, dst, &b, filter == 2);
     }
-    if (t->parent && t->parent->autogen && t->level == 0) mtl_tex_mipgen(d->mtl, t->tex);
+    if (t->parent && t->parent->autogen && t->level == 0) t->parent->mip_dirty = 1;
     RET(D3D_OK, 6);
 }
 
@@ -49,6 +49,7 @@ static void dv_ColorFill(void) {           /* (this, surface, RECT*, color) */
     mtl_set_targets(d->mtl, rt, none);
     struct mtl_rect mr = { (uint32_t)r.l, (uint32_t)r.t, (uint32_t)(r.r - r.l), (uint32_t)(r.b - r.t) };
     mtl_clear(d->mtl, 1, s->f->swizzle[3] == '1' ? A32(3) | 0xFF000000u : A32(3), 0, 0, &mr, 1);
+    if (s->parent && s->parent->autogen && s->level == 0) s->parent->mip_dirty = 1;
     d->st.dirty |= DIRTY_TARGET;                         /* the next draw puts the device's targets back */
     RET(D3D_OK, 4);
 }

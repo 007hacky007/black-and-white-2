@@ -11,13 +11,12 @@ static const uint32_t ONE_F = 0x3F800000u;
 
 void d3d_state_defaults(struct d3d_state *st, int auto_ds, uint32_t rt_w, uint32_t rt_h) {
     struct d3d_light *lights = st->lights;
-    uint32_t nl = st->nlights;
+    uint32_t capl = st->caplights;
     uint32_t keep_tex[NSMP], keep_stream[16], keep_ind = st->indices, keep_vdecl = st->vdecl;
     memcpy(keep_tex, st->tex, sizeof keep_tex);
     memcpy(keep_stream, st->stream, sizeof keep_stream);
     memset(st, 0, sizeof *st);
-    st->lights = lights, st->nlights = nl;
-    for (uint32_t i = 0; i < nl; i++) memset(&lights[i], 0, sizeof lights[i]);
+    st->lights = lights, st->caplights = capl, st->nlights = 0;        /* no lights set */
     memcpy(st->tex, keep_tex, sizeof keep_tex);           /* bindings are references: d3d_bind clears them */
     memcpy(st->stream, keep_stream, sizeof keep_stream);
     st->indices = keep_ind, st->vdecl = keep_vdecl;
@@ -74,7 +73,29 @@ void d3d_state_defaults(struct d3d_state *st, int auto_ds, uint32_t rt_w, uint32
     st->dirty = DIRTY_ALL;
 }
 
-void d3d_state_free(struct d3d_state *st) { free(st->lights); st->lights = NULL; st->nlights = 0; }
+void d3d_state_free(struct d3d_state *st) { free(st->lights); st->lights = NULL; st->nlights = st->caplights = 0; }
+
+struct d3d_light *d3d_light_at(struct d3d_state *st, uint32_t index, int create) {
+    uint32_t lo = 0, hi = st->nlights;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (st->lights[mid].index < index) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < st->nlights && st->lights[lo].index == index) return &st->lights[lo];
+    if (!create) return NULL;
+    if (st->nlights == st->caplights) {
+        uint32_t cap = st->caplights ? 2 * st->caplights : 8;
+        struct d3d_light *l = realloc(st->lights, sizeof *l * cap);
+        if (!l) d3d_fail("no memory for %u lights", cap);
+        st->lights = l, st->caplights = cap;
+    }
+    memmove(&st->lights[lo + 1], &st->lights[lo], sizeof *st->lights * (st->nlights - lo));
+    st->nlights++;
+    memset(&st->lights[lo], 0, sizeof st->lights[lo]);
+    st->lights[lo].index = index;
+    return &st->lights[lo];
+}
 
 /* Which group a render state belongs to, for dirty tracking. */
 static uint32_t rs_group(uint32_t s) {

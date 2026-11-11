@@ -49,7 +49,7 @@ static void vertex(struct sb *b, const struct ff_vkey *k) {
     put(b, "};\nstruct VOut {\n  float4 pos [[position]];\n");
     put(b, "  float4 c0%s;\n  float4 c1%s;\n", k->flat ? " [[flat]]" : "", k->flat ? " [[flat]]" : "");
     for (int i = 0; i < k->nstages; i++) put(b, "  float4 tc%d;\n", i);
-    put(b, "  float fog;\n");
+    put(b, "  float fog;\n  float fogz;\n");
     if (k->points) put(b, "  float psize [[point_size]];\n");
     if (k->nclip) put(b, "  float clip [[clip_distance]] [%d];\n", k->nclip);
     put(b, "};\n");
@@ -73,6 +73,8 @@ static void vertex(struct sb *b, const struct ff_vkey *k) {
                 k->normalize ? "  N = normalize(N);\n" : "");
         else put(b, "  float3 N = float3(0.0);\n");
     }
+    /* table fog's depth: eye-space w under a perspective projection (w-fog), else z */
+    put(b, "  o.fogz = %s;\n", k->wfog ? "o.pos.w" : "o.pos.z / o.pos.w");
     /* D3D9 puts pixel centres on integer coordinates: half a pixel to the right and down of Metal's */
     put(b, "  o.pos.xy += float2(u.vpz.z, -u.vpz.w) * o.pos.w;\n");
     if (k->lighting && !k->pretransformed) {
@@ -241,7 +243,7 @@ static void pixel(struct sb *b, const struct ff_pkey *k, const struct ff_vkey *v
     if (k->fog) {
         if (k->fog == 1) put(b, "  float f = in.fog;\n");
         else {
-            put(b, "  float fz = in.pos.z;\n");
+            put(b, "  float fz = in.fogz;\n");
             if (k->fog == 2) put(b, "  float f = exp(-fz * u.fog.z);\n");
             else if (k->fog == 3) put(b, "  float f = exp(-(fz * u.fog.z) * (fz * u.fog.z));\n");
             else put(b, "  float f = (u.fog.y - fz) / (u.fog.y - u.fog.x);\n");

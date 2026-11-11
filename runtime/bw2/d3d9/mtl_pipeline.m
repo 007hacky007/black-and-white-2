@@ -16,8 +16,13 @@ static NSMutableDictionary<NSData *, id<MTLRenderPipelineState>> *g_psos;
 static NSMutableDictionary<NSData *, id<MTLDepthStencilState>> *g_dss;
 static NSMutableDictionary<NSData *, id<MTLSamplerState>> *g_smps;
 static struct mtl_stats g_stats;
-static id<MTLBinaryArchive> g_archive;
-static NSURL *g_archive_url;
+/* The pipeline cache on disk: a directory of archives. Metal cannot add to an archive it loaded and
+ * save it again, so each session loads every archive there read-only and saves what it added as
+ * an archive of its own; past MAX_ARCHIVES files the cache starts again, cold. */
+#define MAX_ARCHIVES 8
+static NSMutableArray<id<MTLBinaryArchive>> *g_loaded;
+static id<MTLBinaryArchive> g_archive;             /* this session's additions */
+static NSURL *g_archive_dir;
 static int g_require_hits, g_archive_dirty;
 
 void mtl_get_stats(struct mtl_stats *s) { *s = g_stats; }
@@ -26,29 +31,47 @@ void mtl_archive_require_hits(int on) { g_require_hits = on; }
 static id<MTLDevice> dev0(void) { return MTLCreateSystemDefaultDevice(); }
 
 void mtl_archive_save(void) {
-    if (!g_archive || !g_archive_url || !g_archive_dirty) return;
+    if (!g_archive || !g_archive_dir || !g_archive_dirty) return;
     NSError *err = nil;
-    [[NSFileManager defaultManager] createDirectoryAtURL:[g_archive_url URLByDeletingLastPathComponent]
-                             withIntermediateDirectories:YES attributes:nil error:nil];
-    if (![g_archive serializeToURL:g_archive_url error:&err])
+    [[NSFileManager defaultManager] createDirectoryAtURL:g_archive_dir withIntermediateDirectories:YES
+                                              attributes:nil error:nil];
+    NSString *name = [NSString stringWithFormat:@"ff-%@.metalar", [[NSUUID UUID] UUIDString]];
+    NSURL *url = [g_archive_dir URLByAppendingPathComponent:name];
+    if (![g_archive serializeToURL:url error:&err])
         fprintf(stderr, "[bw2] metal: pipeline archive not saved: %s\n", err.description.UTF8String);
-    else g_archive_dirty = 0;
+    g_archive_dirty = 0;
+    /* what was saved is now one of the loaded archives; later additions start a new one */
+    MTLBinaryArchiveDescriptor *d = [MTLBinaryArchiveDescriptor new];
+    d.url = url;
+    id<MTLBinaryArchive> saved = [dev0() newBinaryArchiveWithDescriptor:d error:nil];
+    if (saved) [g_loaded addObject:saved];
+    g_archive = [dev0() newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:nil];
 }
 static void save_at_exit(void) { mtl_archive_save(); }
 
-void mtl_archive_open(const char *path) {
+void mtl_archive_open(const char *dir) {
     static int hooked;
     if (!hooked) { atexit(save_at_exit); hooked = 1; }
     mtl_archive_save();
-    g_archive_url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
-    MTLBinaryArchiveDescriptor *d = [MTLBinaryArchiveDescriptor new];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:g_archive_url.path]) d.url = g_archive_url;
-    NSError *err = nil;
-    g_archive = [dev0() newBinaryArchiveWithDescriptor:d error:&err];
-    if (!g_archive && d.url) {                         /* unreadable (another OS, another GPU): start again */
-        d.url = nil;
-        g_archive = [dev0() newBinaryArchiveWithDescriptor:d error:&err];
+    g_archive_dir = [NSURL fileURLWithPath:[NSString stringWithUTF8String:dir] isDirectory:YES];
+    g_loaded = [NSMutableArray array];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSURL *> *files = [fm contentsOfDirectoryAtURL:g_archive_dir includingPropertiesForKeys:nil options:0
+                                                     error:nil];
+    NSMutableArray<NSURL *> *archives = [NSMutableArray array];
+    for (NSURL *u in files) if ([u.pathExtension isEqualToString:@"metalar"]) [archives addObject:u];
+    if (archives.count > MAX_ARCHIVES) {
+        for (NSURL *u in archives) [fm removeItemAtURL:u error:nil];
+        [archives removeAllObjects];
     }
+    for (NSURL *u in archives) {
+        MTLBinaryArchiveDescriptor *d = [MTLBinaryArchiveDescriptor new];
+        d.url = u;
+        id<MTLBinaryArchive> a = [dev0() newBinaryArchiveWithDescriptor:d error:nil];
+        if (a) [g_loaded addObject:a];
+        else [fm removeItemAtURL:u error:nil];             /* unreadable (another OS, another GPU) */
+    }
+    g_archive = [dev0() newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:nil];
     g_archive_dirty = 0;
 }
 
@@ -213,7 +236,11 @@ static id<MTLRenderPipelineState> pipeline(MtlCtx *c, const struct ff_draw *d) {
     }
     if (key.vk.points) pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
     NSError *err = nil;
-    if (g_archive) pd.binaryArchives = @[ g_archive ];
+    if (g_archive) {
+        NSMutableArray *all = [NSMutableArray arrayWithArray:g_loaded];
+        [all addObject:g_archive];
+        pd.binaryArchives = all;
+    }
     if (g_archive && g_require_hits) {
         p = [c.dev newRenderPipelineStateWithDescriptor:pd options:MTLPipelineOptionFailOnBinaryArchiveMiss
                                              reflection:nil error:&err];
@@ -226,6 +253,7 @@ static id<MTLRenderPipelineState> pipeline(MtlCtx *c, const struct ff_draw *d) {
         abort();
     }
     if (g_archive && !g_require_hits) {
+        pd.binaryArchives = nil;                        /* the session's archive gets the functions themselves */
         if ([g_archive addRenderPipelineFunctionsWithDescriptor:pd error:&err]) g_archive_dirty = 1;
     }
     g_stats.pipelines++;

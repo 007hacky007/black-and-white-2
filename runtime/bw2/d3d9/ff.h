@@ -15,7 +15,7 @@ enum { VA_POSITION, VA_BLENDWEIGHT, VA_BLENDINDICES, VA_NORMAL, VA_PSIZE, VA_COL
 
 struct ff_vkey {
     uint8_t pretransformed, has_normal, has_diffuse, has_specular, lighting, normalize, localviewer, colorvertex;
-    uint8_t specular, fog_vertex, range_fog, fog_from_specular, nclip, points, flat, pad0;
+    uint8_t specular, fog_vertex, range_fog, fog_from_specular, nclip, points, flat, wfog;
     uint8_t mat_src[4];               /* diffuse, specular, ambient, emissive: 0 material, 1 color1, 2 color2 */
     uint8_t nlights, light_type[8];   /* the enabled lights, in index order: 1 point, 2 spot, 3 directional */
     uint8_t tex_comps[8];             /* components of each vertex texcoord set (0: absent) */
@@ -30,7 +30,7 @@ struct ff_pkey {
     uint8_t tcount[8], projected[8];  /* how many texcoord components the stage reads; projected divide */
     uint8_t alpha_func;               /* D3DCMP, 0 when the test is off */
     uint8_t fog;                      /* 0 none, 1 vertex factor, 2 table EXP, 3 EXP2, 4 LINEAR */
-    uint8_t specular_add, flat, srgb_write, nstages, pad[2];
+    uint8_t specular_add, flat, srgb_write, nstages, pad[2];   /* table fog reads VOut.fogz (w or z, see wfog) */
 };
 
 /* Uniforms: laid out the same way in ff_msl.c's generated MSL. */
@@ -103,7 +103,7 @@ struct ff_draw {
 void mtl_draw(struct mtl_ctx *c, const struct ff_draw *d);
 struct mtl_stats { uint64_t libraries, pipelines, archive_hits, archive_misses; };
 void mtl_get_stats(struct mtl_stats *s);
-void mtl_archive_open(const char *path);         /* load (or start) the pipeline archive */
+void mtl_archive_open(const char *dir);          /* the pipeline cache directory: load it, start a session */
 void mtl_archive_save(void);
 void mtl_archive_require_hits(int on);           /* tests: pipelines must come from the archive */
 void mtl_pipeline_cache_drop(void);              /* tests: forget the in-memory libraries and pipelines */

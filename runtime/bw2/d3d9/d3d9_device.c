@@ -137,11 +137,11 @@ uint32_t d3d9_create_device(uint32_t d3d9, uint32_t adapter, uint32_t type, uint
     if (hr) return hr;
     if (!(flags & D3DCREATE_FPU_PRESERVE)) g_fpu_cw &= (uint16_t)~0x0F00u;   /* 24-bit, round to nearest */
     static int archive;
-    if (!archive) {                                  /* <support>/ShaderCache/ff.metalar (my call) */
+    if (!archive) {                                  /* <support>/ShaderCache/ (my call) */
         const char *sup = getenv("BW2_SUPPORT"), *home = getenv("HOME");
         char path[1024];
-        if (sup && *sup) snprintf(path, sizeof path, "%s/ShaderCache/ff.metalar", sup);
-        else snprintf(path, sizeof path, "%s/Library/Application Support/Black & White 2/ShaderCache/ff.metalar",
+        if (sup && *sup) snprintf(path, sizeof path, "%s/ShaderCache", sup);
+        else snprintf(path, sizeof path, "%s/Library/Application Support/Black & White 2/ShaderCache",
                       home ? home : ".");
         mtl_archive_open(path);
         archive = 1;
@@ -182,7 +182,13 @@ static struct mtl_target target_of(uint32_t surf) {
 }
 void d3d_apply_targets(struct d3d_device *d) {
     struct mtl_target rt[4];
-    for (int i = 0; i < 4; i++) rt[i] = target_of(d->rt[i]);
+    for (int i = 0; i < 4; i++) {
+        rt[i] = target_of(d->rt[i]);
+        if (d->rt[i]) {                              /* about to be drawn into: its mips go stale */
+            struct d3d_surface *s = d3d_surf(d->rt[i]);
+            if (s->parent && s->parent->autogen && s->level == 0) s->parent->mip_dirty = 1;
+        }
+    }
     mtl_set_targets(d->mtl, rt, target_of(d->ds));
 }
 
@@ -327,6 +333,13 @@ static void dv_GetRenderTargetData(void) { /* (this, render target, system-memor
 
 static void dv_Reset(void) {               /* (this, D3DPRESENT_PARAMETERS*) */
     struct d3d_device *d = d3d_dev(A32(0));
+    /* The device's own bindings are D3D's internal references: they do not keep a released
+     * resource alive through Reset. Drop them first, then count what the guest still holds. */
+    unbind_all(d);
+    for (int i = 1; i < 4; i++) d3d_bind(&d->rt[i], 0);
+    d3d_bind(&d->rt[0], d->backbuffer);
+    d3d_bind(&d->ds, d->auto_ds);
+    d3d_bind(&d->last_presented, 0);
     if (d->default_pool_live) RET(D3DERR_INVALIDCALL, 2);
     uint32_t pp[14];
     uint32_t hr = check_pp(d->focus, A32(1), pp);

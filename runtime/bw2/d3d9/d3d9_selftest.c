@@ -423,6 +423,10 @@ static void group_present_scaled(void) {
     CHECKEQ(px[0], 0xFF00FF00u);
 }
 
+static uint32_t new_texture(uint32_t dev, uint32_t w, uint32_t h, uint32_t levels, uint32_t usage, uint32_t fmt,
+                            uint32_t pool, uint32_t *hr);
+static uint32_t level_surface(uint32_t tex, uint32_t level);
+#define USAGE_RENDERTARGET 1u
 static void group_reset_rules(void) {
     uint32_t dev = new_device(64, 64), out = gmem(4), v = gmem(4);
     CHECKEQ(vcall(dev, DV_CreateRenderTarget, 8, 16u, 16u, FMT_A8R8G8B8, 0u, 0u, 0u, out, 0u), D3D_OK);
@@ -441,6 +445,16 @@ static void group_reset_rules(void) {
     vcall(dev, DV_GetRenderState, 2, 7u, v);  CHECKEQ(MEM32(v), 1);   /* D3DZB_TRUE: auto depth stencil */
     vcall(dev, DV_GetRenderState, 2, 22u, v); CHECKEQ(MEM32(v), 3);   /* D3DCULL_CCW */
     vcall(dev, DV_GetRenderState, 2, 27u, v); CHECKEQ(MEM32(v), 0);
+    /* the usual pattern: a DEFAULT resource released while still bound; the binding does not block Reset */
+    uint32_t hr0, rtt = new_texture(dev, 8, 8, 1, USAGE_RENDERTARGET, FMT_A8R8G8B8, POOL_DEFAULT, &hr0);
+    CHECKEQ(hr0, D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, rtt), D3D_OK);
+    uint32_t rts = level_surface(rtt, 0);
+    CHECKEQ(vcall(dev, DV_SetRenderTarget, 2, 1u, rts), D3D_OK);
+    vcall(rts, 2, 0);
+    vcall(rtt, 2, 0);
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp), D3D_OK);
+    CHECK(!d3d_alive(rtt));
     /* a system-memory surface does not block Reset */
     uint32_t s = sysmem_surface(dev, 8, 8, FMT_A8R8G8B8);
     CHECKEQ(vcall(dev, DV_Reset, 1, pp), D3D_OK);
@@ -576,7 +590,6 @@ enum { VB_Lock = 11, VB_Unlock, VB_GetDesc };
 #define FMT_DXT5 0x35545844u
 #define FMT_P8 41u
 #define FMT_R8G8B8 20u
-#define USAGE_RENDERTARGET 1u
 #define USAGE_DYNAMIC 0x200u
 #define USAGE_WRITEONLY 8u
 #define FMT_INDEX16 101u
@@ -1599,6 +1612,16 @@ static void group_fog_alpha(void) {
     float w3[4] = { 1, 0.5f, 0.5f, 1 };
     uint32_t g3 = read1(dev, rt, 8, 8, 4, 4);
     if (!near_color(g3, pack(w3), 2)) printf("FAIL vertex fog: 0x%08X want 0x%08X\n", g3, pack(w3)), fails++;
+    /* table fog under a perspective projection is w-fog: start and end in view-space units.
+     * View z 5 between 0 and 10 is half, as the vertex fog above. */
+    rs(dev, 140, 0), rs(dev, RS_FOGTABLEMODE, 3), rs(dev, RS_FOGSTART, f32(0)), rs(dev, RS_FOGEND, f32(10));
+    clear(dev, 0);
+    draw_up(dev, PT_TRIANGLESTRIP, 2, q, 4, sizeof q[0]);
+    uint32_t g4 = read1(dev, rt, 8, 8, 4, 4);
+    if (!near_color(g4, pack(w3), 2)) printf("FAIL w-fog: 0x%08X want 0x%08X\n", g4, pack(w3)), fails++;
+    uint32_t caps = gmem(304);
+    CHECKEQ(vcall(dev, DV_GetDeviceCaps, 1, caps), D3D_OK);
+    CHECK(MEM32(caps + 0x24) & 0x100000u);                       /* D3DPRASTERCAPS_WFOG */
     rs(dev, RS_FOGENABLE, 0);
     /* alpha test: GREATER 0x80 keeps 0x81, drops 0x80 and 0x7F; GREATEREQUAL keeps 0x80 */
     rs(dev, RS_ALPHATESTENABLE, 1), rs(dev, RS_ALPHAFUNC, 5), rs(dev, RS_ALPHAREF, 0x80);
@@ -1650,10 +1673,7 @@ static void group_cache(void) {
     CHECKEQ(vcall(dev, 2, 0), 0);
     /* from the archive on disk: the pipeline comes back without a backend compile */
     char path[1024];
-    snprintf(path, sizeof path, "%s/ShaderCache/ff.metalar", getenv("BW2_SUPPORT"));
-    FILE *f = fopen(path, "rb");
-    CHECK(f != NULL);
-    if (f) fclose(f);
+    snprintf(path, sizeof path, "%s/ShaderCache", getenv("BW2_SUPPORT"));
     mtl_pipeline_cache_drop();
     mtl_archive_open(path);
     mtl_archive_require_hits(1);
@@ -1804,6 +1824,17 @@ static void group_lights_grow(void) {
     CHECKEQ(vcall(dev, DV_GetLight, 2, 100u, out), D3D_OK);
     CHECK(!memcmp(hle_ptr(out), &l, sizeof l));
     CHECKEQ(vcall(dev, DV_GetLight, 2, 99u, out), D3DERR_INVALIDCALL);
+    /* any DWORD is a light index, the largest too, and a state block holds it */
+    set_light(dev, 0xFFFFFFFFu, &l);
+    CHECKEQ(vcall(dev, DV_GetLight, 2, 0xFFFFFFFFu, out), D3D_OK);
+    CHECK(!memcmp(hle_ptr(out), &l, sizeof l));
+    uint32_t sbo = gmem(4), en = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateStateBlock, 2, 1u, sbo), D3D_OK);
+    CHECKEQ(vcall(dev, DV_LightEnable, 2, 0xFFFFFFFFu, 0u), D3D_OK);
+    CHECKEQ(vcall(MEM32(sbo), 5, 0), D3D_OK);                      /* Apply */
+    CHECKEQ(vcall(dev, DV_GetLightEnable, 2, 0xFFFFFFFFu, en), D3D_OK);
+    CHECKEQ(MEM32(en), 128);
+    vcall(MEM32(sbo), 2, 0);
     /* the rest of the device's simple state */
     CHECKEQ(vcall(dev, DV_SetSoftwareVertexProcessing, 1, 1u), D3D_OK);
     CHECKEQ(vcall(dev, DV_GetSoftwareVertexProcessing, 0), 1);
@@ -1861,7 +1892,93 @@ static void group_swapchain2(void) {
     vcall(fs, SF_UnlockRect, 0);
 }
 
+/* Across processes (test_cache_persists): A draws one state, B another, check needs both from disk. */
+static void persist_draw(int which) {
+    uint32_t dev = new_device(16, 16);
+    if (which & 1) { lit_scene(dev); clear(dev, 0xFF000000u); lit_quad(dev); }
+    if (which & 2) {
+        rs(dev, RS_FOGENABLE, 1), rs(dev, RS_FOGTABLEMODE, 3);
+        clear(dev, 0xFF000000u);
+        quad_tlv(dev, -0.5f, -0.5f, 7.5f, 7.5f, 0.5f, 0xFFFFFFFFu);
+    }
+    frame(dev, 16, 16);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+}
+static void group_persist_a(void) { persist_draw(1); }
+static void group_persist_b(void) { persist_draw(2); }
+static void group_persist_check(void) {
+    struct mtl_stats s;
+    mtl_archive_require_hits(1);
+    persist_draw(3);
+    mtl_get_stats(&s);
+    CHECK(s.archive_hits >= 2);
+    CHECKEQ(s.archive_misses, 0);
+}
+
+/* An AUTOGENMIPMAP render target: rendering into level 0 regenerates the chain before it is sampled. */
+static void group_autogen_rt(void) {
+    uint32_t dev = new_device(4, 4), rt = argb_target(dev, 4, 4), hr;
+    uint32_t t = new_texture(dev, 8, 8, 0, USAGE_RENDERTARGET | 0x400u, FMT_A8R8G8B8, POOL_DEFAULT, &hr);
+    CHECKEQ(hr, D3D_OK);
+    CHECKEQ(vcall(t, TX_GetLevelCount, 0), 1);
+    uint32_t s0 = level_surface(t, 0);
+    CHECKEQ(vcall(dev, DV_SetRenderTarget, 2, 0u, s0), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFFFF0000u, f32(1), 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetRenderTarget, 2, 0u, rt), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, t), D3D_OK);
+    tss(dev, 0, TSS_COLOROP, 2), tss(dev, 0, TSS_COLORARG1, 2), tss(dev, 0, TSS_ALPHAOP, 2), tss(dev, 0, TSS_ALPHAARG1, 2);
+    sst(dev, 0, SS_MIPFILTER, 1), sst(dev, 0, SS_MAXMIPLEVEL, 1);
+    clear(dev, 0);
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, 0xFFFFFFFFu);
+    CHECKEQ(read1(dev, rt, 4, 4, 1, 1), 0xFFFF0000u);        /* level 1 of the chain, made from what was drawn */
+    /* and again after a draw into it, not only a clear */
+    CHECKEQ(vcall(dev, DV_SetRenderTarget, 2, 0u, s0), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, 0u), D3D_OK);
+    tss(dev, 0, TSS_COLORARG1, 0), tss(dev, 0, TSS_ALPHAARG1, 0);   /* the quad's own colour */
+    quad_tlv(dev, -0.5f, -0.5f, 7.5f, 7.5f, 0.5f, 0xFF00FF00u);
+    tss(dev, 0, TSS_COLORARG1, 2), tss(dev, 0, TSS_ALPHAARG1, 2);
+    CHECKEQ(vcall(dev, DV_SetRenderTarget, 2, 0u, rt), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, t), D3D_OK);
+    clear(dev, 0);
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, 0xFFFFFFFFu);
+    CHECKEQ(read1(dev, rt, 4, 4, 1, 1), 0xFF00FF00u);
+    vcall(dev, DV_SetTexture, 2, 0u, 0u);
+    vcall(s0, 2, 0), vcall(t, 2, 0), vcall(rt, 2, 0);
+}
+
+/* A declaration that repeats a usage (the first wins), and one of the full 64 elements. */
+static void put_el(uint32_t p, uint32_t i, uint32_t stream, uint32_t off, uint32_t type, uint32_t usage, uint32_t idx) {
+    MEM16(p + 8 * i) = (uint16_t)stream, MEM16(p + 8 * i + 2) = (uint16_t)off;
+    MEM8(p + 8 * i + 4) = (uint8_t)type, MEM8(p + 8 * i + 5) = 0, MEM8(p + 8 * i + 6) = (uint8_t)usage, MEM8(p + 8 * i + 7) = (uint8_t)idx;
+}
+static void group_vdecl_dupes(void) {
+    uint32_t dev = new_device(8, 8), el = gmem(8 * 66), out = gmem(4);
+    put_el(el, 0, 0, 0, 3, 9, 0);                            /* POSITIONT, float4 */
+    put_el(el, 1, 0, 16, 4, 10, 0);                          /* COLOR0 */
+    for (uint32_t i = 2; i < 22; i++) put_el(el, i, 0, 0, 3, i & 1 ? 9 : 5, 0);   /* POSITIONT and TEXCOORD0, again and again */
+    put_el(el, 22, 0xFF, 0, 17, 0, 0);
+    CHECKEQ(vcall(dev, DV_CreateVertexDeclaration, 2, el, out), D3D_OK);
+    uint32_t vd = MEM32(out);
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, vd), D3D_OK);
+    struct tlv q[4] = { { -0.5f, -0.5f, 0.5f, 1, 0xFF00FF00u }, { 7.5f, -0.5f, 0.5f, 1, 0xFF00FF00u },
+                        { -0.5f, 7.5f, 0.5f, 1, 0xFF00FF00u }, { 7.5f, 7.5f, 0.5f, 1, 0xFF00FF00u } };
+    tss(dev, 0, TSS_COLOROP, 2), tss(dev, 0, TSS_COLORARG1, 0);
+    clear(dev, 0xFF000000u);
+    draw_up(dev, PT_TRIANGLESTRIP, 2, q, 4, sizeof q[0]);
+    CHECKEQ(frame(dev, 8, 8)[3 * 8 + 3], 0xFF00FF00u);
+    /* 64 elements and the end marker: allowed */
+    for (uint32_t i = 2; i < 64; i++) put_el(el, i, 0, 0, 0, 5, i % 8);
+    put_el(el, 64, 0xFF, 0, 17, 0, 0);
+    CHECKEQ(vcall(dev, DV_CreateVertexDeclaration, 2, el, out), D3D_OK);
+    vcall(MEM32(out), 2, 0);
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, 0u), D3D_OK);
+    vcall(vd, 2, 0);
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "vdecl_dupes", group_vdecl_dupes },
+    { "autogen_rt", group_autogen_rt },
+    { "persist_a", group_persist_a }, { "persist_b", group_persist_b }, { "persist_check", group_persist_check },
     { "stateblock", group_stateblock }, { "query_event", group_query_event },
     { "query_occlusion", group_query_occlusion }, { "lights_grow", group_lights_grow },
     { "swapchain2", group_swapchain2 },

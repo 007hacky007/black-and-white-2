@@ -17,13 +17,14 @@ struct d3d_stateblock {
 static struct d3d_stateblock *sb_of(uint32_t o) { return d3d_host(o, D3DK_STATEBLOCK); }
 
 static void mark_light(struct d3d_sbmask *m, uint32_t i) {
-    if (i >= m->nlight) {
-        uint32_t n = i + 1 > 2 * m->nlight ? i + 1 : 2 * m->nlight;
-        m->light = realloc(m->light, n);
-        memset(m->light + m->nlight, 0, n - m->nlight);
-        m->nlight = n;
+    for (uint32_t k = 0; k < m->nlight; k++) if (m->light[k] == i) return;
+    if (m->nlight == m->caplight) {
+        uint32_t cap = m->caplight ? 2 * m->caplight : 8;
+        uint32_t *l = realloc(m->light, sizeof *l * cap);
+        if (!l) d3d_fail("no memory for a state block's lights");
+        m->light = l, m->caplight = cap;
     }
-    m->light[i] = 1;
+    m->light[m->nlight++] = i;
 }
 
 struct d3d_state *d3d_ws(struct d3d_device *d, enum sbw what, uint32_t i, uint32_t j) {
@@ -58,13 +59,6 @@ struct d3d_state *d3d_ws(struct d3d_device *d, enum sbw what, uint32_t i, uint32
     return &b->st;
 }
 
-static void grow_lights(struct d3d_state *st, uint32_t n) {
-    if (n <= st->nlights) return;
-    st->lights = realloc(st->lights, sizeof *st->lights * n);
-    memset(st->lights + st->nlights, 0, sizeof *st->lights * (n - st->nlights));
-    st->nlights = n;
-}
-
 /* Copy what m names from src to dst; bindings keep their references right. */
 static void copy_state(struct d3d_state *dst, const struct d3d_state *src, struct d3d_sbmask *m) {
     for (int i = 0; i < NRS; i++) if (m->rs[i]) dst->rs[i] = src->rs[i];
@@ -96,12 +90,11 @@ static void copy_state(struct d3d_state *dst, const struct d3d_state *src, struc
         if (m->psb[i]) dst->psb[i] = src->psb[i];
     }
     if (m->all_lights)                                      /* every light the source has */
-        for (uint32_t i = 0; i < src->nlights; i++) if (src->lights[i].set) mark_light(m, i);
-    for (uint32_t i = 0; i < m->nlight; i++)
-        if (m->light[i] && i < src->nlights) {
-            grow_lights(dst, i + 1);
-            dst->lights[i] = src->lights[i];
-        }
+        for (uint32_t i = 0; i < src->nlights; i++) if (src->lights[i].set) mark_light(m, src->lights[i].index);
+    for (uint32_t k = 0; k < m->nlight; k++) {
+        const struct d3d_light *l = d3d_light_at((struct d3d_state *)src, m->light[k], 0);
+        if (l) *d3d_light_at(dst, m->light[k], 1) = *l;
+    }
     dst->dirty = DIRTY_ALL;
 }
 
@@ -140,7 +133,7 @@ static void set_mask(struct d3d_sbmask *m, uint32_t type) {
     memset(m, 0, sizeof *m);
     if (type == 1) {                                         /* ALL */
         memset(m, 1, offsetof(struct d3d_sbmask, light));
-        m->light = NULL, m->nlight = 0;
+        m->light = NULL, m->nlight = m->caplight = 0;
         return;
     }
     if (type == 2) {                                         /* PIXELSTATE */

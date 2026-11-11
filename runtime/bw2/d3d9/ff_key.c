@@ -76,17 +76,22 @@ void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint3
     /* the vertex layout */
     dr->nattr = 0;
     int have_pos = 0;
+    uint32_t taken = 0;                                  /* slots used: a repeated usage keeps its first */
     for (uint32_t i = 0; i < nel; i++) {
         uint32_t stream = el[i][0] | el[i][1] << 8, off = el[i][2] | el[i][3] << 8, type = el[i][4];
         uint32_t usage = el[i][6], idx = el[i][7];
         int slot = -1;
-        if ((usage == U_POSITION || usage == U_POSITIONT) && idx == 0) {
-            slot = VA_POSITION, have_pos = 1, vk->pretransformed = usage == U_POSITIONT;
-        } else if (usage == U_NORMAL && idx == 0) slot = VA_NORMAL, vk->has_normal = 1;
-        else if (usage == U_COLOR && idx == 0) slot = VA_COLOR0, vk->has_diffuse = 1;
-        else if (usage == U_COLOR && idx == 1) slot = VA_COLOR1, vk->has_specular = 1;
-        else if (usage == U_TEXCOORD && idx < 8) slot = VA_TEX0 + (int)idx, vk->tex_comps[idx] = (uint8_t)type_comps(type);
-        if (slot < 0 || type == 17) continue;
+        if ((usage == U_POSITION || usage == U_POSITIONT) && idx == 0) slot = VA_POSITION;
+        else if (usage == U_NORMAL && idx == 0) slot = VA_NORMAL;
+        else if (usage == U_COLOR && idx < 2) slot = VA_COLOR0 + (int)idx;
+        else if (usage == U_TEXCOORD && idx < 8) slot = VA_TEX0 + (int)idx;
+        if (slot < 0 || type == 17 || (taken & (1u << slot))) continue;
+        taken |= 1u << slot;
+        if (slot == VA_POSITION) have_pos = 1, vk->pretransformed = usage == U_POSITIONT;
+        else if (slot == VA_NORMAL) vk->has_normal = 1;
+        else if (slot == VA_COLOR0) vk->has_diffuse = 1;
+        else if (slot == VA_COLOR1) vk->has_specular = 1;
+        else vk->tex_comps[slot - VA_TEX0] = (uint8_t)type_comps(type);
         if (stream >= 16) d3d_fail("vertex element on stream %u", stream);
         struct ff_attr *a = &dr->attr[dr->nattr++];
         a->slot = (uint8_t)slot, a->decltype = (uint8_t)type, a->stream = (uint8_t)stream, a->offset = off;
@@ -112,6 +117,10 @@ void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint3
         uint32_t t = st->tex[i];
         if (t) {
             struct d3d_texture *tx = d3d_tex(t);
+            if (tx->autogen && tx->mip_dirty) {          /* drawn into since: make the chain again first */
+                mtl_tex_mipgen(dv->mtl, tx->tex);
+                tx->mip_dirty = 0;
+            }
             pk->textype[i] = tx->base.kind == D3DK_TEXTURE ? 1 : tx->base.kind == D3DK_CUBETEXTURE ? 2 : 3;
             dr->tex[i] = tx->view;
             if (st->ss[i][11]) dr->tex[i] = d3d_tex_srgb_view(tx);
@@ -168,6 +177,8 @@ void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint3
         else if (rs[140] && !vk->pretransformed) vk->fog_vertex = (uint8_t)rs[140], vk->range_fog = rs[48] != 0, pk->fog = 1;
         else vk->fog_from_specular = 1, pk->fog = 1;
     }
+    /* w-fog: a perspective projection (_34 non-zero) gives table fog in view-space units, as D3D9 hardware */
+    vk->wfog = !vk->pretransformed && st->xform[3][11] != 0.0f;
     pk->specular_add = rs[29] != 0;
     pk->alpha_func = rs[15] ? (uint8_t)rs[25] : 0;
     pk->srgb_write = rs[194] != 0;

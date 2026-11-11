@@ -40,7 +40,8 @@
 struct d3d_viewport { uint32_t x, y, w, h; float minz, maxz; };
 struct d3d_rect { int32_t l, t, r, b; };
 
-struct d3d_light { uint32_t data[26]; int enabled; int set; };      /* D3DLIGHT9 is 104 bytes */
+/* Lights are sparse: any DWORD is an index. D3DLIGHT9 is 104 bytes. */
+struct d3d_light { uint32_t index; uint32_t data[26]; int enabled; int set; };
 
 struct d3d_state {
     uint32_t rs[NRS];
@@ -48,8 +49,8 @@ struct d3d_state {
     uint32_t tss[NTS][NTSS];
     float xform[512][16];        /* D3DTS: VIEW 2, PROJECTION 3, TEXTURE0-7 16-23, WORLD(n) 256+n */
     uint32_t material[17];       /* D3DMATERIAL9 is 68 bytes */
-    struct d3d_light *lights;
-    uint32_t nlights;
+    struct d3d_light *lights;            /* sorted by index */
+    uint32_t nlights, caplights;
     float clip[6][4];
     struct d3d_viewport vp;
     struct d3d_rect scissor;
@@ -71,8 +72,8 @@ struct d3d_sbmask {
     uint8_t rs[NRS], ss[NSMP][NSS], tss[NTS][NTSS], xform[512], clip[6], tex[NSMP], stream[16], freq[16];
     uint8_t material, vp, scissor, indices, vdecl, vs, ps, npatch, all_lights;
     uint8_t vsf[256], psf[224], vsi[16], psi[16], vsb[16], psb[16];
-    uint8_t *light;                      /* per light index */
-    uint32_t nlight;
+    uint32_t *light;                     /* the light indices it holds */
+    uint32_t nlight, caplight;
 };
 enum sbw { SBW_RS, SBW_SS, SBW_TSS, SBW_XFORM, SBW_CLIP, SBW_TEX, SBW_STREAM, SBW_FREQ, SBW_MATERIAL, SBW_VP,
            SBW_SCISSOR, SBW_INDICES, SBW_VDECL, SBW_VS, SBW_PS, SBW_NPATCH, SBW_VSF, SBW_PSF, SBW_VSI, SBW_PSI,
@@ -110,6 +111,7 @@ struct d3d_texture {
     mtl_obj srgb_view;                   /* made when SRGBTEXTURE first samples it */
     uint32_t mtl_levels;                 /* AUTOGENMIPMAP: the full chain, of which the guest sees 1 */
     int autogen;
+    int mip_dirty;                       /* AUTOGENMIPMAP: level 0 was drawn into since the chain was made */
     uint32_t *mem;                       /* per subresource (face * levels + level): guest staging, or 0 */
     uint32_t *child;                     /* per subresource: its surface or volume object, or 0 */
     int *locked, *lock_ro;
@@ -165,6 +167,8 @@ void d3d9_query_register(void);
 /* d3d9_state.c */
 void d3d_state_defaults(struct d3d_state *st, int auto_ds, uint32_t rt_w, uint32_t rt_h);
 void d3d_state_free(struct d3d_state *st);
+/* The light at index, or NULL; with create, a zeroed one is inserted. */
+struct d3d_light *d3d_light_at(struct d3d_state *st, uint32_t index, int create);
 void d3d9_state_register(void);
 
 /* d3d9_surface.c */

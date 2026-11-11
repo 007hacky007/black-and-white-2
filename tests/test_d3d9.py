@@ -72,7 +72,7 @@ def test_resources(selftest, tmp_path, group):
 
 @pytest.mark.parametrize("group", ["tri_colour", "half_pixel", "transforms", "primitive_types", "dynamic_discard",
                                    "depth_objects_draw", "stages", "blend_depth_stencil", "samplers",
-                                   "lighting", "fog_alpha", "cache"])
+                                   "lighting", "fog_alpha", "cache", "autogen_rt", "vdecl_dupes"])
 def test_draws(selftest, tmp_path, group):
     check(selftest, group, tmp_path)
 
@@ -82,3 +82,11 @@ def test_draws(selftest, tmp_path, group):
 @pytest.mark.parametrize("group", ["stateblock", "query_event", "query_occlusion", "lights_grow", "swapchain2"])
 def test_device_rest(selftest, tmp_path, group):
     check(selftest, group, tmp_path)
+
+
+def test_cache_persists_across_runs(selftest, tmp_path):
+    # each run adds its pipelines to the cache on disk; a later run finds them all
+    for group in ("persist_a", "query_occlusion", "fog_alpha", "persist_b", "persist_check"):
+        r = run_group(selftest, group, tmp_path)
+        assert r.returncode == 0 and f"{group}: 0 failed" in r.stdout, r.stdout[-4000:] + r.stderr[-4000:]
+        assert "not saved" not in r.stderr, r.stderr[-4000:]

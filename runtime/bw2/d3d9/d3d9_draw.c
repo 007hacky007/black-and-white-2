@@ -76,12 +76,12 @@ static void dv_CreateVertexDeclaration(void) {   /* (this, D3DVERTEXELEMENT9*, I
     (void)d3d_dev(A32(0));
     const uint8_t *e = APTR(1);
     if (!e || !A32(2)) RET(D3DERR_INVALIDCALL, 3);
-    uint32_t n = 0;
-    while (n < 64 && !(e[8 * n] == 0xFF && e[8 * n + 1] == 0)) {
+    uint32_t n = 0;                                    /* up to 64 elements, then D3DDECL_END */
+    while (n <= 64 && !(e[8 * n] == 0xFF && e[8 * n + 1] == 0)) {
         if (e[8 * n + 4] > 17 || e[8 * n + 5] != 0) RET(D3DERR_INVALIDCALL, 3);   /* types; only DEFAULT method */
         n++;
     }
-    if (n == 64) RET(D3DERR_INVALIDCALL, 3);
+    if (n > 64) RET(D3DERR_INVALIDCALL, 3);
     MEM32(A32(2)) = vdecl_new(A32(0), (const uint8_t (*)[8])e, n, 0);
     RET(D3D_OK, 3);
 }
@@ -309,16 +309,7 @@ static void dv_MultiplyTransform(void) {   /* M = M * given */
     w->dirty |= DIRTY_XFORM;
     RET(D3D_OK, 3);
 }
-static struct d3d_light *light(struct d3d_state *st, uint32_t i, int grow) {
-    if (i >= st->nlights) {
-        if (!grow) return NULL;
-        uint32_t n = i + 1 > 2 * st->nlights ? i + 1 : 2 * st->nlights;
-        st->lights = realloc(st->lights, sizeof *st->lights * n);
-        memset(st->lights + st->nlights, 0, sizeof *st->lights * (n - st->nlights));
-        st->nlights = n;
-    }
-    return &st->lights[i];
-}
+static struct d3d_light *light(struct d3d_state *st, uint32_t i, int grow) { return d3d_light_at(st, i, grow); }
 static void dv_SetLight(void) {            /* (this, index, D3DLIGHT9*) */
     struct d3d_device *d = d3d_dev(A32(0));
     if (!A32(2)) RET(D3DERR_INVALIDCALL, 3);
