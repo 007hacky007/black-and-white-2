@@ -41,9 +41,21 @@ void hle_set_drive(char letter, const char *host_root) {
     g_drive[i] = host_root ? realpath(host_root, NULL) : NULL;
 }
 
+/* The host folders a guest path may resolve into (hle_set_roots); none set:
+ * anywhere, with Z: as the host's root. */
+static char *g_roots[8];
+static int g_nroots;
+
 static const char *drive_root(int i) {
     if (g_drive[i]) return g_drive[i];
-    return i == 'z' - 'a' ? "" : NULL;          /* Z: is the host's root */
+    return i == 'z' - 'a' && !g_nroots ? "" : NULL;   /* Z: is the host's root, unless confined */
+}
+
+void hle_set_roots(const char *const *roots) {
+    for (int i = 0; i < g_nroots; i++) free(g_roots[i]);
+    g_nroots = 0;
+    for (; roots && *roots && g_nroots < 8; roots++)
+        if ((g_roots[g_nroots] = realpath(*roots, NULL))) g_nroots++;
 }
 
 static int at_or_under(const char *path, const char *root) {
@@ -248,6 +260,7 @@ int hle_overlay_of(const char *host, char *out, size_t n) {
  * first, so a write into the middle of it keeps the rest). */
 int hle_host_path_for_write(const char *guest, char *out, size_t n, int keep) {
     int exists = hle_host_path(guest, out, n);
+    if (!out[0]) return 0;                                 /* outside the roots: nowhere to write */
     char ov[1024];
     if (hle_overlay_of(out, ov, sizeof ov) < 0) return exists;
     for (char *s = ov + strlen(g_overlay); *s && (s = strchr(s + 1, '/')); ) {   /* mkdir -p its directory */
@@ -269,6 +282,7 @@ int hle_host_path_for_write(const char *guest, char *out, size_t n, int keep) {
 }
 
 static int host_path_plain(const char *guest, char *out, size_t n);
+static int confined(const char *host);
 
 /* ---- a mount: one guest folder that is a host folder ----
  *
@@ -314,6 +328,7 @@ static const char *mount_rest(const char *guest) {
 
 int hle_host_path(const char *guest, char *out, size_t n) {
     int exists = host_path_plain(guest, out, n);
+    if (!out[0]) return 0;                                 /* outside the roots: no such path */
     char ov[1024];
     struct stat st;
     /* A file only: a directory stays the game's (the cwd is set through here,
@@ -362,9 +377,25 @@ static int host_path_plain(const char *guest, char *out, size_t n) {
         while (*p == '\\' || *p == '/') p++;
     }
     if (!out[0]) snprintf(out, n, ".");
+    if (!confined(out)) {                                  /* resolved outside the roots: refused */
+        if (win32hle_trace || hle_filetrace()) fprintf(stderr, "[path] %s: outside the allowed folders\n", guest);
+        out[0] = 0;
+        return 0;
+    }
     /* Through the kept listings (#148), not a stat per probe; a listing has
      * broken symlinks too, as lstat would (#146). */
     return cached_stat(out, NULL);
+}
+
+/* host (as joined: lexical) inside one of the roots, or no roots set. */
+static int confined(const char *host) {
+    if (!g_nroots) return 1;
+    char abs[1024], norm[1024];
+    absolute(host, abs, sizeof abs);
+    if (!normalize_absolute(abs, norm, sizeof norm)) return 0;
+    for (int i = 0; i < g_nroots; i++)
+        if (under(norm, g_roots[i])) return 1;
+    return 0;
 }
 
 /* A host path (absolute) as the guest sees it: under a mapped drive, that

@@ -13,3 +13,4 @@ runtime/win32hle/guest_mem.c - freed heap blocks wait in a FIFO quarantine (hle_
 runtime/win32hle/host_lite.c - the handle table grows by doubling up to 2^20 and stops loudly there, instead of 4096 slots and a silent 0 - spec 7.2: no fixed-size tables
 runtime/win32hle/host_lite.c - the import trace line names the calling guest function - to tell which code (the protection VM, the CRT) made a call
 runtime/win32hle/host_lite.c, win32hle.h - hle_import_hook, run before every import call with its name - a host audits which code calls what (BW2: the protection VM may call only GetCurrentThreadId)
+runtime/win32hle/hle_path.c, win32hle.h - hle_set_roots: confine guest paths to given host folders; Z: (the host root) goes away and a path resolving elsewhere (drive, .., cwd) does not exist - the guest could otherwise write anywhere on the host; hle_path_selftest and kernel32_ext_selftest still pass with no roots set
