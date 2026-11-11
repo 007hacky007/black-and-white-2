@@ -123,6 +123,23 @@ A full lift of all three modules takes about 88 s. Lift plus build from
 scratch takes about 2.8 minutes. That is in line with the spec's budget,
 NFSU2's roughly 2 minutes for 2.3x less code.
 
+## Plan 3 additions
+
+- The default host is the engine (`out/bw2`): win32hle's headless core plus
+  `runtime/bw2/`, with based memory at `RECOMP_MEM_BASE=0x100000000000`.
+  `linkcheck` stays as `build(host="linkcheck")`.
+- The lift merges extra function starts: 48 that are only named by code
+  immediates (`white-1.42.extra-starts.json`), and 138 of the protection VM's
+  native entries, exits and thunks (`white-1.42.vm-extra-starts.json`). The
+  link set is 49,423 functions, and the VM module is 330 functions.
+- The VM module is lifted with computed returns and run-time `push` operands
+  (`docs/research/boot.md`).
+- EH landing pads: 9 white functions (9 continuations) and 1 in ScriptLibraryR.
+- Lifted back-edges hand the machine to other guest threads (`RECOMP_BACKEDGE`).
+- `python -m bw2.pipeline --only vm` relifts one module and reuses the others.
+  Adding any function changes `recomp_funcs.h`, so every shard recompiles
+  (about 80 s).
+
 ## Known items for later plans
 
 The cold shard's host function has a 557 KB stack frame at -O0. That is

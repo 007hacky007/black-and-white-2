@@ -66,6 +66,22 @@ int main(void) {
         CHECK(call("HeapSetInformation", 4, call("GetProcessHeap", 0), 0u, v, 4u) == 1);
     }
 
+    {
+        uint32_t m = gmem(64);
+        MEM32(m) = 64;
+        CHECK(call("GlobalMemoryStatusEx", 1, m) == 1 && MEM32(m + 8) == 0x80000000u && MEM32(m + 12) == 0);  /* 2 GB */
+        CHECK(MEM32(m + 16) == 0x60000000u);                                            /* 1.5 GB free */
+        uint32_t o = gmem(32);
+        call("GlobalMemoryStatus", 1, o);
+        CHECK(MEM32(o + 8) == 0x80000000u && MEM32(o + 12) == 0x60000000u);             /* the same answer */
+    }
+
+    {
+        uint32_t lo = gmem(4), hi = gmem(4);
+        CHECK(call("GetProcessWorkingSetSize", 3, 0xFFFFFFFFu, lo, hi) == 1 && MEM32(lo) == 204800u && MEM32(hi) == 1413120u);
+        CHECK(call("SetProcessWorkingSetSize", 3, 0xFFFFFFFFu, 64u << 20, 256u << 20) == 1);
+    }
+
     /* user32 */
     {
         uint32_t v = gmem(64);

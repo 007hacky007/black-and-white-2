@@ -215,6 +215,12 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
 - **Files and saves:** the game sees a Windows tree; writes are redirected to
   `~/Library/Application Support/Black & White 2/` because writing inside the
   signed bundle breaks the signature. The registry is persisted there too.
+  **Plan 3:** the game sees itself at `C:\Program Files\EA GAMES\Black &
+  White 2\` (a win32hle mount on the game tree, read-only; its writes land in
+  `<support>/Game/`), the rest of `C:` is `<support>/C/`, the user is
+  `Player`, and the registry is `<support>/registry.txt`. The boot to
+  `Direct3DCreate9` writes only the My Documents folders
+  (`docs/research/boot.md`).
 
 ## 6. Hard problems and how we approach them
 
@@ -255,6 +261,15 @@ removed. A trial lift of the interpreter needs only `pushf`. If the
 virtualized functions turn out to ask for disc or driver checks, stop and ask
 the user again before answering them.
 
+**Plan 3:** the VM runs as shipped. Lifting its interpreter needed computed
+returns (it leaves through `popal; popfd; ret` to addresses its bytecode
+pushed) and run-time `push` operands for its re-entry stubs, which it rewrites
+as it runs. Both were checked against the original x86 under Unicorn
+(`docs/research/boot.md`). A tripwire (`runtime/bw2/guard.c`) stops the run
+with exit code 3 on any `DeviceIoControl`, `Netbios`, raw device open or CD
+audio command, and on drive or volume queries made by the VM; the boot to the
+graphics layer trips none of them.
+
 ### 6.3 Size
 
 8.4 MB of code is 2.3x NFSU2. Budget for build time (NFSU2: about 2 minutes
@@ -287,6 +302,14 @@ exceptions on normal paths; if it does, implement guest SEH and
 `__try` blocks: guest C++ EH is required. pcrecomp has a 32-bit scheme for it
 (`tools/lift/eh32.py` with `runtime/native32/eh32.c`) to port onto the
 win32hle host.
+
+**Plan 3:** ported (`runtime/bw2/eh.c`, landing pads from `bw2/lift.py`). A
+throw is caught at `RaiseException(0xE06D7363)` and dispatched from the
+guest's own FuncInfo data; the exception object is destroyed after its catch,
+as MSVC's runtime does. 9 white functions and 1 in ScriptLibraryR have catch
+continuations (129 more catch only to rethrow). Stopping loudly: an uncaught
+throw, a catch above an SEH (`__try`) frame, and any other `RaiseException`
+code; hardware exceptions are not passed to guest handlers.
 
 ## 7. Lessons carried in from NFSU2
 

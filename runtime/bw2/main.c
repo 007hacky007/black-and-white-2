@@ -74,6 +74,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--selftest-eh-depth")) hle_on_exit = report_eh_depth;
         else { fprintf(stderr, "bw2: unknown argument %s\n", argv[i]); return usage(); }
     }
+    if (getenv("BW2_TRACE_IMPORTS")) win32hle_trace = 1;   /* one line per import call, with its caller */
     bw2_dispatch_init();
     if (st_dispatch) return bw2_dispatch_selftest();
     hle_mem_init();

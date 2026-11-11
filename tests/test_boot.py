@@ -7,7 +7,9 @@ import pytest
 from bw2 import paths
 
 ENGINE = paths.REPO / "out" / "bw2"
-LOUD = ("TRIPWIRE", "trap:", "unresolved", "unimplemented", "uncaught", "FATAL")
+# the engine's loud stops (the loader's "0 unresolved imports" is not one)
+LOUD = ("TRIPWIRE", "trap:", "unresolved indirect call", "unresolved direct call", "unimplemented import",
+        "uncaught C++", "FATAL")
 
 
 @pytest.mark.gamefiles
