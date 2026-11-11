@@ -173,8 +173,12 @@ def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]
     return bytes(out)
 
 
-def asm32(src: str) -> bytes:
-    """Intel-syntax 32-bit x86 assembled by Xcode clang; returns the .text bytes."""
+def asm32(src: str, base: int | None = None) -> bytes:
+    """Intel-syntax 32-bit x86 assembled by Xcode clang; returns the .text bytes.
+
+    With `base`, the object's R_386_32 and R_386_PC32 relocations against its own
+    .text symbols (and absolute symbols) are applied as if .text sat at `base`, so
+    labels can hold data such as MSVC EH tables."""
     import tempfile
     from bw2.build import check_tools
     clang = check_tools()
@@ -188,8 +192,85 @@ def asm32(src: str) -> bytes:
     shentsize, shnum, shstrndx = _st.unpack_from("<HHH", d, 0x2E)
     secs = [_st.unpack_from("<IIIIIIIIII", d, shoff + i * shentsize) for i in range(shnum)]
     strtab = secs[shstrndx][4]
-    for s in secs:
-        name = d[strtab + s[0]:d.index(b"\0", strtab + s[0])]
-        if name == b".text":
-            return d[s[4]:s[4] + s[5]]
-    raise ValueError("no .text in assembler output")
+    name = lambda sec: d[strtab + sec[0]:d.index(b"\0", strtab + sec[0])]
+    text_i = next((i for i, sec in enumerate(secs) if name(sec) == b".text"), None)
+    if text_i is None:
+        raise ValueError("no .text in assembler output")
+    text = bytearray(d[secs[text_i][4]:secs[text_i][4] + secs[text_i][5]])
+    rels = [sec for sec in secs if sec[1] == 9 and sec[7] == text_i]      # SHT_REL for .text
+    if rels and base is None:
+        raise ValueError("assembler output has relocations; pass base=")
+    for rel in rels:
+        symtab = secs[rel[6]]
+        for k in range(rel[5] // 8):
+            off, info = _st.unpack_from("<II", d, rel[4] + 8 * k)
+            sym, kind = info >> 8, info & 0xFF
+            _n, value, _sz, _info, _oth, shndx = _st.unpack_from("<IIIBBH", d, symtab[4] + 16 * sym)
+            if shndx == text_i:
+                target = base + value
+            elif shndx == 0xFFF1:                  # SHN_ABS
+                target = value
+            else:
+                raise ValueError(f"relocation against an undefined symbol at .text+0x{off:x}")
+            addend, = _st.unpack_from("<i", text, off)
+            if kind == 1:                          # R_386_32: S + A
+                v = target + addend
+            elif kind == 2:                        # R_386_PC32: S + A - P
+                v = target + addend - (base + off)
+            else:
+                raise ValueError(f"unsupported relocation type {kind}")
+            _st.pack_into("<I", text, off, v & 0xFFFFFFFF)
+    return bytes(text)
+
+
+def iat_va(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]],
+           dll: str, fn: str) -> int:
+    """The IAT slot VA make_pe gives dll!fn, for sections of these sizes."""
+    import pefile
+    pe = pefile.PE(data=make_pe(sections, imports, 0x1000))
+    for d in pe.DIRECTORY_ENTRY_IMPORT:
+        for i in d.imports:
+            if d.dll.decode() == dll and i.name and i.name.decode() == fn:
+                return i.address
+    raise KeyError(f"{dll}!{fn}")
+
+
+# ---- engine guests --------------------------------------------------------
+def _catalog(path: Path, functions: list[int]) -> Path:
+    import json
+    rows = [[va, va + 1, "start", 0] for va in sorted(set(functions))]
+    path.write_text(json.dumps({"columns": ["address", "end", "entry_kind", "is_thunk"], "functions": rows}))
+    return path
+
+
+def guest_engine(tmp_path: Path, pe: bytes, functions: list[int], exe_name: str = "game.exe",
+                 dlls: dict | None = None) -> Path:
+    """Lift a synthetic PE (and DLLs: {relative path: (bytes, function starts)}) and link
+    it with the engine host; the files go to tmp_path/game, the binary is returned."""
+    import struct
+    import tempfile
+    from bw2.build import build
+    from bw2.lift import lift_module, link_tables
+    game = tmp_path / "game"
+    game.mkdir(exist_ok=True)
+    (game / exe_name).write_bytes(pe)
+    gen = tmp_path / "gen"
+    mods = [lift_module("main", game / exe_name, _catalog(tmp_path / "main.json", functions), gen, (".text",))]
+    for i, (rel, (data, funcs)) in enumerate(sorted((dlls or {}).items())):
+        p = game / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        mods.append(lift_module(f"dll{i}", p, _catalog(tmp_path / f"dll{i}.json", funcs), gen, (".text",)))
+    pe_off, = struct.unpack_from("<I", pe, 0x3C)
+    entry = struct.unpack_from("<I", pe, pe_off + 0x28)[0] + struct.unpack_from("<I", pe, pe_off + 0x34)[0]
+    link_tables(gen, mods, entry=entry)
+    cache = Path(tempfile.gettempdir()) / "bw2-test-engine-host"
+    return build(gen, tmp_path / "bw2", opt="-O1", host="engine", host_obj_dir=cache).binary
+
+
+def run_engine(binary: Path, game_dir: Path, support_dir: Path, *args: str, exe: str = "game.exe",
+               timeout: int = 60) -> subprocess.CompletedProcess:
+    import os
+    env = dict(os.environ, BW2_SUPPORT=str(support_dir))
+    return subprocess.run([str(binary), "--game", str(game_dir), "--exe", exe, *args],
+                          capture_output=True, text=True, timeout=timeout, env=env)

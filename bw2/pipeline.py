@@ -44,7 +44,7 @@ def load_lifted(gen: Path) -> list[ModuleLift]:
     return out
 
 
-def run_pipeline(gen: Path = REPO / "gen", out: Path = REPO / "out" / "bw2-linkcheck",
+def run_pipeline(gen: Path = REPO / "gen", out: Path = REPO / "out" / "bw2",
                  opt: str = "-O3", lift: bool = True, do_build: bool = True) -> dict:
     t0 = time.time()
     mods = lift_all(gen) if lift else load_lifted(gen)
@@ -54,7 +54,7 @@ def run_pipeline(gen: Path = REPO / "gen", out: Path = REPO / "out" / "bw2-linkc
                        for m in mods},
            "functions": link["functions"], "unresolved": len(link["unresolved"])}
     if do_build:
-        st = build(gen, out, opt=opt)
+        st = build(gen, out, opt=opt, host="engine")
         print(f"[build] {st.objects} objects ({st.compiled} compiled) in {st.seconds} s, "
               f"binary {st.binary_bytes / 1e6:.1f} MB", flush=True)
         res["build"] = {"objects": st.objects, "compiled": st.compiled, "seconds": st.seconds,

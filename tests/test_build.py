@@ -3,7 +3,11 @@ import subprocess
 import pytest
 
 from bw2 import build as build_mod
-from bw2.build import BuildError, ToolsMissing, build, check_tools
+from functools import partial
+
+from bw2.build import BuildError, ToolsMissing, check_tools
+
+build = partial(build_mod.build, host="linkcheck")   # these tests check the shard pipeline itself
 from bw2.lift import ModuleLift, link_tables
 
 SHARD = '#include "recomp_types.h"\n#include "recomp_funcs.h"\n\nvoid {s}(void) {{ g_eax = 1; }}\n'
