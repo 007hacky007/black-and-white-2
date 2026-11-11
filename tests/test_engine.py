@@ -1120,3 +1120,23 @@ stub:
     b = guest_engine(tmp_path, pe, [BASE, BASE + 0x40], runtime_push={BASE + 0x40})
     r = _run(tmp_path, b)
     assert r.returncode == 77, r.stderr[-2000:]
+
+
+# ---- Final review fixes --------------------------------------------------------
+
+def test_shcreatedirectory_in_install_folder_stays_out_of_game_tree(tmp_path):
+    asm = r"""
+    push 0
+    push offset path
+    push 0
+    call dword ptr [{IAT_SHCreateDirectoryExA}]
+    push eax
+    call dword ptr [{IAT_ExitProcess}]
+path: .asciz "C:\\Program Files\\EA GAMES\\Black & White 2\\NewDir\\Sub"
+"""
+    b = _engine(tmp_path, asm, {K32: ["ExitProcess"], "SHELL32.dll": ["SHCreateDirectoryExA"]})
+    before = sorted(p.relative_to(tmp_path / "game").as_posix() for p in (tmp_path / "game").rglob("*"))
+    r = _run(tmp_path, b)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert sorted(p.relative_to(tmp_path / "game").as_posix() for p in (tmp_path / "game").rglob("*")) == before
+    assert (tmp_path / "support" / "Game" / "NewDir" / "Sub").is_dir()

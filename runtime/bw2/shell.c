@@ -28,10 +28,14 @@ static const char *folder(uint32_t csidl) {
     }
 }
 
-/* mkdir -p for a guest folder; 1 if it already existed. */
+/* mkdir -p for a guest folder; 1 if it already existed. It resolves as a
+ * write does, so a folder in the install folder goes to the support folder's
+ * copy of it, never into the game tree. */
 static int make_guest_dirs(const char *guest) {
     char host[PATH_MAX];
     int existed = hle_host_path(guest, host, sizeof host);
+    hle_host_path_for_write(guest, host, sizeof host, 0);
+    if (bw2_in_game_tree(host)) hle_fatal("SHCreateDirectoryExA: %s would be made in the game tree", guest);
     for (char *s = host + 1; *s; s++)
         if (*s == '/') { *s = 0; mkdir(host, 0755); *s = '/'; }
     mkdir(host, 0755);
