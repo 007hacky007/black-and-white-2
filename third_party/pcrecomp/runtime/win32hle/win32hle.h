@@ -227,7 +227,7 @@ void hle_set_mount(const char *guest_dir, const char *host_dir);
  * and a path that resolves anywhere else, by drive, '..' or the cwd, is one
  * that does not exist (hle_path.c). */
 void hle_set_roots(const char *const *roots);
-int  hle_overlay_of(const char *host, char *out, size_t n);       /* -1: not under base; else whether it exists there */
+int  hle_overlay_of(const char *host, char *out, size_t n);       /* -1: not under base; -2: too long to tell; else whether it exists there */
 int  hle_host_path_for_write(const char *guest, char *out, size_t n, int keep);
 int  hle_host_path_base(const char *guest, char *out, size_t n);  /* ignoring the overlay */
 void hle_guest_path(const char *host, char *out, size_t n);

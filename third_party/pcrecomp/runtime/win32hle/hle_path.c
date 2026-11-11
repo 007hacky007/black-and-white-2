@@ -191,12 +191,16 @@ void hle_set_overlay(const char *base, const char *overlay) {
 }
 
 /* host as an absolute path, if it is relative (to the cwd). */
-static void absolute(const char *host, char *out, size_t n) {
+/* 0 when it did not fit in out (the result is then cut short: a check made on it
+ * would not be a check of host). */
+static int absolute(const char *host, char *out, size_t n) {
     char cwd[768];
-    if (host[0] == '/' || !getcwd(cwd, sizeof cwd)) snprintf(out, n, "%s", host);
-    else snprintf(out, n, "%s/%s", cwd, strcmp(host, ".") ? host : "");
+    int w;
+    if (host[0] == '/' || !getcwd(cwd, sizeof cwd)) w = snprintf(out, n, "%s", host);
+    else w = snprintf(out, n, "%s/%s", cwd, strcmp(host, ".") ? host : "");
     size_t l = strlen(out);
     while (l > 1 && out[l - 1] == '/') out[--l] = 0;
+    return w >= 0 && (size_t)w < n;
 }
 
 static int under(const char *path, const char *dir) {
@@ -239,7 +243,7 @@ int hle_overlay_of(const char *host, char *out, size_t n) {
     char abs[1024], normalized[1024];
     out[0] = 0;
     if (!g_overlay) return -1;
-    absolute(host, abs, sizeof abs);
+    if (!absolute(host, abs, sizeof abs)) return -2;       /* too long to classify */
     if (!normalize_absolute(abs, normalized, sizeof normalized) ||
         under(normalized, g_overlay) || !under(normalized, g_overlay_base)) return -1;
     snprintf(out, n, "%s", g_overlay);
@@ -262,7 +266,9 @@ int hle_host_path_for_write(const char *guest, char *out, size_t n, int keep) {
     int exists = hle_host_path(guest, out, n);
     if (!out[0]) return 0;                                 /* outside the roots: nowhere to write */
     char ov[1024];
-    if (hle_overlay_of(out, ov, sizeof ov) < 0) return exists;
+    int where = hle_overlay_of(out, ov, sizeof ov);
+    if (where == -2) { out[0] = 0; return 0; }            /* cannot tell whether it is the game's: refused */
+    if (where < 0) return exists;
     for (char *s = ov + strlen(g_overlay); *s && (s = strchr(s + 1, '/')); ) {   /* mkdir -p its directory */
         *s = 0;
         mkdir(ov, 0755);
@@ -391,7 +397,7 @@ static int host_path_plain(const char *guest, char *out, size_t n) {
 static int confined(const char *host) {
     if (!g_nroots) return 1;
     char abs[1024], norm[1024];
-    absolute(host, abs, sizeof abs);
+    if (!absolute(host, abs, sizeof abs)) return 0;        /* too long to check: refused */
     if (!normalize_absolute(abs, norm, sizeof norm)) return 0;
     for (int i = 0; i < g_nroots; i++)
         if (under(norm, g_roots[i])) return 1;
