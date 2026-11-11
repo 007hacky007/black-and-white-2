@@ -913,3 +913,91 @@ def test_other_raise_is_loud(tmp_path):
                            "    call dword ptr [{IAT_RaiseException}]\n    push 0\n    call dword ptr [{IAT_ExitProcess}]\n")
     r = _run(tmp_path, b)
     assert r.returncode != 0 and "0x12345678" in r.stderr, r.stderr[-3000:]
+
+
+# ---- Task 8: heap quarantine, handle table -----------------------------------
+
+HEAP = ["GetProcessHeap", "HeapAlloc", "HeapFree", "CreateEventA", "CloseHandle", "ExitProcess"]
+
+
+def test_freed_block_not_reused_at_once(tmp_path):
+    asm = r"""
+    call dword ptr [{IAT_GetProcessHeap}]
+    mov ebx, eax
+    push 64
+    push 0
+    push ebx
+    call dword ptr [{IAT_HeapAlloc}]
+    mov esi, eax
+    mov edi, eax
+    mov ecx, 16
+    mov eax, 0xABABABAB
+    rep stosd
+    push esi
+    push 0
+    push ebx
+    call dword ptr [{IAT_HeapFree}]
+    mov edi, 100
+again:
+    push 64
+    push 0
+    push ebx
+    call dword ptr [{IAT_HeapAlloc}]
+    cmp eax, esi
+    je reused
+    dec edi
+    jnz again
+    cmp dword ptr [esi], 0xABABABAB
+    jne clobbered
+    cmp dword ptr [esi + 60], 0xABABABAB
+    jne clobbered
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+reused:
+    push 1
+    call dword ptr [{IAT_ExitProcess}]
+clobbered:
+    push 2
+    call dword ptr [{IAT_ExitProcess}]
+"""
+    b = _engine(tmp_path, asm, {K32: HEAP})
+    r = _run(tmp_path, b)
+    assert r.returncode == 0, f"code {r.returncode} (1: reused at once, 2: contents changed)\n" + r.stderr[-2000:]
+
+
+def test_many_handles(tmp_path):
+    asm = r"""
+    call dword ptr [{IAT_GetProcessHeap}]
+    push 40000
+    push 0
+    push eax
+    call dword ptr [{IAT_HeapAlloc}]
+    mov esi, eax
+    xor edi, edi
+open:
+    push 0
+    push 0
+    push 0
+    push 0
+    call dword ptr [{IAT_CreateEventA}]
+    test eax, eax
+    jz full
+    mov dword ptr [esi + edi*4], eax
+    inc edi
+    cmp edi, 10000
+    jne open
+close:
+    dec edi
+    push dword ptr [esi + edi*4]
+    call dword ptr [{IAT_CloseHandle}]
+    test edi, edi
+    jnz close
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+full:
+    push 1
+    call dword ptr [{IAT_ExitProcess}]
+"""
+    b = _engine(tmp_path, asm, {K32: HEAP})
+    r = _run(tmp_path, b)
+    assert r.returncode == 0, r.stderr[-2000:]

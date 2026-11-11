@@ -313,19 +313,33 @@ __attribute__((constructor)) static void install_yield_hook(void) { recomp_yield
  * typed so a file call given an event's handle fails as on Windows. Each type
  * may register a closer for CloseHandle. Guest code calls these under the
  * machine; a host thread that touches the table must hold it too. */
-#define MAX_HANDLES 4096
-static struct { int type; void *obj; } g_handle[MAX_HANDLES];
+/* The table grows by doubling (a fixed one is a time bomb: a long session
+ * that opens files and events steadily ran out); it stops the run at
+ * MAX_HANDLES. Slots are reused lowest first. */
+#define MAX_HANDLES (1u << 20)
+static struct hslot { int type; void *obj; } *g_handle;
+static uint32_t g_handle_cap, g_handle_free = 1;    /* every slot below g_handle_free is in use */
 static void (*g_closer[32])(void *);
 
 uint32_t hle_handle_alloc(int type, void *obj) {
-    for (int i = 1; i < MAX_HANDLES; i++)
-        if (!g_handle[i].type) { g_handle[i].type = type; g_handle[i].obj = obj; return 0x100u + 4u * (uint32_t)i; }
-    return 0;
+    uint32_t i = g_handle_free;
+    while (i < g_handle_cap && g_handle[i].type) i++;
+    if (i >= g_handle_cap) {
+        if (g_handle_cap >= MAX_HANDLES) hle_fatal("more than %u kernel handles open", MAX_HANDLES - 1);
+        uint32_t cap = g_handle_cap ? g_handle_cap * 2 : 4096;
+        struct hslot *t = (struct hslot *)realloc(g_handle, sizeof *t * cap);
+        if (!t) hle_fatal("no memory for %u handles", cap);
+        memset(t + g_handle_cap, 0, sizeof *t * (cap - g_handle_cap));
+        g_handle = t, g_handle_cap = cap;
+    }
+    g_handle[i].type = type, g_handle[i].obj = obj;
+    g_handle_free = i + 1;
+    return 0x100u + 4u * i;
 }
 static int handle_slot(uint32_t h) {
     if (h < 0x100u || (h & 3u)) return -1;
     uint32_t i = (h - 0x100u) / 4u;
-    return i < MAX_HANDLES && g_handle[i].type ? (int)i : -1;
+    return i && i < g_handle_cap && g_handle[i].type ? (int)i : -1;
 }
 void *hle_handle_obj(uint32_t h, int type) {
     int i = handle_slot(h);
@@ -339,6 +353,7 @@ int hle_handle_close(uint32_t h) {
     int type = g_handle[i].type;
     void *obj = g_handle[i].obj;
     g_handle[i].type = 0, g_handle[i].obj = NULL;
+    if ((uint32_t)i < g_handle_free) g_handle_free = (uint32_t)i;
     if (type > 0 && type < 32 && g_closer[type]) g_closer[type](obj);
     return 1;
 }
