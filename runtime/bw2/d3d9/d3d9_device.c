@@ -204,6 +204,7 @@ static void dv_Clear(void) {               /* (this, count, D3DRECT*, flags, col
         if (rr > rl && rb > rt) mr[k++] = (struct mtl_rect){ (uint32_t)rl, (uint32_t)rt, (uint32_t)(rr - rl), (uint32_t)(rb - rt) };
     }
     d3d_apply_targets(d);
+    if (d3d_surf(d->rt[0])->f->swizzle[3] == '1') color |= 0xFF000000u;   /* an X8 target's alpha stays one */
     mtl_clear(d->mtl, flags, color, z, stencil, mr, k);
     free(mr);
     RET(D3D_OK, 7);

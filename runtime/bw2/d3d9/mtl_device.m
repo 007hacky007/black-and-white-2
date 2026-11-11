@@ -226,7 +226,7 @@ void mtl_release(mtl_obj o) { if (o) CFRelease(o); }
 uint32_t mtl_tex_width(mtl_obj t) { return (uint32_t)((__bridge id<MTLTexture>)t).width; }
 uint32_t mtl_tex_height(mtl_obj t) { return (uint32_t)((__bridge id<MTLTexture>)t).height; }
 
-static void zero_texture(MtlCtx *c, id<MTLTexture> t) {
+static void zero_texture(MtlCtx *c, id<MTLTexture> t, int opaque) {
     uint32_t slices = t.textureType == MTLTextureTypeCube ? 6 : 1;
     if (t.usage & MTLTextureUsageRenderTarget) {
         mtl_end_encoders(c);
@@ -245,7 +245,7 @@ static void zero_texture(MtlCtx *c, id<MTLTexture> t) {
                 } else {
                     rp.colorAttachments[0].texture = t, rp.colorAttachments[0].slice = s, rp.colorAttachments[0].level = l;
                     rp.colorAttachments[0].loadAction = MTLLoadActionClear;
-                    rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+                    rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, opaque ? 1 : 0);
                     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
                 }
                 [[cmdbuf(c) renderCommandEncoderWithDescriptor:rp] endEncoding];
@@ -283,7 +283,7 @@ mtl_obj mtl_tex_new(struct mtl_ctx *cc, enum mtl_store st, enum mtl_textype type
     if (mtl_is_depth(d.pixelFormat)) d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     id<MTLTexture> t = [c.dev newTextureWithDescriptor:d];
     if (!t) { fprintf(stderr, "[bw2] FATAL: metal: no texture %ux%ux%u fmt %d\n", w, h, depth, (int)st); abort(); }
-    zero_texture(c, t);
+    zero_texture(c, t, (flags & MT_OPAQUE) != 0);
     return (__bridge_retained mtl_obj)t;
 }
 

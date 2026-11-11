@@ -71,6 +71,6 @@ def test_resources(selftest, tmp_path, group):
 # ---- Task 6: draws and the fixed-function pipeline ----
 
 @pytest.mark.parametrize("group", ["tri_colour", "half_pixel", "transforms", "primitive_types", "dynamic_discard",
-                                   "depth_objects_draw"])
+                                   "depth_objects_draw", "stages", "blend_depth_stencil", "samplers"])
 def test_draws(selftest, tmp_path, group):
     check(selftest, group, tmp_path)

@@ -13,6 +13,7 @@ struct mtl_ctx;                          /* one per device */
 enum mtl_textype { MT_2D, MT_CUBE, MT_3D };
 #define MT_RENDER 1u                     /* usable as a render target / depth attachment */
 #define MT_MIPGEN 2u                     /* mipmaps generated on the GPU */
+#define MT_OPAQUE 4u                     /* an X8 format: alpha reads (and starts) as one */
 
 struct mtl_ctx *mtl_ctx_new(uint32_t width, uint32_t height, int vsync);   /* opens the window unless headless */
 void mtl_ctx_free(struct mtl_ctx *c);

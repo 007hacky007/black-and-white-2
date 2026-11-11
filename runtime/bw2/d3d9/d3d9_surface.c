@@ -39,6 +39,7 @@ uint32_t d3d_surface_new(uint32_t device, uint32_t container, uint32_t fmt, uint
     if (!tex && (pool == D3DPOOL_DEFAULT || pool == D3DPOOL_MANAGED)) {
         /* a DEFAULT surface may be a StretchRect or ColorFill destination: drawable */
         uint32_t flags = (usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)) || pool == D3DPOOL_DEFAULT ? MT_RENDER : 0;
+        if (s->f->swizzle[3] == '1') flags |= MT_OPAQUE;
         tex = mtl_tex_new(d->mtl, s->f->store, MT_2D, w, h, 1, 1, flags);
         s->owns_tex = 1;
     }

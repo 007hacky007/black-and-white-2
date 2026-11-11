@@ -1195,7 +1195,303 @@ static void group_depth_objects_draw(void) {
     vcall(a, 2, 0), vcall(b, 2, 0);
 }
 
+/* An A8R8G8B8 target of w x h, bound as render target 0 (the viewport follows it). */
+static uint32_t argb_target(uint32_t dev, uint32_t w, uint32_t h) {
+    uint32_t rt = render_target(dev, w, h);
+    CHECKEQ(vcall(dev, DV_SetRenderTarget, 2, 0u, rt), D3D_OK);
+    return rt;
+}
+static uint32_t read1(uint32_t dev, uint32_t rt, uint32_t w, uint32_t h, uint32_t x, uint32_t y) {
+    static uint32_t px[64 * 64];
+    read_rt(dev, rt, w, h, px);
+    return px[y * w + x];
+}
+static uint32_t pack(const float *c) {
+    uint32_t o = 0;
+    for (int i = 0; i < 4; i++) {
+        float v = c[i] < 0 ? 0 : c[i] > 1 ? 1 : c[i];
+        o |= (uint32_t)(v * 255.0f + 0.5f) << (i == 3 ? 24 : 16 - 8 * i);
+    }
+    return o;
+}
+static void unpack(float *c, uint32_t v) {
+    c[0] = ((v >> 16) & 0xFF) / 255.0f, c[1] = ((v >> 8) & 0xFF) / 255.0f, c[2] = (v & 0xFF) / 255.0f, c[3] = (v >> 24) / 255.0f;
+}
+
+/* D3DTOP on rgb, by the documentation's formulas */
+static float top(int op, float a0, float a1, float a2, float da, float ta, float fa, float ca) {
+    switch (op) {
+    case 2: return a1;
+    case 3: return a2;
+    case 4: return a1 * a2;
+    case 5: return 2 * a1 * a2;
+    case 6: return 4 * a1 * a2;
+    case 7: return a1 + a2;
+    case 8: return a1 + a2 - 0.5f;
+    case 9: return 2 * (a1 + a2 - 0.5f);
+    case 10: return a1 - a2;
+    case 11: return a1 + a2 - a1 * a2;
+    case 12: return a1 * da + a2 * (1 - da);
+    case 13: return a1 * ta + a2 * (1 - ta);
+    case 14: return a1 * fa + a2 * (1 - fa);
+    case 15: return a1 + a2 * (1 - ta);
+    case 16: return a1 * ca + a2 * (1 - ca);
+    case 25: return a0 + a1 * a2;
+    case 26: return a0 * a1 + (1 - a0) * a2;
+    }
+    return -1;
+}
+
+static void group_stages(void) {
+    uint32_t dev = new_device(4, 4), rt = argb_target(dev, 4, 4);
+    uint32_t T = 0x80996633u, D = 0x403380CCu, F = 0xC0808080u;   /* texture, diffuse, factor (ARGB) */
+    uint32_t tx = texture_argb(dev, 1, 1, &T);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, tx), D3D_OK);
+    rs(dev, RS_TEXTUREFACTOR, F);
+    float t[4], d[4], f[4];
+    unpack(t, T), unpack(d, D), unpack(f, F);
+    static const int ops[] = { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 25, 26 };
+    for (unsigned k = 0; k < sizeof ops / sizeof *ops; k++) {
+        int op = ops[k];
+        tss(dev, 0, TSS_COLOROP, (uint32_t)op);
+        tss(dev, 0, TSS_COLORARG1, 2);                       /* TEXTURE */
+        tss(dev, 0, TSS_COLORARG2, 0);                       /* DIFFUSE */
+        tss(dev, 0, 26, 3);                                  /* COLORARG0: TFACTOR */
+        tss(dev, 0, TSS_ALPHAOP, 4);                         /* alpha: TEXTURE * DIFFUSE */
+        tss(dev, 0, TSS_ALPHAARG1, 2), tss(dev, 0, TSS_ALPHAARG2, 0);
+        clear(dev, 0);
+        quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, D);
+        float want[4];
+        for (int c = 0; c < 3; c++) want[c] = top(op, f[c], t[c], d[c], d[3], t[3], f[3], d[3]);
+        want[3] = t[3] * d[3];
+        uint32_t got = read1(dev, rt, 4, 4, 1, 1), w = pack(want);
+        if (!near_color(got, w, 2)) printf("FAIL D3DTOP %d: 0x%08X want 0x%08X\n", op, got, w), fails++;
+    }
+    /* the special ones */
+    struct { int op; float r, g, b; } sp[] = {
+        { 18, t[0] + t[3] * d[0], t[1] + t[3] * d[1], t[2] + t[3] * d[2] },                     /* MODULATEALPHA_ADDCOLOR */
+        { 19, t[0] * d[0] + t[3], t[1] * d[1] + t[3], t[2] * d[2] + t[3] },                     /* MODULATECOLOR_ADDALPHA */
+        { 20, (1 - t[3]) * d[0] + t[0], (1 - t[3]) * d[1] + t[1], (1 - t[3]) * d[2] + t[2] },   /* MODULATEINVALPHA_ADDCOLOR */
+        { 21, (1 - t[0]) * d[0] + t[3], (1 - t[1]) * d[1] + t[3], (1 - t[2]) * d[2] + t[3] },   /* MODULATEINVCOLOR_ADDALPHA */
+    };
+    for (unsigned k = 0; k < sizeof sp / sizeof *sp; k++) {
+        tss(dev, 0, TSS_COLOROP, (uint32_t)sp[k].op);
+        clear(dev, 0);
+        quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, D);
+        float want[4] = { sp[k].r, sp[k].g, sp[k].b, t[3] * d[3] };
+        uint32_t got = read1(dev, rt, 4, 4, 1, 1), w = pack(want);
+        if (!near_color(got, w, 2)) printf("FAIL D3DTOP %d: 0x%08X want 0x%08X\n", sp[k].op, got, w), fails++;
+    }
+    float dot = 4 * ((t[0] - 0.5f) * (d[0] - 0.5f) + (t[1] - 0.5f) * (d[1] - 0.5f) + (t[2] - 0.5f) * (d[2] - 0.5f));
+    tss(dev, 0, TSS_COLOROP, 24);                            /* DOTPRODUCT3 */
+    clear(dev, 0);
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, D);
+    float wd[4] = { dot, dot, dot, t[3] * d[3] };
+    uint32_t got = read1(dev, rt, 4, 4, 1, 1);
+    if (!near_color(got, pack(wd), 2)) printf("FAIL DOTPRODUCT3: 0x%08X want 0x%08X\n", got, pack(wd)), fails++;
+    /* modifiers: (1 - texture) and texture.aaa; and a second stage through TEMP */
+    tss(dev, 0, TSS_COLOROP, 2), tss(dev, 0, TSS_COLORARG1, 2 | 0x10);
+    clear(dev, 0);
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, D);
+    float wc[4] = { 1 - t[0], 1 - t[1], 1 - t[2], t[3] * d[3] };
+    got = read1(dev, rt, 4, 4, 1, 1);
+    if (!near_color(got, pack(wc), 2)) printf("FAIL COMPLEMENT: 0x%08X want 0x%08X\n", got, pack(wc)), fails++;
+    tss(dev, 0, TSS_COLORARG1, 2 | 0x20);
+    clear(dev, 0);
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, D);
+    float wa[4] = { t[3], t[3], t[3], t[3] * d[3] };
+    got = read1(dev, rt, 4, 4, 1, 1);
+    if (!near_color(got, pack(wa), 2)) printf("FAIL ALPHAREPLICATE: 0x%08X want 0x%08X\n", got, pack(wa)), fails++;
+    /* stage 0 writes TEMP (current stays diffuse); stage 1 adds TEMP to CURRENT */
+    tss(dev, 0, TSS_COLORARG1, 2), tss(dev, 0, 28, 5);       /* RESULTARG TEMP */
+    tss(dev, 1, TSS_COLOROP, 7), tss(dev, 1, TSS_COLORARG1, 5), tss(dev, 1, TSS_COLORARG2, 1);
+    tss(dev, 1, TSS_ALPHAOP, 2), tss(dev, 1, TSS_ALPHAARG1, 1);
+    clear(dev, 0);
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, D);
+    float wt[4] = { t[0] + d[0], t[1] + d[1], t[2] + d[2], d[3] };
+    got = read1(dev, rt, 4, 4, 1, 1);
+    if (!near_color(got, pack(wt), 2)) printf("FAIL TEMP: 0x%08X want 0x%08X\n", got, pack(wt)), fails++;
+    tss(dev, 1, TSS_COLOROP, 1), tss(dev, 0, 28, 1);
+    /* no texture on the stage: MODULATE gives the diffuse colour */
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, 0u), D3D_OK);
+    tss(dev, 0, TSS_COLOROP, 4), tss(dev, 0, TSS_ALPHAOP, 4);
+    clear(dev, 0);
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, D);
+    got = read1(dev, rt, 4, 4, 1, 1);
+    if (!near_color(got, D, 1)) printf("FAIL untextured MODULATE: 0x%08X want 0x%08X\n", got, D), fails++;
+    vcall(tx, 2, 0);
+}
+
+static float bf(int f, const float *s, const float *d, const float *k, int c) {
+    switch (f) {
+    case 1: return 0;
+    case 2: return 1;
+    case 3: return s[c];
+    case 4: return 1 - s[c];
+    case 5: return s[3];
+    case 6: return 1 - s[3];
+    case 7: return d[3];
+    case 8: return 1 - d[3];
+    case 9: return d[c];
+    case 10: return 1 - d[c];
+    case 11: return c == 3 ? 1 : (s[3] < 1 - d[3] ? s[3] : 1 - d[3]);
+    case 14: return k[c];
+    case 15: return 1 - k[c];
+    }
+    return -1;
+}
+static void group_blend_depth_stencil(void) {
+    uint32_t dev = new_device(4, 4), rt = argb_target(dev, 4, 4);
+    uint32_t S = 0x80CC3399u, Dst = 0xCC663399u, K = 0x40408040u;
+    float s[4], d[4], k[4];
+    unpack(s, S), unpack(d, Dst), unpack(k, K);
+    tss(dev, 0, TSS_COLOROP, 2), tss(dev, 0, TSS_COLORARG1, 0);   /* the diffuse colour */
+    tss(dev, 0, TSS_ALPHAOP, 2), tss(dev, 0, TSS_ALPHAARG1, 0);
+    rs(dev, RS_ALPHABLENDENABLE, 1);
+    rs(dev, 193, K);                                         /* BLENDFACTOR */
+    static const int fs[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15 };
+    for (unsigned i = 0; i < sizeof fs / sizeof *fs; i++) {
+        rs(dev, RS_SRCBLEND, (uint32_t)fs[i]), rs(dev, RS_DESTBLEND, 2);
+        CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET | CLEAR_ZBUFFER, Dst, f32(1.0f), 0u), D3D_OK);
+        quad_tlv(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0.5f, S);
+        float w[4];
+        for (int c = 0; c < 4; c++) w[c] = s[c] * bf(fs[i], s, d, k, c) + d[c];
+        uint32_t got = read1(dev, rt, 4, 4, 2, 2);
+        if (!near_color(got, pack(w), 2)) printf("FAIL SRCBLEND %d: 0x%08X want 0x%08X\n", fs[i], got, pack(w)), fails++;
+    }
+    /* the ops, with ONE/ONE */
+    rs(dev, RS_SRCBLEND, 2), rs(dev, RS_DESTBLEND, 2);
+    for (uint32_t op = 2; op <= 5; op++) {
+        rs(dev, RS_BLENDOP, op);
+        CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET | CLEAR_ZBUFFER, Dst, f32(1.0f), 0u), D3D_OK);
+        quad_tlv(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0.5f, S);
+        float w[4];
+        for (int c = 0; c < 4; c++)
+            w[c] = op == 2 ? s[c] - d[c] : op == 3 ? d[c] - s[c] : op == 4 ? (s[c] < d[c] ? s[c] : d[c]) : (s[c] > d[c] ? s[c] : d[c]);
+        uint32_t got = read1(dev, rt, 4, 4, 2, 2);
+        if (!near_color(got, pack(w), 2)) printf("FAIL BLENDOP %u: 0x%08X want 0x%08X\n", op, got, pack(w)), fails++;
+    }
+    rs(dev, RS_BLENDOP, 1);
+    /* BOTHSRCALPHA, and separate alpha */
+    rs(dev, RS_SRCBLEND, 12);
+    rs(dev, 206, 1), rs(dev, 207, 1), rs(dev, 208, 2);       /* alpha: ZERO, ONE */
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET | CLEAR_ZBUFFER, Dst, f32(1.0f), 0u), D3D_OK);
+    quad_tlv(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0.5f, S);
+    float w[4];
+    for (int c = 0; c < 3; c++) w[c] = s[c] * s[3] + d[c] * (1 - s[3]);
+    w[3] = d[3];
+    uint32_t got = read1(dev, rt, 4, 4, 2, 2);
+    if (!near_color(got, pack(w), 2)) printf("FAIL BOTHSRCALPHA/separate alpha: 0x%08X want 0x%08X\n", got, pack(w)), fails++;
+    rs(dev, 206, 0), rs(dev, RS_ALPHABLENDENABLE, 0);
+    /* COLORWRITEENABLE: green only */
+    rs(dev, 168, 2);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0u, f32(1.0f), 0u), D3D_OK);
+    quad_tlv(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0.5f, 0xFFFFFFFFu);
+    CHECKEQ(read1(dev, rt, 4, 4, 1, 1), 0x0000FF00u);
+    rs(dev, 168, 0xF);
+    /* Z functions against a cleared 0.5 */
+    static const struct { uint32_t f; int lt, eq, gt; } zf[] = {
+        { 1, 0, 0, 0 }, { 2, 1, 0, 0 }, { 3, 0, 1, 0 }, { 4, 1, 1, 0 }, { 5, 0, 0, 1 }, { 6, 1, 0, 1 }, { 7, 0, 1, 1 },
+        { 8, 1, 1, 1 } };
+    for (unsigned i = 0; i < 8; i++) {
+        rs(dev, RS_ZFUNC, zf[i].f);
+        int got3[3];
+        float zs[3] = { 0.25f, 0.5f, 0.75f };
+        for (int j = 0; j < 3; j++) {
+            CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET | CLEAR_ZBUFFER, 0u, f32(0.5f), 0u), D3D_OK);
+            quad_tlv(dev, -0.5f, -0.5f, 3.5f, 3.5f, zs[j], 0xFFFFFFFFu);
+            got3[j] = read1(dev, rt, 4, 4, 1, 1) == 0xFFFFFFFFu;
+        }
+        if (got3[0] != zf[i].lt || got3[1] != zf[i].eq || got3[2] != zf[i].gt)
+            printf("FAIL ZFUNC %u: %d%d%d\n", zf[i].f, got3[0], got3[1], got3[2]), fails++;
+    }
+    rs(dev, RS_ZFUNC, 4);
+    /* ZWRITEENABLE off: a later quad behind is still drawn */
+    rs(dev, RS_ZWRITEENABLE, 0);
+    clear(dev, 0);
+    quad_tlv(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0.2f, 0xFF0000FFu);
+    quad_tlv(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0.6f, 0xFFFF0000u);
+    CHECKEQ(read1(dev, rt, 4, 4, 1, 1), 0xFFFF0000u);
+    rs(dev, RS_ZWRITEENABLE, 1);
+    /* stencil: mark the left half with 5, then draw only where it is 5 */
+    clear(dev, 0xFF000000u);
+    rs(dev, RS_STENCILENABLE, 1), rs(dev, RS_STENCILFUNC, 8), rs(dev, RS_STENCILPASS, 3), rs(dev, RS_STENCILREF, 5);
+    rs(dev, 168, 0);
+    quad_tlv(dev, -0.5f, -0.5f, 1.5f, 3.5f, 0.5f, 0xFFFFFFFFu);
+    rs(dev, 168, 0xF);
+    rs(dev, RS_STENCILFUNC, 3), rs(dev, RS_STENCILPASS, 1);
+    rs(dev, RS_ZENABLE, 0);
+    quad_tlv(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0.5f, 0xFF00FF00u);
+    CHECKEQ(read1(dev, rt, 4, 4, 0, 1), 0xFF00FF00u);
+    CHECKEQ(read1(dev, rt, 4, 4, 3, 1), 0xFF000000u);
+    rs(dev, RS_STENCILENABLE, 0), rs(dev, RS_ZENABLE, 1);
+    /* the scissor rect limits a draw */
+    CHECKEQ(vcall(dev, DV_SetScissorRect, 1, rect(1, 1, 2, 2)), D3D_OK);
+    rs(dev, 174, 1);
+    clear(dev, 0xFF000000u);
+    quad_tlv(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0.5f, 0xFFFFFFFFu);
+    CHECKEQ(read1(dev, rt, 4, 4, 1, 1), 0xFFFFFFFFu);
+    CHECKEQ(read1(dev, rt, 4, 4, 2, 2), 0xFF000000u);
+    rs(dev, 174, 0);
+    /* an X8 back buffer keeps alpha 1 for DESTALPHA blending */
+    vcall(dev, DV_SetRenderTarget, 2, 0u, back_buffer(dev));
+    vcall(back_buffer(dev), 2, 0);
+    rs(dev, RS_ALPHABLENDENABLE, 1), rs(dev, RS_SRCBLEND, 7), rs(dev, RS_DESTBLEND, 1);   /* src * dest alpha */
+    clear(dev, 0x00000000u);
+    quad_tlv(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0.5f, 0x40336699u);
+    uint32_t *px = frame(dev, 4, 4);
+    CHECKEQ(px[5], 0xFF336699u);
+    vcall(rt, 2, 0);
+}
+
+static void group_samplers(void) {
+    uint32_t dev = new_device(4, 4), rt = argb_target(dev, 4, 4);
+    uint32_t RG[2] = { 0xFFFF0000u, 0xFF00FF00u };
+    uint32_t t = texture_argb(dev, 2, 1, RG);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, t), D3D_OK);
+    tss(dev, 0, TSS_COLOROP, 2), tss(dev, 0, TSS_COLORARG1, 2), tss(dev, 0, TSS_ALPHAOP, 2), tss(dev, 0, TSS_ALPHAARG1, 2);
+    /* every vertex at u = 1.25: WRAP 0.25 (red), MIRROR 0.75 (green), CLAMP (green), BORDER (white), MIRRORONCE (green) */
+    static const struct { uint32_t mode, want; } am[] = {
+        { 1, 0xFFFF0000u }, { 2, 0xFF00FF00u }, { 3, 0xFF00FF00u }, { 4, 0xFFFFFFFFu }, { 5, 0xFF00FF00u } };
+    sst(dev, 0, 4, 0xFFFFFFFFu);                             /* BORDERCOLOR */
+    for (unsigned i = 0; i < 5; i++) {
+        sst(dev, 0, SS_ADDRESSU, am[i].mode);
+        clear(dev, 0);
+        quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 1.25f, 0.5f, 1.25f, 0.5f, 0xFFFFFFFFu);
+        uint32_t got = read1(dev, rt, 4, 4, 1, 1);
+        if (got != am[i].want) printf("FAIL ADDRESSU %u: 0x%08X want 0x%08X\n", am[i].mode, got, am[i].want), fails++;
+    }
+    sst(dev, 0, SS_ADDRESSU, 1);
+    /* MAXMIPLEVEL 1 samples level 1 */
+    uint32_t m = texture(dev, 2, 2, 2, FMT_A8R8G8B8), lr = gmem(8);
+    uint32_t l0[4] = { 0xFFFF0000u, 0xFFFF0000u, 0xFFFF0000u, 0xFFFF0000u }, l1 = 0xFF0000FFu;
+    vcall(m, TX_LockRect, 4, 0u, lr, 0u, 0u);
+    memcpy(hle_ptr(MEM32(lr + 4)), l0, 8), memcpy((uint8_t *)hle_ptr(MEM32(lr + 4)) + MEM32(lr), l0 + 2, 8);
+    vcall(m, TX_UnlockRect, 1, 0u);
+    vcall(m, TX_LockRect, 4, 1u, lr, 0u, 0u);
+    memcpy(hle_ptr(MEM32(lr + 4)), &l1, 4);
+    vcall(m, TX_UnlockRect, 1, 1u);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, m), D3D_OK);
+    sst(dev, 0, SS_MIPFILTER, 1);
+    clear(dev, 0);
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, 0xFFFFFFFFu);
+    CHECKEQ(read1(dev, rt, 4, 4, 1, 1), 0xFFFF0000u);        /* 2x2 onto 4x4: level 0 */
+    sst(dev, 0, SS_MAXMIPLEVEL, 1);
+    clear(dev, 0);
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, 0xFFFFFFFFu);
+    CHECKEQ(read1(dev, rt, 4, 4, 1, 1), 0xFF0000FFu);
+    /* anisotropic filtering is accepted */
+    sst(dev, 0, SS_MAXMIPLEVEL, 0);
+    sst(dev, 0, SS_MAGFILTER, 3), sst(dev, 0, SS_MINFILTER, 3), sst(dev, 0, SS_MAXANISOTROPY, 8);
+    clear(dev, 0);
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, 0xFFFFFFFFu);
+    CHECKEQ(read1(dev, rt, 4, 4, 1, 1), 0xFFFF0000u);
+    vcall(dev, DV_SetTexture, 2, 0u, 0u);
+    vcall(t, 2, 0), vcall(m, 2, 0), vcall(rt, 2, 0);
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "stages", group_stages }, { "blend_depth_stencil", group_blend_depth_stencil }, { "samplers", group_samplers },
     { "tri_colour", group_tri_colour }, { "half_pixel", group_half_pixel }, { "transforms", group_transforms },
     { "primitive_types", group_primitive_types }, { "dynamic_discard", group_dynamic_discard },
     { "depth_objects_draw", group_depth_objects_draw },

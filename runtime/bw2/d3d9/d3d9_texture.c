@@ -117,7 +117,8 @@ static uint32_t create(uint32_t dev, enum d3d_kind kind, uint32_t w, uint32_t h,
     t->lock_ro = calloc(n, sizeof(int)), t->lockbox = calloc(n, sizeof *t->lockbox);
     if (pool == D3DPOOL_DEFAULT || pool == D3DPOOL_MANAGED) {
         enum mtl_textype mt = kind == D3DK_CUBETEXTURE ? MT_CUBE : kind == D3DK_VOLUMETEXTURE ? MT_3D : MT_2D;
-        uint32_t flags = (usage & D3DUSAGE_RENDERTARGET ? MT_RENDER : 0) | (autogen ? MT_MIPGEN : 0);
+        uint32_t flags = (usage & D3DUSAGE_RENDERTARGET ? MT_RENDER : 0) | (autogen ? MT_MIPGEN : 0) |
+                         (t->f->swizzle[3] == '1' ? MT_OPAQUE : 0);
         t->tex = mtl_tex_new(d->mtl, t->f->store, mt, t->w, t->h, t->d, t->mtl_levels, flags);
         t->view = mtl_tex_view(t->tex, t->f->swizzle, 0);
     }
