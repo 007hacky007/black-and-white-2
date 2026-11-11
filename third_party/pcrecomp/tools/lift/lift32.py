@@ -1678,57 +1678,63 @@ class Lifter:
 
         elif m == 'fadd':
             if ops:
-                lines.append(f"{self._fpu_dst(ops)} += {self._fmt_fpu_src(ops)}; {comment}")
+                d = self._fpu_dst(ops)
+                lines.append(f"{d} = FP_PC({d} + {self._fmt_fpu_src(ops)}); {comment}")
             else:
-                lines.append(f"_st[0] += _st[1]; {comment}")
+                lines.append(f"_st[0] = FP_PC(_st[0] + _st[1]); {comment}")
 
         elif m == 'faddp':
-            lines.append(f"{{ double _v = fp_pop(); {self._fpu_popdst(ops)} += _v; }} {comment}")
+            d = self._fpu_popdst(ops)
+            lines.append(f"{{ double _v = fp_pop(); {d} = FP_PC({d} + _v); }} {comment}")
 
         elif m == 'fsub':
             if ops:
-                lines.append(f"{self._fpu_dst(ops)} -= {self._fmt_fpu_src(ops)}; {comment}")
+                d = self._fpu_dst(ops)
+                lines.append(f"{d} = FP_PC({d} - {self._fmt_fpu_src(ops)}); {comment}")
             else:
-                lines.append(f"_st[0] -= _st[1]; {comment}")
+                lines.append(f"_st[0] = FP_PC(_st[0] - _st[1]); {comment}")
 
         elif m == 'fsubp':
             d = self._fpu_popdst(ops)
-            lines.append(f"{{ double _v = fp_pop(); {d} -= _v; }} {comment}")
+            lines.append(f"{{ double _v = fp_pop(); {d} = FP_PC({d} - _v); }} {comment}")
 
         elif m == 'fsubr':
             if ops:
-                lines.append(f"{self._fpu_dst(ops)} = {self._fmt_fpu_src(ops)} - {self._fpu_dst(ops)}; {comment}")
+                lines.append(f"{self._fpu_dst(ops)} = FP_PC({self._fmt_fpu_src(ops)} - {self._fpu_dst(ops)}); {comment}")
 
         elif m == 'fsubrp':
             d = self._fpu_popdst(ops)
-            lines.append(f"{{ double _v = fp_pop(); {d} = _v - {d}; }} {comment}")
+            lines.append(f"{{ double _v = fp_pop(); {d} = FP_PC(_v - {d}); }} {comment}")
 
         elif m == 'fmul':
             if ops:
-                lines.append(f"{self._fpu_dst(ops)} *= {self._fmt_fpu_src(ops)}; {comment}")
+                d = self._fpu_dst(ops)
+                lines.append(f"{d} = FP_PC({d} * {self._fmt_fpu_src(ops)}); {comment}")
             else:
-                lines.append(f"_st[0] *= _st[1]; {comment}")
+                lines.append(f"_st[0] = FP_PC(_st[0] * _st[1]); {comment}")
 
         elif m == 'fmulp':
-            lines.append(f"{{ double _v = fp_pop(); {self._fpu_popdst(ops)} *= _v; }} {comment}")
+            d = self._fpu_popdst(ops)
+            lines.append(f"{{ double _v = fp_pop(); {d} = FP_PC({d} * _v); }} {comment}")
 
         elif m == 'fdiv':
             if ops:
-                lines.append(f"{self._fpu_dst(ops)} /= {self._fmt_fpu_src(ops)}; {comment}")
+                d = self._fpu_dst(ops)
+                lines.append(f"{d} = FP_PC({d} / {self._fmt_fpu_src(ops)}); {comment}")
             else:
-                lines.append(f"_st[0] /= _st[1]; {comment}")
+                lines.append(f"_st[0] = FP_PC(_st[0] / _st[1]); {comment}")
 
         elif m == 'fdivp':
             d = self._fpu_popdst(ops)
-            lines.append(f"{{ double _v = fp_pop(); {d} = _v == 0.0 ? {d} : {d} / _v; }} {comment}")
+            lines.append(f"{{ double _v = fp_pop(); {d} = _v == 0.0 ? {d} : FP_PC({d} / _v); }} {comment}")
 
         elif m == 'fdivr':
             if ops:
-                lines.append(f"{self._fpu_dst(ops)} = {self._fmt_fpu_src(ops)} / {self._fpu_dst(ops)}; {comment}")
+                lines.append(f"{self._fpu_dst(ops)} = FP_PC({self._fmt_fpu_src(ops)} / {self._fpu_dst(ops)}); {comment}")
 
         elif m == 'fdivrp':
             d = self._fpu_popdst(ops)
-            lines.append(f"{{ double _v = fp_pop(); {d} = {d} == 0.0 ? _v : _v / {d}; }} {comment}")
+            lines.append(f"{{ double _v = fp_pop(); {d} = {d} == 0.0 ? _v : FP_PC(_v / {d}); }} {comment}")
 
         elif m == 'fchs':
             lines.append(f"_st[0] = -_st[0]; {comment}")
@@ -1744,14 +1750,14 @@ class Lifter:
                        else f"(double)(int32_t)MEM32({addr})")
                 op = {'fimul': '*', 'fiadd': '+', 'fisub': '-', 'fidiv': '/'}.get(m)
                 if op:
-                    lines.append(f"_st[0] = _st[0] {op} {src}; {comment}")
+                    lines.append(f"_st[0] = FP_PC(_st[0] {op} {src}); {comment}")
                 elif m == 'fisubr':
-                    lines.append(f"_st[0] = {src} - _st[0]; {comment}")
+                    lines.append(f"_st[0] = FP_PC({src} - _st[0]); {comment}")
                 else:
-                    lines.append(f"_st[0] = {src} / _st[0]; {comment}")
+                    lines.append(f"_st[0] = FP_PC({src} / _st[0]); {comment}")
 
         elif m == 'fsqrt':
-            lines.append(f"_st[0] = sqrt(_st[0]); {comment}")
+            lines.append(f"_st[0] = FP_PC(sqrt(_st[0])); {comment}")
 
         elif m == 'fxch':
             # capstone reports fxch st(N) as [st(0), st(N)]; swap st(0) with the

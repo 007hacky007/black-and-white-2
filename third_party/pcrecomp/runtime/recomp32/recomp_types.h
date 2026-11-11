@@ -1037,6 +1037,11 @@ static inline double fp_round_cw(double v, uint16_t cw) {
     }
 }
 #define fp_to_int(v) fp_round_cw((v), _fpu_cw)
+/* x87 precision control (control word bits 8-9). The stack is doubles, so
+ * PC=53 and PC=64 are as is; PC=24 (D3D9's CreateDevice sets it) rounds each
+ * arithmetic result to float, as the FPU rounds its significand. Loads,
+ * stores and compares are not affected, as on x87. */
+#define FP_PC(x) ((_fpu_cw & 0x300) == 0 ? (double)(float)(x) : (x))
 
 /* fistp qword: the exact shadow while st0 is still the value fild loaded. */
 static inline int64_t fp_st0_to_i64(double v0, int64_t shadow, uint16_t cw) {
