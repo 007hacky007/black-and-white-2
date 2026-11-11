@@ -15,6 +15,7 @@ void d3d9_copy_register(void);
 void d3d9_draw_register(void);
 void d3d9_stateblock_register(void);
 void d3d9_query_register(void);
+void d3dx_math_register(void);
 
 void bw2_d3d_register(void) {
     d3d9_adapter_register();
@@ -28,4 +29,5 @@ void bw2_d3d_register(void) {
     d3d9_draw_register();
     d3d9_stateblock_register();
     d3d9_query_register();
+    d3dx_math_register();
 }
