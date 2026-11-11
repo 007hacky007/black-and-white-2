@@ -1231,3 +1231,52 @@ def test_main_sync_runs_on_main_thread(tmp_path, monkeypatch):
     b = _engine(tmp_path, "ret", {K32: ["ExitProcess"]})
     r = _run(tmp_path, b, "--selftest-mainsync")
     assert r.returncode == 0 and "main sync ok" in r.stdout, r.stdout + r.stderr[-2000:]
+
+
+# ---- Plan 4 Task 2: x87 precision control --------------------------------------
+
+def test_x87_single_precision_mode(tmp_path):
+    import struct
+    single = struct.unpack("<Q", struct.pack("<d", struct.unpack("<f", struct.pack("<f", 1 / 3))[0]))[0]
+    double = struct.unpack("<Q", struct.pack("<d", 1 / 3))[0]
+    # exit code: bit 0 = PC=24 result is 1/3 rounded to float, bit 1 = PC=53 result is the double 1/3
+    asm = r"""
+    xor ebx, ebx
+    fldcw word ptr [cw24]
+    fld1
+    fld dword ptr [three]
+    fdivp st(1), st
+    fstp qword ptr [out]
+    mov eax, dword ptr [out]
+    cmp eax, dword ptr [want24]
+    jne 1f
+    mov eax, dword ptr [out + 4]
+    cmp eax, dword ptr [want24 + 4]
+    jne 1f
+    or ebx, 1
+1:  fldcw word ptr [cw53]
+    fld1
+    fld dword ptr [three]
+    fdivp st(1), st
+    fstp qword ptr [out]
+    mov eax, dword ptr [out]
+    cmp eax, dword ptr [want53]
+    jne 2f
+    mov eax, dword ptr [out + 4]
+    cmp eax, dword ptr [want53 + 4]
+    jne 2f
+    or ebx, 2
+2:  push ebx
+    call dword ptr [{IAT_ExitProcess}]
+.org 0x200
+cw24: .short 0x007F
+cw53: .short 0x027F
+three: .float 3.0
+.p2align 3
+out: .quad 0
+want24: .quad WANT24
+want53: .quad WANT53
+""".replace("WANT24", hex(single)).replace("WANT53", hex(double))
+    b = _engine(tmp_path, asm, {K32: ["ExitProcess"]})
+    r = _run(tmp_path, b)
+    assert r.returncode == 3, f"exit {r.returncode}: bit 0 = single-precision result right, bit 1 = double\n{r.stderr[-2000:]}"
