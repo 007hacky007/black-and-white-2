@@ -255,7 +255,7 @@ recomp_func_t recomp_lookup_import(uint32_t va) {
     if (i < (uint32_t)g_shim_n && g_shim[i].va == va) {
         g_last_import_va = va;
         g_cur_import = g_shim[i].name;
-        if (win32hle_trace) fprintf(stderr, "[hle] %s\n", g_shim[i].name);
+        if (win32hle_trace) fprintf(stderr, "[hle] %s (sub_%08X)\n", g_shim[i].name, g_cur_func);
         g_pending_shim = i;
         return shim_entry;
     }
