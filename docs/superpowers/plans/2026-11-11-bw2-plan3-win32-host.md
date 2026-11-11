@@ -161,7 +161,7 @@ The lifter gains landing pads (setjmp) in every function whose prologue installs
 
 **Files:**
 - Create: `runtime/bw2/cpu.c`
-- Modify: `third_party/pcrecomp/runtime/recomp32/recomp_types.h` (on non-x86 hosts, `CPUID_impl` calls `void recomp_cpuid(uint32_t leaf, uint32_t sub)`, which the host defines), `third_party/pcrecomp.PATCHES`
+- Modify: `third_party/pcrecomp/runtime/recomp32/recomp_types.h` (on non-x86 hosts, `CPUID_impl` calls `void recomp_cpuid(uint32_t leaf, uint32_t sub)` and `__rdtsc` calls `uint64_t recomp_rdtsc(void)`, both defined by the host), `third_party/pcrecomp.PATCHES`
 - Test: `tests/test_engine.py`
 
 **Interfaces:**
@@ -173,14 +173,14 @@ The lifter gains landing pads (setjmp) in every function whose prologue installs
 | 1 | `0x000006F6` | `0x00010800` | `0` | `0x0789FBFF` |
 | `0x80000000` | `0x80000004` | `0` | `0` | `0` |
 | `0x80000001` | `0` | `0` | `0` | `0` |
-| `0x80000002`-`4` | brand string `BW2 virtual CPU`, zero-padded | | | |
+| `0x80000002`-`4` | brand string `BW2 virtual CPU @ 3.00GHz`, zero-padded | | | |
 | anything else | `0` | `0` | `0` | `0` |
 
-  Leaf 1 edx `0x0789FBFF` means FPU through CLFSH, MMX, FXSR, SSE and SSE2, with no HTT, no SSE3 and no 3DNow!. RDTSC stays pcrecomp's monotonic nanosecond count, which reads as a 1 GHz clock.
+  Leaf 1 edx `0x0789FBFF` means FPU through CLFSH, MMX, FXSR, SSE and SSE2, with no HTT, no SSE3 and no 3DNow!. RDTSC is a monotonic count at a fixed 3 GHz (`BW2_TSC_HZ = 3000000000`): nanoseconds since boot times 3, so it tracks real time. pcrecomp's plain nanosecond count would read as a 1 GHz CPU, below BW2's minimum of about 1.6 GHz. A game that sets its detail level from measured clock speed would then pick low settings and save them for good, as NFSU2 did (spec 7.1).
 - [ ] **Step 1: Write the failing tests.**
   - `test_cpuid_answers`: a guest runs `cpuid` for leaves 0, 1 and `0x80000002` and stores the registers. Assert the table values.
-  - `test_rdtsc_tracks_time`: a guest reads `rdtsc`, calls `Sleep(200)`, and reads it again. The delta is between 150e6 and 400e6.
-- [ ] **Step 2: Run.** Expected: FAIL (CPUID leaves the registers unchanged).
+  - `test_rdtsc_tracks_time`: a guest reads `rdtsc`, calls `Sleep(200)`, and reads it again. The delta is between 0.45e9 and 1.2e9 (3 GHz).
+- [ ] **Step 2: Run.** Expected: FAIL (CPUID leaves the registers unchanged, and the RDTSC delta is about 0.2e9).
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run.** Expected: PASS.
 - [ ] **Step 5: Commit** the vendored change, then `git commit -m "Answer CPUID with a fixed virtual CPU"`.
@@ -328,6 +328,7 @@ The lifter gains landing pads (setjmp) in every function whose prologue installs
   - threads created;
   - exceptions thrown and caught (`--trace-eh` summary);
   - VM functions entered;
+  - the CPU speed the game measures, and the detail settings it chooses and saves on first run (registry or files). If it picks below its defaults because of CPU speed, that is a finding to fix in this task;
   - registry values seeded;
   - files opened, by folder;
   - wall time to exit 4;
