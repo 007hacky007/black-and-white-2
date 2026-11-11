@@ -37,6 +37,7 @@ void bw2_lifted_dll_add(const char *name, uint32_t base) {
 }
 
 static int load(const char *base_name, const char *host, uint32_t *hmod) {
+    if (bw2_later_dll(base_name)) bw2_later_load(base_name);
     int i = 0;
     while (i < g_nlifted && strcmp(g_lifted[i].name, base_name)) i++;
     if (i == g_nlifted) return 0;

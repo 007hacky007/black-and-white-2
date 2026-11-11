@@ -19,39 +19,6 @@
 #include "host.h"
 #include "bw2.h"
 
-static const win32hle_shim *const g_hle_tables[] = {
-    win32hle_kernel32, win32hle_kernel32_ext, win32hle_kernel32_crt, win32hle_module, win32hle_gdi32,
-    win32hle_user32, win32hle_winmm, win32hle_lz32, win32hle_wsock32, win32hle_ole32, win32hle_storage,
-    win32hle_advapi32,
-};
-
-recomp_func_t bw2_hle_shim(const char *name) {
-    for (size_t t = 0; t < sizeof g_hle_tables / sizeof *g_hle_tables; t++)
-        for (const win32hle_shim *s = g_hle_tables[t]; s->name; s++)
-            if (!strcmp(s->name, name)) return s->fn;
-    hle_fatal("bw2_hle_shim: win32hle has no %s", name);
-    return NULL;
-}
-
-void bw2_register_shims(void) {
-    win32hle_register(bw2_guard_shims);         /* BW2's own first: hle_resolve takes the first */
-    win32hle_register(bw2_mount_shims);
-    win32hle_register(bw2_shell_shims);
-    win32hle_register(bw2_eh_shims);
-    win32hle_register(win32hle_kernel32);
-    win32hle_register(win32hle_kernel32_ext);
-    win32hle_register(win32hle_kernel32_crt);
-    win32hle_register(win32hle_module);
-    win32hle_register(win32hle_gdi32);
-    win32hle_register(win32hle_user32);
-    win32hle_register(win32hle_winmm);
-    win32hle_register(win32hle_lz32);
-    win32hle_register(win32hle_wsock32);
-    win32hle_register(win32hle_ole32);
-    win32hle_register(win32hle_storage);
-    win32hle_register(win32hle_advapi32);
-}
-
 /* A dword of path's PE optional header (0x1C ImageBase, 0x38 SizeOfImage). */
 static uint32_t pe_field(const char *path, uint32_t opt_off) {
     FILE *f = fopen(path, "rb");
@@ -66,6 +33,13 @@ static uint32_t pe_field(const char *path, uint32_t opt_off) {
     return 0;
 }
 
+static uint32_t g_call_va, g_call_n, g_call_args[8];
+static uint32_t call_one(void) {
+    uint32_t eax = hle_call_guest(g_call_va, (int)g_call_n, g_call_args);
+    printf("call 0x%08X -> eax 0x%08X\n", g_call_va, eax);
+    return 0;
+}
+
 static void report_eh_depth(int code) { (void)code; fprintf(stderr, "eh depth %d\n", bw2_eh_depth()); }
 
 static int usage(void) {
@@ -75,13 +49,19 @@ static int usage(void) {
 
 int main(int argc, char **argv) {
     const char *game = NULL, *exe = "white.exe";
-    int strict = 0, st_dispatch = 0, st_mem = 0, nlifted = 0;
+    int strict = 0, st_dispatch = 0, st_mem = 0, nlifted = 0, ncall = -1;
+    uint32_t call_args[8];
     struct { const char *name; uint32_t base; } lifted[8];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--game") && i + 1 < argc) game = argv[++i];
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
         else if (!strcmp(argv[i], "--strict")) strict = 1;
         else if (!strcmp(argv[i], "--trace-eh")) bw2_eh_trace = 1;
+        else if (!strcmp(argv[i], "--call") && i + 1 < argc) {   /* debugging: one guest function, fresh state */
+            ncall = 0;
+            g_call_va = (uint32_t)strtoul(argv[++i], NULL, 0);
+            while (i + 1 < argc && argv[i + 1][0] != '-' && ncall < 8) call_args[ncall++] = (uint32_t)strtoul(argv[++i], NULL, 0);
+        }
         else if (!strcmp(argv[i], "--lifted-dll") && i + 1 < argc) {
             char *eq = strchr(argv[++i], '=');
             if (!eq) return usage();
@@ -110,9 +90,10 @@ int main(int argc, char **argv) {
     if (!realpath(game, game_abs)) { fprintf(stderr, "bw2: no game folder %s\n", game); return BW2_EXIT_BOOT; }
     if (bw2_mount(game_abs, support)) return BW2_EXIT_BOOT;
     game = game_abs;
-    bw2_register_shims();
     char path[4096];
     snprintf(path, sizeof path, "%s/%s", game, exe);
+    bw2_later_register(path);                   /* before the rest: these names must stop the run */
+    bw2_register_shims();
     bw2_threads_init();
     bw2_dll_init();
     for (int i = 0; i < nlifted; i++) bw2_lifted_dll_add(lifted[i].name, lifted[i].base);
@@ -124,5 +105,10 @@ int main(int argc, char **argv) {
     bw2_tls_add_module(pe_field(path, 0x1C));
     bw2_guard_init(pe_field(path, 0x1C));
     bw2_eh_add_image(pe_field(path, 0x1C), pe_field(path, 0x38));
+    if (ncall >= 0) {
+        g_call_n = (uint32_t)ncall;
+        memcpy(g_call_args, call_args, sizeof call_args);
+        return (int)bw2_run_on_main_stack(call_one);
+    }
     return (int)bw2_run_on_main_stack(recomp_host_run);
 }

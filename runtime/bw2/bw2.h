@@ -44,6 +44,10 @@ extern const win32hle_shim bw2_eh_shims[];
 /* guard.c: the tripwire for disc and driver checks (exit 3, the user decides). */
 void bw2_guard_init(uint32_t main_image_base);
 extern const win32hle_shim bw2_guard_shims[];
+/* later.c: the end of plan 3's boot: a later plan's import or DLL exits 4. */
+void bw2_later_register(const char *exe_path);
+int  bw2_later_dll(const char *base_name);
+void bw2_later_load(const char *base_name);
 /* shell.c: the user's folders and name. */
 extern const win32hle_shim bw2_shell_shims[];
 

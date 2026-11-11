@@ -48,10 +48,22 @@ int bw2_tls_add_module(uint32_t base) {
 
 static void crash(int sig, siginfo_t *si, void *uc) {
     (void)uc;
-    char msg[160];
-    int n = snprintf(msg, sizeof msg, "[bw2] FATAL: signal %d at host address %p in guest sub_%08X (import %s)\n",
-                     sig, si ? si->si_addr : NULL, g_cur_func, g_cur_import ? g_cur_import : "-");
+    char msg[512];
+    uintptr_t addr = si ? (uintptr_t)si->si_addr : 0, base = (uintptr_t)g_mem_base;
+    int n = snprintf(msg, sizeof msg, "[bw2] FATAL: signal %d at host address %p", sig, (void *)addr);
+    if (addr - base < (1ull << 32)) n += snprintf(msg + n, sizeof msg - (size_t)n, " (guest 0x%08X)", (uint32_t)(addr - base));
+    n += snprintf(msg + n, sizeof msg - (size_t)n,
+                  " in guest sub_%08X (last import %s)\n[bw2] eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X "
+                  "ebp=%08X esp=%08X\n[bw2] guest stack:",
+                  g_cur_func, g_cur_import ? g_cur_import : "-", g_eax, g_ebx, g_ecx, g_edx, g_esi, g_edi, g_ebp, g_esp);
     write(2, msg, (size_t)n);
+    for (int i = 0; i < 24; i++) {                      /* the stack's top words, if mapped */
+        uint32_t a = g_esp + 4u * (uint32_t)i;
+        if (a < 0x10000u) break;
+        n = snprintf(msg, sizeof msg, " %08X", MEM32(a));
+        write(2, msg, (size_t)n);
+    }
+    write(2, "\n", 1);
     signal(sig, SIG_DFL);
     raise(sig);
 }

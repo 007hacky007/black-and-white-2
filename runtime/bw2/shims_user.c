@@ -1,0 +1,73 @@
+/*
+ * shims_user.c - user32 imports win32hle does not answer, as BW2 calls them
+ * (each one checked in shims_selftest.c first).
+ */
+#include <string.h>
+#include "win32hle.h"
+#include "bw2.h"
+
+#define SPI_GETMOUSE           0x0003u
+#define SPI_SETMOUSE           0x0004u
+#define SPI_GETSCREENSAVEACTIVE 0x0010u
+#define SPI_SETSCREENSAVEACTIVE 0x0011u
+#define SPI_GETFILTERKEYS      0x0032u
+#define SPI_SETFILTERKEYS      0x0033u
+#define SPI_GETTOGGLEKEYS      0x0034u
+#define SPI_SETTOGGLEKEYS      0x0035u
+#define SPI_GETSTICKYKEYS      0x003Au
+#define SPI_SETSTICKYKEYS      0x003Bu
+#define SPI_GETMOUSESPEED      0x0070u
+#define SPI_SETMOUSESPEED      0x0071u
+
+/* SystemParametersInfoA(action, uiParam, pvParam, fWinIni). The game reads the
+ * mouse and accessibility-key settings at start and puts them back on exit:
+ * reads answer Windows' defaults, writes succeed and change nothing on the Mac.
+ * Any other action stops the run, naming it. */
+static void k_SystemParametersInfoA(void) {
+    uint32_t action = A32(0), pv = A32(2);
+    switch (action) {
+    case SPI_GETMOUSESPEED:
+        if (pv) MEM32(pv) = 10;
+        RET(1, 4);
+    case SPI_GETMOUSE:                                     /* thresholds 6, 10; acceleration on */
+        if (pv) MEM32(pv) = 6, MEM32(pv + 4) = 10, MEM32(pv + 8) = 1;
+        RET(1, 4);
+    case SPI_GETSCREENSAVEACTIVE:
+        if (pv) MEM32(pv) = 0;
+        RET(1, 4);
+    case SPI_GETSTICKYKEYS: case SPI_GETTOGGLEKEYS: case SPI_GETFILTERKEYS:
+        if (pv) {                                          /* {cbSize, dwFlags, ...}: all off */
+            uint32_t size = MEM32(pv);
+            if (size >= 8 && size <= 64) memset(hle_ptr(pv + 4), 0, size - 4);
+        }
+        RET(1, 4);
+    case SPI_SETMOUSESPEED: case SPI_SETMOUSE: case SPI_SETSCREENSAVEACTIVE:
+    case SPI_SETSTICKYKEYS: case SPI_SETTOGGLEKEYS: case SPI_SETFILTERKEYS:
+        RET(1, 4);
+    default:
+        hle_fatal("SystemParametersInfoA action 0x%04X not answered (from guest 0x%08X)", action, MEM32(g_esp));
+    }
+}
+
+static void k_GetDoubleClickTime(void) { RET(500, 0); }                 /* Windows' default, ms */
+
+/* One keyboard layout: US English (0x0409 language, 0x0409 device). */
+#define US_LAYOUT 0x04090409u
+static void k_GetKeyboardLayout(void) { RET(US_LAYOUT, 1); }
+static void k_GetKeyboardLayoutList(void) {             /* (n, list): with n 0, how many */
+    if (A32(0) && A32(1)) MEM32(A32(1)) = US_LAYOUT;
+    RET(1, 2);
+}
+
+/* _TrackMouseEvent(tme) (comctl32): the request for WM_MOUSELEAVE/WM_MOUSEHOVER
+ * is accepted; the input layer (a later plan) sends them. TRUE. */
+static void k_TrackMouseEvent(void) { RET(1, 1); }
+
+const win32hle_shim bw2_user_shims[] = {
+    { "_TrackMouseEvent",      k_TrackMouseEvent },
+    { "SystemParametersInfoA", k_SystemParametersInfoA },
+    { "GetDoubleClickTime",    k_GetDoubleClickTime },
+    { "GetKeyboardLayout",     k_GetKeyboardLayout },
+    { "GetKeyboardLayoutList", k_GetKeyboardLayoutList },
+    { NULL, NULL }
+};
