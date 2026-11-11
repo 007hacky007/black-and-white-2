@@ -146,6 +146,9 @@ void  hle_yield(void);
 /* Run once on each thread, under the machine, when its TIB first exists and
  * before its first guest code: a host's per-thread setup (static TLS). */
 extern void (*hle_new_thread_hook)(uint32_t tib);
+/* Run before every import the guest calls, with its name, under the machine
+ * (g_esp at its return address): a host's audit of who calls what. */
+extern void (*hle_import_hook)(const char *name);
 /* The host stack a CreateThread thread gets; 0 is pthread's default (kernel32_crt.c). */
 extern size_t hle_thread_stack_size;
 

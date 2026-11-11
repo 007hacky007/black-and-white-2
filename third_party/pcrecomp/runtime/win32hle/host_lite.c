@@ -242,11 +242,13 @@ static uint32_t g_last_import_va;
  * entered through shim_entry: the lookup and the call are back to back on the
  * thread that holds the machine, so the index passes through a global. */
 static volatile uint32_t g_pending_shim;
+void (*hle_import_hook)(const char *name);
 static void shim_entry(void) {
     uint32_t i = g_pending_shim;
     if (g_waiters) hle_yield();
     g_last_import_va = g_shim[i].va;                     /* again: the thread that ran meanwhile set its own */
     g_cur_import = g_shim[i].name;
+    if (hle_import_hook) hle_import_hook(g_shim[i].name);
     g_shim[i].fn();
 }
 recomp_func_t recomp_lookup_import(uint32_t va) {

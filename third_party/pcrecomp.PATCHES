@@ -12,3 +12,4 @@ runtime/win32hle/module.c, win32hle.h - hle_lifted_dll_hook asked first by LoadL
 runtime/win32hle/guest_mem.c - freed heap blocks wait in a FIFO quarantine (hle_heap_quarantine_bytes, 64 MB) before reuse or release, contents kept - games read memory they just freed (spec 7.2); host_selftest, kernel32_ext_selftest pass on the headless core
 runtime/win32hle/host_lite.c - the handle table grows by doubling up to 2^20 and stops loudly there, instead of 4096 slots and a silent 0 - spec 7.2: no fixed-size tables
 runtime/win32hle/host_lite.c - the import trace line names the calling guest function - to tell which code (the protection VM, the CRT) made a call
+runtime/win32hle/host_lite.c, win32hle.h - hle_import_hook, run before every import call with its name - a host audits which code calls what (BW2: the protection VM may call only GetCurrentThreadId)
