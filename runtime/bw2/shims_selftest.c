@@ -104,6 +104,20 @@ int main(void) {
         CHECK(call("GetKeyboardLayoutList", 2, 4u, l) == 1 && MEM32(l) == 0x04090409u);
     }
 
+    /* advapi32: privileges, as for a standard user who does not hold SeLockMemoryPrivilege */
+    {
+        uint32_t name = gmem(32), luid = gmem(8), tok = gmem(4), tp = gmem(16);
+        strcpy(hle_ptr(name), "SeLockMemoryPrivilege");
+        CHECK(call("LookupPrivilegeValueA", 3, 0u, name, luid) == 1 && MEM32(luid) == 4 && MEM32(luid + 4) == 0);
+        strcpy(hle_ptr(name), "SeNoSuchPrivilege");
+        CHECK(call("LookupPrivilegeValueA", 3, 0u, name, luid) == 0 && call("GetLastError", 0) == 1313);
+        CHECK(call("OpenProcessToken", 3, 0xFFFFFFFFu, 0x28u, tok) == 1 && MEM32(tok) != 0);
+        MEM32(tp) = 1, MEM32(tp + 4) = 4, MEM32(tp + 8) = 0, MEM32(tp + 12) = 2;      /* SE_PRIVILEGE_ENABLED */
+        CHECK(call("AdjustTokenPrivileges", 6, MEM32(tok), 0u, tp, 16u, 0u, 0u) == 1);
+        CHECK(call("GetLastError", 0) == 1300);                                    /* ERROR_NOT_ALL_ASSIGNED */
+        CHECK(call("CloseHandle", 1, MEM32(tok)) == 1);
+    }
+
     printf("shims selftest: %d failed\n", fails);
     return fails != 0;
 }
