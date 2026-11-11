@@ -44,13 +44,22 @@ static void *thread_trampoline(void *p) {
     a->done = 1;
     return NULL;
 }
+/* The host stack a guest thread gets (0: pthread's default). Lifted code nests
+ * a host frame per guest call, so a deep guest call chain needs far more than
+ * the 512 KB a secondary thread gets on macOS. */
+size_t hle_thread_stack_size;
 static void k_CreateThread(void) {             /* (sa, stack, start, param, flags, &tid) */
     struct thread_arg *a = (struct thread_arg *)calloc(1, sizeof *a);
     a->start = A32(2); a->param = A32(3); a->suspend = (A32(4) & 4) != 0;   /* CREATE_SUSPENDED */
     a->tid = hle_thread_id_new();
     uint32_t h = hle_handle_alloc(HLE_H_THREAD, a);
     pthread_t t;
-    if (!h || pthread_create(&t, NULL, thread_trampoline, a) != 0) { if (h) hle_handle_close(h); free(a); RET(0, 6); }
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    if (hle_thread_stack_size) pthread_attr_setstacksize(&attr, hle_thread_stack_size);
+    int failed = !h || pthread_create(&t, &attr, thread_trampoline, a) != 0;
+    pthread_attr_destroy(&attr);
+    if (failed) { if (h) hle_handle_close(h); free(a); RET(0, 6); }
     pthread_detach(t);
     uint32_t ptid = A32(5); if (ptid) MEM32(ptid) = a->tid;
     RET(h, 6);

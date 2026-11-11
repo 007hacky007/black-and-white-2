@@ -130,9 +130,12 @@ static uint32_t make_tib(uint32_t lo, uint32_t hi) {
 typedef struct { regs_t r; int depth, inited; } mstate;
 static __thread mstate g_ms;
 
+void (*hle_new_thread_hook)(uint32_t tib);
+
 void mach_enter(void) {
     if (g_ms.depth++ == 0) {
-        if (!g_ms.inited) {
+        int fresh = !g_ms.inited;
+        if (fresh) {
             uint32_t lo = hle_vm_reserve(0, GUEST_STACK);
             if (!lo) hle_fatal("no guest memory for a thread's stack");
             g_ms.r.esp    = lo + GUEST_STACK - 64;
@@ -142,6 +145,7 @@ void mach_enter(void) {
         }
         mach_take();
         regs_load(&g_ms.r);
+        if (fresh && hle_new_thread_hook) hle_new_thread_hook(g_ms.r.fs);
     }
 }
 void mach_leave(void) {

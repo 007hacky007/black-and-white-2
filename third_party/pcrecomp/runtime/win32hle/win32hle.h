@@ -143,6 +143,11 @@ void  hle_block_begin(void);
 void  hle_block_end(void);
 /* Inside a shim: hand the machine to a waiting thread, if any. */
 void  hle_yield(void);
+/* Run once on each thread, under the machine, when its TIB first exists and
+ * before its first guest code: a host's per-thread setup (static TLS). */
+extern void (*hle_new_thread_hook)(uint32_t tib);
+/* The host stack a CreateThread thread gets; 0 is pthread's default (kernel32_crt.c). */
+extern size_t hle_thread_stack_size;
 
 /* ---- user32 message queue, host-callable ----
  * So the optional SDL present/input layer can inject translated events, and a
