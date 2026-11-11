@@ -403,6 +403,28 @@ def write_images(d):
     return d
 
 
+def write_malformed(d):
+    """Headers whose sizes overflow 32-bit arithmetic: each must be refused as invalid data."""
+    d.mkdir(exist_ok=True)
+    # TGA 65535 x 65535 x 4: w*h*px wraps; a tiny body
+    (d / "huge.tga").write_bytes(struct.pack("<BBBHHBHHHHBB", 0, 0, 2, 0, 0, 0, 0, 0, 65535, 65535, 32, 8) + b"\0" * 64)
+    (d / "huge_rle.tga").write_bytes(struct.pack("<BBBHHBHHHHBB", 0, 0, 10, 0, 0, 0, 0, 0, 65535, 65535, 32, 8) + b"\xff" * 64)
+    # BMP 0x40000000 wide: the stride wraps
+    info = struct.pack("<IiiHHIIiiII", 40, 0x40000000, 4, 1, 32, 0, 0, 0, 0, 0, 0)
+    (d / "huge.bmp").write_bytes(b"BM" + struct.pack("<IHHI", 200, 0, 0, 54) + info + b"\0" * 64)
+    # DDS 2^31 x 2^31 DXT1 with mips: the layout wraps
+    (d / "huge.dds").write_bytes(dds(0x80000000, 0x80000000, b"DXT1", mips=16, data=b"\0" * 64))
+    # DDS whose data is shorter than its header says
+    (d / "short.dds").write_bytes(dds(64, 64, bits=32, masks=(0xFF0000, 0xFF00, 0xFF, 0xFF000000), data=b"\0" * 100))
+    return d
+
+
+def test_malformed_images_are_refused(selftest, tmp_path):
+    write_malformed(tmp_path / "img")
+    (tmp_path / "game").mkdir()
+    check(selftest, "malformed", tmp_path, tmp_path / "img")
+
+
 @pytest.mark.parametrize("group", ["dds", "tga_bmp_png", "convert", "filter", "fill", "save", "colorkey"])
 def test_textures(selftest, tmp_path, group):
     write_images(tmp_path / "img")

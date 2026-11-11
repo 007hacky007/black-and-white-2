@@ -4,6 +4,7 @@
  * origin) and uncompressed BMP decoded here; PNG, JPEG and other BMPs through
  * ImageIO. Writers for BMP, TGA and DDS.
  */
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "d3d9_format.h"
@@ -13,6 +14,11 @@
 #define RT_TEXTURE 3u
 #define RT_VOLUME 4u
 #define RT_CUBE 5u
+/* Caps on what a file may claim, so no size arithmetic below can wrap (sizes are summed in 64 bits). */
+#define MAX_DIM 16384u
+#define MAX_DEPTH 2048u
+#define MAX_LEVELS 16u
+#define MAX_BYTES (1ull << 30)
 
 static uint32_t dim(uint32_t v, uint32_t l) { return v >> l ? v >> l : 1; }
 uint32_t d3dx_image_level_w(const struct d3dx_image *im, uint32_t l) { return dim(im->w, l); }
@@ -24,18 +30,25 @@ void d3dx_image_free(struct d3dx_image *im) { free(im->data); free(im->off); mem
 static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 
-/* Lay out the subresources; the data is copied in by the caller. */
+/* Lay out the subresources (the data is copied in by the caller); 0 for sizes past the caps. */
 static int layout(struct d3dx_image *im) {
-    uint32_t n = im->faces * im->levels, off = 0;
+    if (!im->w || !im->h || !im->d || im->w > MAX_DIM || im->h > MAX_DIM || im->d > MAX_DEPTH ||
+        !im->levels || im->levels > MAX_LEVELS || (im->faces != 1 && im->faces != 6))
+        return 0;
+    uint32_t n = im->faces * im->levels;
+    uint64_t off = 0;
     im->off = calloc(n, 4);
+    if (!im->off) return 0;
     for (uint32_t f = 0; f < im->faces; f++)
         for (uint32_t l = 0; l < im->levels; l++) {
-            im->off[f * im->levels + l] = off;
-            off += d3dx_pitch(im->fmt, dim(im->w, l)) * d3dx_rows(im->fmt, dim(im->h, l)) * dim(im->d, l);
+            im->off[f * im->levels + l] = (uint32_t)off;
+            off += (uint64_t)d3dx_pitch(im->fmt, dim(im->w, l)) * d3dx_rows(im->fmt, dim(im->h, l)) * dim(im->d, l);
+            if (off > MAX_BYTES) { free(im->off); im->off = NULL; return 0; }
         }
-    im->size = off;
-    im->data = calloc(1, off ? off : 1);
-    return im->data != NULL;
+    im->size = (uint32_t)off;
+    im->data = calloc(1, off ? (size_t)off : 1);
+    if (!im->data) { free(im->off); im->off = NULL; return 0; }
+    return 1;
 }
 
 /* ---- DDS ---- */
@@ -83,7 +96,7 @@ static uint32_t decode_dds(const uint8_t *buf, uint32_t n, struct d3dx_image *im
     if (!im->fmt || !im->w || !im->h || im->levels > 16) return D3DXERR_INVALIDDATA;
     if (im->faces == 6 && (caps2 & 0xFC00) != 0xFC00) return D3DXERR_INVALIDDATA;   /* partial cubes: not here */
     if (!layout(im)) return D3DXERR_INVALIDDATA;
-    if (n - 128 < im->size) { d3dx_image_free(im); return D3DXERR_INVALIDDATA; }
+    if ((uint64_t)n - 128 < im->size) { d3dx_image_free(im); return D3DXERR_INVALIDDATA; }
     memcpy(im->data, buf + 128, im->size);
     return 0;
 }
@@ -99,15 +112,17 @@ static uint32_t decode_tga(const uint8_t *buf, uint32_t n, struct d3dx_image *im
                  : bpp == 32 ? D3DFMT_A8R8G8B8 : bpp == 24 ? FMT_R8G8B8
                  : bpp == 16 ? ((desc & 15) ? D3DFMT_A1R5G5B5 : D3DFMT_X1R5G5B5) : 0;
     if (!fmt) return D3DXERR_INVALIDDATA;
-    uint32_t px = bpp / 8, pos = 18 + idlen;
+    uint32_t px = bpp / 8;
+    uint64_t pos = 18 + idlen;
     im->iff = IFF_TGA, im->rtype = RT_TEXTURE, im->w = w, im->h = h, im->d = 1, im->levels = 1, im->faces = 1, im->fmt = fmt;
-    if (!layout(im)) return D3DXERR_INVALIDDATA;
-    uint8_t *tmp = malloc((size_t)w * h * px);
-    uint32_t total = w * h, k = 0;
+    if (!layout(im)) return D3DXERR_INVALIDDATA;           /* w and h within MAX_DIM from here */
+    uint64_t total = (uint64_t)w * h, k = 0;
+    uint8_t *tmp = malloc((size_t)(total * px));
+    if (!tmp) { d3dx_image_free(im); return D3DXERR_INVALIDDATA; }
     while (k < total) {
         if (!rle) {
             if (pos + total * px > n) goto bad;
-            memcpy(tmp, buf + pos, (size_t)total * px);
+            memcpy(tmp, buf + pos, (size_t)(total * px));
             k = total;
             break;
         }
@@ -119,9 +134,9 @@ static uint32_t decode_tga(const uint8_t *buf, uint32_t n, struct d3dx_image *im
             for (uint32_t i = 0; i < cnt; i++) memcpy(tmp + (k + i) * px, buf + pos, px);
             pos += px;
         } else {
-            if (pos + cnt * px > n) goto bad;
+            if (pos + (uint64_t)cnt * px > n) goto bad;
             memcpy(tmp + k * px, buf + pos, (size_t)cnt * px);
-            pos += cnt * px;
+            pos += (uint64_t)cnt * px;
         }
         k += cnt;
     }
@@ -146,8 +161,11 @@ static uint32_t decode_bmp(const uint8_t *buf, uint32_t n, struct d3dx_image *im
     int32_t w = (int32_t)rd32(buf + 18), h = (int32_t)rd32(buf + 22);
     if (hsize < 40 || comp != 0 || (bpp != 24 && bpp != 32) || w <= 0 || h == 0) return 1;   /* 1: try ImageIO */
     int top = h < 0;
-    uint32_t uh = (uint32_t)(top ? -h : h), uw = (uint32_t)w, px = bpp / 8, stride = (uw * px + 3) & ~3u;
-    if (off + stride * uh > n) return D3DXERR_INVALIDDATA;
+    if (h == INT32_MIN) return D3DXERR_INVALIDDATA;
+    uint32_t uh = (uint32_t)(top ? -h : h), uw = (uint32_t)w, px = bpp / 8;
+    if (uw > MAX_DIM || uh > MAX_DIM) return D3DXERR_INVALIDDATA;
+    uint64_t stride = ((uint64_t)uw * px + 3) & ~3ull;
+    if (off > n || stride * uh > n - off) return D3DXERR_INVALIDDATA;
     im->iff = IFF_BMP, im->rtype = RT_TEXTURE, im->w = uw, im->h = uh, im->d = 1, im->levels = 1, im->faces = 1;
     im->fmt = bpp == 24 ? FMT_R8G8B8 : D3DFMT_X8R8G8B8;
     if (!layout(im)) return D3DXERR_INVALIDDATA;

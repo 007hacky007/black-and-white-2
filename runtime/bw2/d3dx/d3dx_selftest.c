@@ -490,6 +490,15 @@ static void group_colorkey(void) {
     vcall(t, 2, 0);
 }
 
+static void group_malformed(void) {
+    static const char *names[] = { "huge.tga", "huge_rle.tga", "huge.bmp", "huge.dds", "short.dds" };
+    for (unsigned i = 0; i < sizeof names / sizeof *names; i++) {
+        uint32_t n, p = file(names[i], &n), info = gmem(28);
+        uint32_t hr = call("D3DXGetImageInfoFromFileInMemory", 3, p, n, info);
+        if (hr != 0x88760B59u) printf("FAIL %s: 0x%08X, want D3DXERR_INVALIDDATA\n", names[i], hr), fails++;
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: d3dx_selftest <group> [args]\n"); return 2; }
     hle_mem_init();
@@ -498,7 +507,8 @@ int main(int argc, char **argv) {
     g_esp = hle_va(hle_alloc(1u << 20)) + (1u << 20) - 64;
     static const struct { const char *name; void (*fn)(void); } groups[] = {
         { "dds", group_dds }, { "tga_bmp_png", group_tga_bmp_png }, { "convert", group_convert },
-        { "filter", group_filter }, { "fill", group_fill }, { "save", group_save }, { "colorkey", group_colorkey } };
+        { "filter", group_filter }, { "fill", group_fill }, { "save", group_save }, { "colorkey", group_colorkey },
+        { "malformed", group_malformed } };
     if (!strcmp(argv[1], "math") && argc > 2) group_math(argv[2]);
     else {
         unsigned i = 0;

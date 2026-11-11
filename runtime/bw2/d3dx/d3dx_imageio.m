@@ -20,6 +20,7 @@ int d3dx_imageio_decode(const uint8_t *buf, uint32_t n, uint32_t *w, uint32_t *h
         CFRelease(src);
         if (!img) return 0;
         size_t iw = CGImageGetWidth(img), ih = CGImageGetHeight(img);
+        if (!iw || !ih || iw > 16384 || ih > 16384) { CGImageRelease(img); return 0; }
         CGImageAlphaInfo ai = CGImageGetAlphaInfo(img);
         CGBitmapInfo bi = CGImageGetBitmapInfo(img);
         size_t bpc = CGImageGetBitsPerComponent(img), bpp = CGImageGetBitsPerPixel(img), stride = CGImageGetBytesPerRow(img);
