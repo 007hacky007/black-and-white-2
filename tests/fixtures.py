@@ -122,3 +122,25 @@ def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]
                       _align(len(data), FILE_ALIGN), sraw, 0, 0, 0, 0, flags)
         out[sraw:sraw + len(data)] = data
     return bytes(out)
+
+
+def asm32(src: str) -> bytes:
+    """Intel-syntax 32-bit x86 assembled by Xcode clang; returns the .text bytes."""
+    import tempfile
+    from bw2.build import check_tools
+    clang = check_tools()
+    with tempfile.TemporaryDirectory() as td:
+        s, o = Path(td) / "a.s", Path(td) / "a.o"
+        s.write_text(".intel_syntax noprefix\n.text\n" + src + "\n")
+        subprocess.run([str(clang), "-target", "i386-unknown-linux-elf", "-c", str(s), "-o", str(o)],
+                       check=True, capture_output=True)
+        d = o.read_bytes()
+    shoff, = _st.unpack_from("<I", d, 0x20)
+    shentsize, shnum, shstrndx = _st.unpack_from("<HHH", d, 0x2E)
+    secs = [_st.unpack_from("<IIIIIIIIII", d, shoff + i * shentsize) for i in range(shnum)]
+    strtab = secs[shstrndx][4]
+    for s in secs:
+        name = d[strtab + s[0]:d.index(b"\0", strtab + s[0])]
+        if name == b".text":
+            return d[s[4]:s[4] + s[5]]
+    raise ValueError("no .text in assembler output")
