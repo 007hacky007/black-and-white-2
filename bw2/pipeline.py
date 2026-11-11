@@ -37,7 +37,7 @@ def lift_all(gen: Path, only: tuple = ()) -> list[ModuleLift]:
             out.append(ModuleLift(seconds=0.0, **d))
             continue
         m = lift_module(name, exe, cat, gen, secs, extra_starts=load_extra_starts(EXTRA_FOR.get(name)),
-                        computed_ret=name == "vm", runtime_push=set(vm_entries(exe)) if name == "vm" else ())
+                        computed_ret=True, runtime_push=set(vm_entries(exe)) if name == "vm" else ())
         print(f"[lift] {name}: {m.functions} functions, {m.shards} shards, "
               f"{m.c_bytes / 1e6:.1f} MB, {sum(m.traps.values())} traps, {m.seconds} s", flush=True)
         out.append(m)

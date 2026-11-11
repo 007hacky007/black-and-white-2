@@ -115,7 +115,7 @@ static uint32_t call_funclet(uint32_t va, uint32_t frame_ebp) {
     uint32_t esp = g_esp, ebp = g_ebp, ebx = g_ebx, esi = g_esi, edi = g_edi, cur = g_cur_func;
     g_ebp = frame_ebp;
     g_esp -= 4;
-    MEM32(g_esp) = 0;                   /* the funclet's ret pops it */
+    MEM32(g_esp) = RECOMP_RETADDR;      /* the lift's dummy: its ret is a plain return (computed_ret) */
     fn();
     uint32_t eax = g_eax;
     g_esp = esp, g_ebp = ebp, g_ebx = ebx, g_esi = esi, g_edi = edi, g_cur_func = cur;
