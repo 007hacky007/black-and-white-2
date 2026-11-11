@@ -60,6 +60,8 @@ uint32_t d3d_addref(uint32_t obj);                   /* +1, the new count */
 uint32_t d3d_release(uint32_t obj);                  /* -1, destroying at 0; the new count */
 uint32_t d3d_live_count(void);                       /* live objects (tests) */
 
+/* QueryInterface by host code: D3D_OK and *out (AddRef'd), or E_NOINTERFACE. out is a guest address. */
+uint32_t d3d_qi(uint32_t obj, const uint8_t *iid, uint32_t out);
 /* The IUnknown methods every interface shares. */
 void d3d_QueryInterface(void);
 void d3d_AddRef(void);

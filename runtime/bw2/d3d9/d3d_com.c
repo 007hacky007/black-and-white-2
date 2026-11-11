@@ -154,9 +154,7 @@ uint32_t d3d_release(uint32_t obj) {
 static const uint8_t IID_IUnknown[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46 };
 static const uint8_t zero16[16];
 
-void d3d_QueryInterface(void) {                         /* (this, riid, ppv) */
-    uint32_t self = A32(0), out = A32(2);
-    const uint8_t *iid = APTR(1);
+uint32_t d3d_qi(uint32_t self, const uint8_t *iid, uint32_t out) {
     struct slot *s = slot_of(self);
     if (!s) d3d_fail("QueryInterface on dead object 0x%08X", self);
     int ok = iid && !memcmp(iid, IID_IUnknown, 16);
@@ -164,11 +162,12 @@ void d3d_QueryInterface(void) {                         /* (this, riid, ppv) */
         ok = !memcmp(iid, s->iface->iids[i], 16);
     if (!ok) {
         if (out) MEM32(out) = 0;
-        RET(E_NOINTERFACE_, 3);
+        return E_NOINTERFACE_;
     }
     d3d_addref(self);
     if (out) MEM32(out) = self;
-    RET(D3D_OK, 3);
+    return D3D_OK;
 }
+void d3d_QueryInterface(void) { RET(d3d_qi(A32(0), APTR(1), A32(2)), 3); }   /* (this, riid, ppv) */
 void d3d_AddRef(void) { RET(d3d_addref(A32(0)), 1); }
 void d3d_Release(void) { RET(d3d_release(A32(0)), 1); }

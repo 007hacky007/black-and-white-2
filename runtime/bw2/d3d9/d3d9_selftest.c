@@ -257,7 +257,303 @@ static void group_unimplemented(void) {
     printf("unimplemented: returned\n");
 }
 
+/* ---- Task 4: devices ---- */
+
+/* IDirect3DDevice9 slots */
+enum { DV_TestCooperativeLevel = 3, DV_GetAvailableTextureMem, DV_EvictManagedResources, DV_GetDirect3D,
+       DV_GetDeviceCaps, DV_GetDisplayMode, DV_GetCreationParameters, DV_SetCursorProperties, DV_SetCursorPosition,
+       DV_ShowCursor, DV_CreateAdditionalSwapChain, DV_GetSwapChain, DV_GetNumberOfSwapChains, DV_Reset, DV_Present,
+       DV_GetBackBuffer, DV_GetRasterStatus, DV_SetDialogBoxMode, DV_SetGammaRamp, DV_GetGammaRamp,
+       DV_CreateTexture, DV_CreateVolumeTexture, DV_CreateCubeTexture, DV_CreateVertexBuffer, DV_CreateIndexBuffer,
+       DV_CreateRenderTarget, DV_CreateDepthStencilSurface, DV_UpdateSurface, DV_UpdateTexture,
+       DV_GetRenderTargetData, DV_GetFrontBufferData, DV_StretchRect, DV_ColorFill, DV_CreateOffscreenPlainSurface,
+       DV_SetRenderTarget, DV_GetRenderTarget, DV_SetDepthStencilSurface, DV_GetDepthStencilSurface,
+       DV_BeginScene, DV_EndScene, DV_Clear, DV_SetTransform, DV_GetTransform, DV_MultiplyTransform,
+       DV_SetViewport, DV_GetViewport, DV_SetMaterial, DV_GetMaterial, DV_SetLight, DV_GetLight, DV_LightEnable,
+       DV_GetLightEnable, DV_SetClipPlane, DV_GetClipPlane, DV_SetRenderState, DV_GetRenderState,
+       DV_CreateStateBlock, DV_BeginStateBlock, DV_EndStateBlock, DV_SetClipStatus, DV_GetClipStatus,
+       DV_GetTexture, DV_SetTexture, DV_GetTextureStageState, DV_SetTextureStageState, DV_GetSamplerState,
+       DV_SetSamplerState, DV_ValidateDevice, DV_SetPaletteEntries, DV_GetPaletteEntries,
+       DV_SetCurrentTexturePalette, DV_GetCurrentTexturePalette, DV_SetScissorRect, DV_GetScissorRect,
+       DV_SetSoftwareVertexProcessing, DV_GetSoftwareVertexProcessing, DV_SetNPatchMode, DV_GetNPatchMode,
+       DV_DrawPrimitive, DV_DrawIndexedPrimitive, DV_DrawPrimitiveUP, DV_DrawIndexedPrimitiveUP,
+       DV_ProcessVertices, DV_CreateVertexDeclaration, DV_SetVertexDeclaration, DV_GetVertexDeclaration,
+       DV_SetFVF, DV_GetFVF, DV_CreateVertexShader, DV_SetVertexShader, DV_GetVertexShader,
+       DV_SetVertexShaderConstantF, DV_GetVertexShaderConstantF, DV_SetVertexShaderConstantI,
+       DV_GetVertexShaderConstantI, DV_SetVertexShaderConstantB, DV_GetVertexShaderConstantB,
+       DV_SetStreamSource, DV_GetStreamSource, DV_SetStreamSourceFreq, DV_GetStreamSourceFreq, DV_SetIndices,
+       DV_GetIndices, DV_CreatePixelShader, DV_SetPixelShader, DV_GetPixelShader, DV_SetPixelShaderConstantF,
+       DV_GetPixelShaderConstantF, DV_SetPixelShaderConstantI, DV_GetPixelShaderConstantI,
+       DV_SetPixelShaderConstantB, DV_GetPixelShaderConstantB, DV_DrawRectPatch, DV_DrawTriPatch, DV_DeletePatch,
+       DV_CreateQuery };
+/* IDirect3DSurface9 slots */
+enum { SF_GetDevice = 3, SF_GetType = 10, SF_GetContainer = 11, SF_GetDesc, SF_LockRect, SF_UnlockRect };
+
+#define POOL_DEFAULT 0u
+#define POOL_MANAGED 1u
+#define POOL_SYSTEMMEM 2u
+#define CLEAR_TARGET 1u
+#define CLEAR_ZBUFFER 2u
+#define CLEAR_STENCIL 4u
+#define CREATE_FPU_PRESERVE 0x2u
+#define CREATE_HWVP 0x40u
+
+static uint32_t g_d3d9;
+static uint32_t g_pp;                                       /* the last device's D3DPRESENT_PARAMETERS */
+
+static uint32_t pp_new(uint32_t w, uint32_t h, uint32_t fmt, int autods) {
+    uint32_t pp = gmem(56);
+    MEM32(pp + 0) = w, MEM32(pp + 4) = h, MEM32(pp + 8) = fmt, MEM32(pp + 12) = 1;
+    MEM32(pp + 24) = 1;                                     /* D3DSWAPEFFECT_DISCARD */
+    MEM32(pp + 28) = 0x10001u;                              /* hDeviceWindow */
+    MEM32(pp + 32) = 1;                                     /* Windowed */
+    MEM32(pp + 36) = (uint32_t)autods, MEM32(pp + 40) = FMT_D24S8;
+    return pp;
+}
+static uint32_t new_device_flags(uint32_t w, uint32_t h, uint32_t flags) {
+    if (!g_d3d9) g_d3d9 = new_d3d9();
+    g_pp = pp_new(w, h, FMT_X8R8G8B8, 1);
+    uint32_t out = gmem(4);
+    uint32_t hr = vcall(g_d3d9, D9_CreateDevice, 6, 0u, HAL, 0x10001u, flags, g_pp, out);
+    CHECKEQ(hr, D3D_OK);
+    return hr ? 0 : MEM32(out);
+}
+static uint32_t new_device(uint32_t w, uint32_t h) { return new_device_flags(w, h, CREATE_HWVP); }
+
+static uint32_t sysmem_surface(uint32_t dev, uint32_t w, uint32_t h, uint32_t fmt) {
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateOffscreenPlainSurface, 6, w, h, fmt, POOL_SYSTEMMEM, out, 0u), D3D_OK);
+    return MEM32(out);
+}
+static uint32_t back_buffer(uint32_t dev) {
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(dev, DV_GetBackBuffer, 4, 0u, 0u, 0u, out), D3D_OK);
+    return MEM32(out);
+}
+/* Read a render target back as D3DCOLORs, w*h, into out. */
+static void read_rt(uint32_t dev, uint32_t rt, uint32_t w, uint32_t h, uint32_t *out) {
+    uint32_t desc = gmem(32);
+    CHECKEQ(vcall(rt, SF_GetDesc, 1, desc), D3D_OK);
+    uint32_t s = sysmem_surface(dev, w, h, MEM32(desc));
+    CHECKEQ(vcall(dev, DV_GetRenderTargetData, 2, rt, s), D3D_OK);
+    uint32_t lr = gmem(8);
+    CHECKEQ(vcall(s, SF_LockRect, 3, lr, 0u, 0x10u), D3D_OK);   /* D3DLOCK_READONLY */
+    uint32_t pitch = MEM32(lr), bits = MEM32(lr + 4);
+    for (uint32_t y = 0; y < h; y++) memcpy(out + y * w, hle_ptr(bits + y * pitch), w * 4);
+    CHECKEQ(vcall(s, SF_UnlockRect, 0), D3D_OK);
+    CHECKEQ(vcall(s, 2, 0), 0);
+}
+static uint32_t rect(uint32_t l, uint32_t t, uint32_t r, uint32_t b) {
+    uint32_t p = gmem(16);
+    MEM32(p) = l, MEM32(p + 4) = t, MEM32(p + 8) = r, MEM32(p + 12) = b;
+    return p;
+}
+static uint32_t f32(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+
+static void group_clear(void) {
+    uint32_t dev = new_device(64, 64), bb = back_buffer(dev);
+    static uint32_t px[64 * 64];
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET | CLEAR_ZBUFFER, 0xFF336699u, f32(1.0f), 0u), D3D_OK);
+    read_rt(dev, bb, 64, 64, px);
+    int bad = 0;
+    for (int i = 0; i < 64 * 64; i++) bad += px[i] != 0xFF336699u;
+    CHECKEQ(bad, 0);
+    /* a rect clear changes only the rect */
+    CHECKEQ(vcall(dev, DV_Clear, 6, 1u, rect(8, 8, 16, 12), CLEAR_TARGET, 0xFF00FF00u, f32(1.0f), 0u), D3D_OK);
+    read_rt(dev, bb, 64, 64, px);
+    bad = 0;
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++)
+            bad += px[y * 64 + x] != ((x >= 8 && x < 16 && y >= 8 && y < 12) ? 0xFF00FF00u : 0xFF336699u);
+    CHECKEQ(bad, 0);
+    /* with scissor test on, a full clear is limited to the scissor rect */
+    CHECKEQ(vcall(dev, DV_SetScissorRect, 1, rect(0, 0, 4, 4)), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetRenderState, 2, 174u, 1u), D3D_OK);   /* D3DRS_SCISSORTESTENABLE */
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFFFF0000u, f32(1.0f), 0u), D3D_OK);
+    read_rt(dev, bb, 64, 64, px);
+    CHECKEQ(px[0], 0xFFFF0000u);
+    CHECKEQ(px[3 * 64 + 3], 0xFFFF0000u);
+    CHECKEQ(px[4 * 64 + 4], 0xFF336699u);
+    CHECKEQ(px[10 * 64 + 10], 0xFF00FF00u);
+    /* and the viewport limits it too */
+    CHECKEQ(vcall(dev, DV_SetRenderState, 2, 174u, 0u), D3D_OK);
+    uint32_t vp = gmem(24);
+    MEM32(vp) = 32, MEM32(vp + 4) = 32, MEM32(vp + 8) = 32, MEM32(vp + 12) = 32, MEM32(vp + 16) = f32(0), MEM32(vp + 20) = f32(1);
+    CHECKEQ(vcall(dev, DV_SetViewport, 1, vp), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFF0000FFu, f32(1.0f), 0u), D3D_OK);
+    read_rt(dev, bb, 64, 64, px);
+    CHECKEQ(px[40 * 64 + 40], 0xFF0000FFu);
+    CHECKEQ(px[31 * 64 + 31], 0xFF336699u);
+    CHECK(vcall(bb, 2, 0) >= 1 && d3d_alive(bb));          /* the device still holds it */
+}
+
+static void group_persist(void) {
+    uint32_t dev = new_device(32, 32), bb = back_buffer(dev);
+    static uint32_t px[32 * 32];
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFF102030u, f32(1.0f), 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Present, 4, 0u, 0u, 0u, 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Present, 4, 0u, 0u, 0u, 0u), D3D_OK);
+    read_rt(dev, bb, 32, 32, px);
+    CHECKEQ(px[0], 0xFF102030u);
+    CHECKEQ(px[31 * 32 + 31], 0xFF102030u);
+}
+
+void mtl_set_test_drawable(uint32_t w, uint32_t h);
+void mtl_read_test_drawable(uint32_t *argb);
+
+static void group_present_scaled(void) {
+    uint32_t dev = new_device(320, 200), bb = back_buffer(dev);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFF00FF00u, f32(1.0f), 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 1u, rect(150, 90, 170, 110), CLEAR_TARGET, 0xFFFF0000u, f32(1.0f), 0u), D3D_OK);
+    mtl_set_test_drawable(1000, 1000);
+    CHECKEQ(vcall(dev, DV_Present, 4, 0u, 0u, 0u, 0u), D3D_OK);
+    uint32_t *d = malloc(1000 * 1000 * 4);
+    mtl_read_test_drawable(d);
+    CHECKEQ(d[500 * 1000 + 500], 0xFFFF0000u);              /* the back buffer's centre */
+    CHECKEQ(d[10 * 1000 + 500], 0xFF000000u);               /* the top bar: 320x200 fits as 1000x625 */
+    CHECKEQ(d[990 * 1000 + 500], 0xFF000000u);
+    CHECKEQ(d[200 * 1000 + 10], 0xFF00FF00u);               /* the picture, at its left edge */
+    free(d);
+    static uint32_t px[320 * 200];
+    read_rt(dev, bb, 320, 200, px);
+    CHECKEQ(px[100 * 320 + 160], 0xFFFF0000u);
+    CHECKEQ(px[0], 0xFF00FF00u);
+}
+
+static void group_reset_rules(void) {
+    uint32_t dev = new_device(64, 64), out = gmem(4), v = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateRenderTarget, 8, 16u, 16u, FMT_A8R8G8B8, 0u, 0u, 0u, out, 0u), D3D_OK);
+    uint32_t rt = MEM32(out);
+    uint32_t pp = pp_new(64, 64, FMT_X8R8G8B8, 1);
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp), D3DERR_INVALIDCALL);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFF445566u, f32(1.0f), 0u), D3D_OK);
+    static uint32_t px[64 * 64];
+    read_rt(dev, back_buffer(dev), 64, 64, px);
+    CHECKEQ(px[5], 0xFF445566u);
+    CHECKEQ(vcall(rt, 2, 0), 0);
+    CHECKEQ(vcall(dev, DV_SetRenderState, 2, 7u, 0u), D3D_OK);     /* ZENABLE off */
+    CHECKEQ(vcall(dev, DV_SetRenderState, 2, 22u, 1u), D3D_OK);    /* CULLMODE NONE */
+    CHECKEQ(vcall(dev, DV_SetRenderState, 2, 27u, 1u), D3D_OK);    /* ALPHABLENDENABLE */
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp), D3D_OK);
+    vcall(dev, DV_GetRenderState, 2, 7u, v);  CHECKEQ(MEM32(v), 1);   /* D3DZB_TRUE: auto depth stencil */
+    vcall(dev, DV_GetRenderState, 2, 22u, v); CHECKEQ(MEM32(v), 3);   /* D3DCULL_CCW */
+    vcall(dev, DV_GetRenderState, 2, 27u, v); CHECKEQ(MEM32(v), 0);
+    /* a system-memory surface does not block Reset */
+    uint32_t s = sysmem_surface(dev, 8, 8, FMT_A8R8G8B8);
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp), D3D_OK);
+    CHECKEQ(vcall(s, 2, 0), 0);
+}
+
+/* Documented defaults, written from the D3D9 reference (independently of d3d9_state.c). */
+static const uint32_t g_rs_defaults[][2] = {
+    { 7, 1 }, { 8, 3 }, { 9, 2 }, { 14, 1 }, { 15, 0 }, { 16, 1 }, { 19, 2 }, { 20, 1 }, { 22, 3 }, { 23, 4 },
+    { 24, 0 }, { 25, 8 }, { 26, 0 }, { 27, 0 }, { 28, 0 }, { 29, 0 }, { 34, 0 }, { 35, 0 }, { 36, 0x00000000 },
+    { 37, 0x3F800000 }, { 38, 0x3F800000 }, { 48, 0 }, { 52, 0 }, { 53, 1 }, { 54, 1 }, { 55, 1 }, { 56, 8 },
+    { 57, 0 }, { 58, 0xFFFFFFFF }, { 59, 0xFFFFFFFF }, { 60, 0xFFFFFFFF }, { 128, 0 }, { 135, 0 }, { 136, 1 },
+    { 137, 1 }, { 139, 0 }, { 140, 0 }, { 141, 1 }, { 142, 1 }, { 143, 0 }, { 145, 1 }, { 146, 2 }, { 147, 0 },
+    { 148, 0 }, { 151, 0 }, { 152, 0 }, { 154, 0x3F800000 }, { 155, 0x3F800000 }, { 156, 0 }, { 157, 0 },
+    { 158, 0x3F800000 }, { 159, 0 }, { 160, 0 }, { 161, 1 }, { 162, 0xFFFFFFFF }, { 163, 0 }, { 166, 0x42800000 },
+    { 167, 0 }, { 168, 0xF }, { 170, 0 }, { 171, 1 }, { 172, 3 }, { 173, 1 }, { 174, 0 }, { 175, 0 }, { 176, 0 },
+    { 178, 0x3F800000 }, { 179, 0x3F800000 }, { 180, 0 }, { 181, 0 }, { 182, 0x3F800000 }, { 183, 0 }, { 184, 0 },
+    { 185, 0 }, { 186, 1 }, { 187, 1 }, { 188, 1 }, { 189, 8 }, { 190, 0xF }, { 191, 0xF }, { 192, 0xF },
+    { 193, 0xFFFFFFFF }, { 194, 0 }, { 195, 0 }, { 198, 0 }, { 205, 0 }, { 206, 0 }, { 207, 2 }, { 208, 1 }, { 209, 1 },
+};
+static const uint32_t g_ss_defaults[][2] = {
+    { 1, 1 }, { 2, 1 }, { 3, 1 }, { 4, 0 }, { 5, 1 }, { 6, 1 }, { 7, 0 }, { 8, 0 }, { 9, 0 }, { 10, 1 }, { 11, 0 },
+    { 12, 0 }, { 13, 0 },
+};
+static void group_defaults(void) {
+    uint32_t dev = new_device(16, 16), v = gmem(4);
+    for (unsigned i = 0; i < sizeof g_rs_defaults / sizeof *g_rs_defaults; i++) {
+        MEM32(v) = 0xDEADBEEF;
+        CHECKEQ(vcall(dev, DV_GetRenderState, 2, g_rs_defaults[i][0], v), D3D_OK);
+        if (MEM32(v) != g_rs_defaults[i][1])
+            printf("FAIL render state %u = 0x%X, want 0x%X\n", g_rs_defaults[i][0], MEM32(v), g_rs_defaults[i][1]), fails++;
+    }
+    for (uint32_t smp = 0; smp < 16; smp++)
+        for (unsigned i = 0; i < sizeof g_ss_defaults / sizeof *g_ss_defaults; i++) {
+            CHECKEQ(vcall(dev, DV_GetSamplerState, 3, smp, g_ss_defaults[i][0], v), D3D_OK);
+            if (MEM32(v) != g_ss_defaults[i][1])
+                printf("FAIL sampler %u state %u = 0x%X\n", smp, g_ss_defaults[i][0], MEM32(v)), fails++;
+        }
+    CHECKEQ(vcall(dev, DV_GetSamplerState, 3, 257u, 1u, v), D3D_OK);   /* D3DVERTEXTEXTURESAMPLER0 */
+    CHECKEQ(MEM32(v), 1);
+    /* stage 0 and stage 1: COLOROP, ARG1, ARG2, ALPHAOP, ARG1, ARG2, TEXCOORDINDEX, TTF, ARG0s, RESULTARG */
+    static const uint32_t st0[][2] = { { 1, 4 }, { 2, 2 }, { 3, 1 }, { 4, 2 }, { 5, 2 }, { 6, 1 }, { 7, 0 }, { 11, 0 },
+                                       { 22, 0 }, { 23, 0 }, { 24, 0 }, { 26, 1 }, { 27, 1 }, { 28, 1 }, { 32, 0 } };
+    static const uint32_t st1[][2] = { { 1, 1 }, { 2, 2 }, { 3, 1 }, { 4, 1 }, { 5, 2 }, { 6, 1 }, { 11, 1 }, { 24, 0 } };
+    for (unsigned i = 0; i < sizeof st0 / sizeof *st0; i++) {
+        CHECKEQ(vcall(dev, DV_GetTextureStageState, 3, 0u, st0[i][0], v), D3D_OK);
+        if (MEM32(v) != st0[i][1]) printf("FAIL stage 0 state %u = 0x%X\n", st0[i][0], MEM32(v)), fails++;
+    }
+    for (unsigned i = 0; i < sizeof st1 / sizeof *st1; i++) {
+        CHECKEQ(vcall(dev, DV_GetTextureStageState, 3, 1u, st1[i][0], v), D3D_OK);
+        if (MEM32(v) != st1[i][1]) printf("FAIL stage 1 state %u = 0x%X\n", st1[i][0], MEM32(v)), fails++;
+    }
+    /* viewport: the whole target, depth 0..1 */
+    uint32_t vp = gmem(24);
+    CHECKEQ(vcall(dev, DV_GetViewport, 1, vp), D3D_OK);
+    CHECK(MEM32(vp) == 0 && MEM32(vp + 4) == 0 && MEM32(vp + 8) == 16 && MEM32(vp + 12) == 16);
+    CHECK(MEM32(vp + 16) == f32(0.0f) && MEM32(vp + 20) == f32(1.0f));
+    /* a set reads back */
+    CHECKEQ(vcall(dev, DV_SetRenderState, 2, 60u, 0x12345678u), D3D_OK);
+    vcall(dev, DV_GetRenderState, 2, 60u, v);
+    CHECKEQ(MEM32(v), 0x12345678u);
+    CHECKEQ(vcall(dev, DV_GetAvailableTextureMem, 0), 512u << 20);
+    CHECKEQ(vcall(dev, DV_TestCooperativeLevel, 0), D3D_OK);
+    uint32_t caps = gmem(304);
+    CHECKEQ(vcall(dev, DV_GetDeviceCaps, 1, caps), D3D_OK);
+    CHECKEQ(MEM32(caps + 0xCC), 0xFFFF0300u);
+    uint32_t cp = gmem(16);
+    CHECKEQ(vcall(dev, DV_GetCreationParameters, 1, cp), D3D_OK);
+    CHECK(MEM32(cp) == 0 && MEM32(cp + 4) == HAL && MEM32(cp + 8) == 0x10001u && MEM32(cp + 12) == CREATE_HWVP);
+    CHECKEQ(vcall(dev, DV_GetNumberOfSwapChains, 0), 1);
+    CHECKEQ(vcall(dev, DV_BeginScene, 0), D3D_OK);
+    CHECKEQ(vcall(dev, DV_BeginScene, 0), D3DERR_INVALIDCALL);
+    CHECKEQ(vcall(dev, DV_EndScene, 0), D3D_OK);
+    CHECKEQ(vcall(dev, DV_EndScene, 0), D3DERR_INVALIDCALL);
+    /* CreateDevice wrote back the chosen back buffer */
+    CHECKEQ(MEM32(g_pp + 12), 1);
+}
+
+static void group_fpu(void) {
+    g_fpu_cw = 0x027F;
+    new_device_flags(16, 16, CREATE_HWVP);
+    CHECKEQ(g_fpu_cw & 0xF00, 0);                           /* 24-bit, round to nearest */
+    g_fpu_cw = 0x0E7F;                                      /* PC=64, round toward zero */
+    new_device_flags(16, 16, CREATE_HWVP | CREATE_FPU_PRESERVE);
+    CHECKEQ(g_fpu_cw, 0x0E7F);
+}
+
+static void group_depth_objects(void) {
+    uint32_t dev = new_device(32, 32), out = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateDepthStencilSurface, 8, 32u, 32u, FMT_D24S8, 0u, 0u, 0u, out, 0u), D3D_OK);
+    uint32_t a = MEM32(out);
+    CHECKEQ(vcall(dev, DV_CreateDepthStencilSurface, 8, 32u, 32u, FMT_D24S8, 0u, 0u, 0u, out, 0u), D3D_OK);
+    uint32_t b = MEM32(out);
+    CHECK(a && b && a != b);
+    CHECKEQ(vcall(dev, DV_GetDepthStencilSurface, 1, out), D3D_OK);
+    uint32_t autods = MEM32(out);
+    CHECK(autods != a && autods != b);
+    vcall(autods, 2, 0);
+    CHECKEQ(vcall(dev, DV_SetDepthStencilSurface, 1, a), D3D_OK);
+    CHECKEQ(vcall(dev, DV_GetDepthStencilSurface, 1, out), D3D_OK);
+    CHECKEQ(MEM32(out), a);
+    vcall(a, 2, 0);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_ZBUFFER | CLEAR_STENCIL, 0u, f32(0.25f), 7u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetDepthStencilSurface, 1, 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_GetDepthStencilSurface, 1, out), D3DERR_NOTFOUND);
+    uint32_t desc = gmem(32);
+    CHECKEQ(vcall(a, SF_GetDesc, 1, desc), D3D_OK);
+    CHECK(MEM32(desc) == FMT_D24S8 && MEM32(desc + 4) == 1 && MEM32(desc + 8) == 2 && MEM32(desc + 24) == 32);
+    CHECKEQ(vcall(a, 2, 0), 0);                             /* unbound: our reference was the last */
+    CHECKEQ(vcall(b, 2, 0), 0);
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "clear", group_clear }, { "persist", group_persist }, { "present_scaled", group_present_scaled },
+    { "reset_rules", group_reset_rules }, { "defaults", group_defaults }, { "fpu", group_fpu },
+    { "depth_objects", group_depth_objects },
     { "adapter", group_adapter }, { "ddraw", group_ddraw }, { "objects", group_objects },
     { "unimplemented", group_unimplemented },
 };

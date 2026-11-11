@@ -50,3 +50,11 @@ def test_unimplemented_method_is_loud(selftest, tmp_path):
     r = run_group(selftest, "unimplemented", tmp_path)
     assert r.returncode != 0, r.stdout
     assert "IDirect3DDevice9::DrawRectPatch not implemented" in r.stderr, r.stderr[-2000:]
+
+
+# ---- Task 4: device, swap chain, Present ----
+
+@pytest.mark.parametrize("group", ["clear", "persist", "present_scaled", "reset_rules", "defaults", "fpu",
+                                   "depth_objects"])
+def test_device(selftest, tmp_path, group):
+    check(selftest, group, tmp_path)
