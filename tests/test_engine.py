@@ -1,4 +1,6 @@
 """The engine: lifted guests linked with the win32hle host and the BW2 runtime."""
+import os
+
 import pytest
 
 from fixtures import CODE, asm32, guest_engine, iat_va, make_pe, run_engine
@@ -1280,3 +1282,12 @@ want53: .quad WANT53
     b = _engine(tmp_path, asm, {K32: ["ExitProcess"]})
     r = _run(tmp_path, b)
     assert r.returncode == 3, f"exit {r.returncode}: bit 0 = single-precision result right, bit 1 = double\n{r.stderr[-2000:]}"
+
+
+# ---- Plan 4 Task 10: a real window (opens one on screen; opt in with BW2_GUI=1) ----
+
+@pytest.mark.skipif(os.environ.get("BW2_GUI") != "1", reason="opens a window: set BW2_GUI=1")
+def test_window_device_presents(tmp_path):
+    b = _engine(tmp_path, "ret", {K32: ["ExitProcess"]})
+    r = _run(tmp_path, b, "--selftest-window")
+    assert r.returncode == 0 and "window ok 60" in r.stdout, r.stdout + r.stderr[-2000:]

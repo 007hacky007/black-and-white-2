@@ -47,6 +47,37 @@ static int usage(void) {
     return BW2_EXIT_BOOT;
 }
 
+/* --selftest-window: from the guest's thread, a windowed D3D9 device on a real NSWindow: 60 frames of
+ * clears and Presents, then the device and the window go. Opens a window (plan 4 Task 10). */
+static uint32_t vm(uint32_t obj, int slot, int n, const uint32_t *args) {
+    uint32_t a[12] = { obj };
+    memcpy(a + 1, args, 4 * (size_t)n);
+    return hle_call_guest(MEM32(MEM32(obj) + 4u * (uint32_t)slot), n + 1, a);
+}
+static uint32_t window_selftest(void) {
+    mach_enter();
+    uint32_t v = 32, d3d = hle_call_guest(hle_resolve("Direct3DCreate9"), 1, &v);
+    uint32_t pp = hle_va(hle_alloc(56)), out = hle_va(hle_alloc(4)), frames = 0;
+    MEM32(pp) = 640, MEM32(pp + 4) = 480, MEM32(pp + 8) = 22, MEM32(pp + 12) = 1, MEM32(pp + 24) = 1;
+    MEM32(pp + 28) = 0x10001u, MEM32(pp + 32) = 1, MEM32(pp + 36) = 1, MEM32(pp + 40) = 75;
+    uint32_t cd[6] = { 0, 1, 0x10001u, 0x40u, pp, out };
+    uint32_t hr = d3d ? vm(d3d, 16, 6, cd) : 1;
+    if (!hr) {
+        uint32_t dev = MEM32(out);
+        for (uint32_t i = 0; i < 60; i++) {
+            uint32_t one = 0x3F800000u, c[6] = { 0, 0, 3, 0xFF000000u | (i * 4) << 16 | 0x4080, one, 0 };
+            uint32_t p[4] = { 0, 0, 0, 0 };
+            if (!vm(dev, 43, 6, c) && !vm(dev, 17, 4, p)) frames++;
+        }
+        vm(dev, 2, 0, NULL);
+    }
+    if (d3d) vm(d3d, 2, 0, NULL);
+    mach_leave();
+    printf("window ok %u\n", frames);
+    fflush(stdout);
+    return frames == 60 ? 0 : 1;
+}
+
 /* --selftest-mainsync: a block sent from the guest's thread runs on the process main thread. */
 static uint32_t mainsync_selftest(void) {
     __block int on_main = 0;
@@ -58,7 +89,7 @@ static uint32_t mainsync_selftest(void) {
 
 int main(int argc, char **argv) {
     const char *game = NULL, *exe = "white.exe";
-    int strict = 0, st_dispatch = 0, st_mem = 0, st_mainsync = 0, nlifted = 0, ncall = -1;
+    int strict = 0, st_dispatch = 0, st_mem = 0, st_mainsync = 0, st_window = 0, nlifted = 0, ncall = -1;
     uint32_t call_args[8];
     struct { const char *name; uint32_t base; } lifted[8];
     for (int i = 1; i < argc; i++) {
@@ -82,6 +113,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--selftest-mem")) st_mem = 1;
         else if (!strcmp(argv[i], "--selftest-eh-depth")) hle_on_exit = report_eh_depth;
         else if (!strcmp(argv[i], "--selftest-mainsync")) st_mainsync = 1;
+        else if (!strcmp(argv[i], "--selftest-window")) st_window = 1;
         else { fprintf(stderr, "bw2: unknown argument %s\n", argv[i]); return usage(); }
     }
     if (getenv("BW2_TRACE_IMPORTS")) win32hle_trace = 1;   /* one line per import call, with its caller */
@@ -93,6 +125,10 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (st_mainsync) return (int)bw2_run_on_main_stack(mainsync_selftest);
+    if (st_window) {
+        bw2_register_shims();
+        return (int)bw2_run_on_main_stack(window_selftest);
+    }
     if (!game) return usage();
     char support[PATH_MAX];
     const char *env = getenv("BW2_SUPPORT"), *home = getenv("HOME");

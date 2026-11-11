@@ -84,14 +84,10 @@ carries on:
 
 ### For the later plans
 
-- **`CoCreateInstance(CLSID_DirectDraw)`** (`{D7B70EE0-4340-11CF-B063-0020AFC2CD35}`)
-  is called just before `Direct3DCreate9` and answered "class not registered".
-  The game most likely uses DirectDraw to read video memory, which may feed its
-  detail settings. **Plan 4 must answer it.**
-- **The game's detail settings are not chosen before Direct3D.** No
-  `Settings.ini` is written on the way, so the measured CPU clock (3 GHz,
-  `runtime/bw2/cpu.c`) and memory (2 GB) cannot be tied to a saved setting yet.
-  Plan 4 checks what the first run saves.
+Plan 4 answered both of these. See `graphics.md`:
+- DirectDraw 7 answers the video memory question (512 MB).
+- In this exe the detail settings are fixed at high whatever the adapter is.
+- The boot now stops at `DirectInput8Create`.
 
 ## What the bring-up found
 

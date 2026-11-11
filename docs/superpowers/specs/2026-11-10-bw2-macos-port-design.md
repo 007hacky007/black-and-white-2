@@ -204,6 +204,17 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   builder (vkd3d-shader is the obvious candidate: it compiles SM1-3 HLSL;
   check its license fits section 9). Alternative if that fails: capture each
   HLSL source the game compiles and translate it ahead of time, keyed by hash.
+  **Plan 4:** D3D9 runs on Metal for fixed function:
+  - devices, swap chains, textures, surfaces and buffers;
+  - every state, state blocks and queries;
+  - the fixed-function pipeline, generated as MSL from its state key and cached
+    in a Metal binary archive under `<support>/ShaderCache/`.
+
+  Vertex and index buffers are GPU-visible guest memory with no copies. DirectDraw
+  7 answers video memory. D3DX's 30 math functions and its 18 texture and buffer
+  functions are native. Shaders, effects, sprite, font and mesh are plan 5's.
+  The game sets up DirectInput before it creates its device, so the real boot
+  stops there (`docs/research/graphics.md`).
 - **Audio:** the game loads OpenAL through `wrap_oal.dll`. We answer the
   OpenAL + EAX API ourselves on top of an open OpenAL implementation or
   CoreAudio (builder's call). EAX effects can be approximated or dropped in a
@@ -367,6 +378,10 @@ These are traps NFSU2 hit; the design takes them as requirements.
 - Skip redundant state sets; dispatch COM by method index; compile shaders
   asynchronously with a warm disk cache (a cold cache cost NFSU2 8 s of black
   screen).
+- **Plan 4:** D3D9's pixel centre is at integer coordinates. The generated
+  vertex function moves positions by (+1/w, -1/h) × w, pinned by a 1:1 texel test.
+  A fixed-function stage with no texture reads TEXTURE as white. X8 targets keep
+  alpha at one.
 - NFSU2 found that a Windows reference saves weeks: many of its "bugs" were
   measurement artifacts, and real ones went unseen without one. **There is no
   Windows reference for BW2 now** (decided by the user: nothing available).

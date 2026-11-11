@@ -1,4 +1,4 @@
-"""Plan 3's end point: the lifted game boots on the patched tree to its graphics setup."""
+"""Plan 4's end point: the lifted game boots on the patched tree through Direct3D's adapter questions to its input setup."""
 import os
 import subprocess
 
@@ -12,16 +12,23 @@ LOUD = ("TRIPWIRE", "trap:", "unresolved indirect call", "unresolved direct call
         "uncaught C++", "FATAL")
 
 
+# Where plan 4's boot stops (docs/research/graphics.md): the game sets up DirectInput, the input
+# plan's layer, before it creates its Direct3D device, so nothing of plan 5's is reached yet.
+FIRST_LATER = "DirectInput8Create"
+
+
 @pytest.mark.gamefiles
-def test_boot_reaches_graphics(tmp_path):
+def test_boot_reaches_input(tmp_path):
     assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
-    env = dict(os.environ, BW2_SUPPORT=str(tmp_path / "support"))
+    env = dict(os.environ, BW2_SUPPORT=str(tmp_path / "support"), BW2_HEADLESS="1")
     r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
                        timeout=120, env=env)
     (tmp_path / "stderr.txt").write_text(r.stderr)
     tail = r.stderr[-4000:]
     assert r.returncode == 4, f"exit {r.returncode}\n{tail}"
     assert "owned by a later plan" in r.stderr, tail
+    assert "reached Direct3DCreate9" not in r.stderr, tail
+    assert f"reached {FIRST_LATER}:" in r.stderr, tail
     for word in LOUD:
         assert word not in r.stderr, f"{word!r} in stderr\n{tail}"
 
