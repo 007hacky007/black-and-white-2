@@ -218,7 +218,9 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   **Plan 3:** the game sees itself at `C:\Program Files\EA GAMES\Black &
   White 2\` (a win32hle mount on the game tree, read-only; its writes land in
   `<support>/Game/`), the rest of `C:` is `<support>/C/`, the user is
-  `Player`, and the registry is `<support>/registry.txt`. The boot to
+  `Player`, and the registry is `<support>/registry.txt`. Nothing else on the
+  Mac is reachable: win32hle's `Z:` (the host root) is off, and a path that
+  resolves outside the game tree and the support folder does not exist. The boot to
   `Direct3DCreate9` writes only the My Documents folders
   (`docs/research/boot.md`).
 
