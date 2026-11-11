@@ -9,6 +9,7 @@
 /* BW2's import answers by DLL (shims_*.c); declared here so adding one
  * changes no header (every lifted shard depends on the headers). */
 extern const win32hle_shim bw2_k32_shims[], bw2_user_shims[];
+void bw2_d3d_register(void);                    /* d3d9/d3d_register.c (plan 4) */
 
 static const win32hle_shim *const g_hle_tables[] = {
     win32hle_kernel32, win32hle_kernel32_ext, win32hle_kernel32_crt, win32hle_module, win32hle_gdi32,
@@ -31,6 +32,7 @@ void bw2_register_shims(void) {
     win32hle_register(bw2_eh_shims);
     win32hle_register(bw2_k32_shims);
     win32hle_register(bw2_user_shims);
+    bw2_d3d_register();
     win32hle_register(win32hle_kernel32);
     win32hle_register(win32hle_kernel32_ext);
     win32hle_register(win32hle_kernel32_crt);
