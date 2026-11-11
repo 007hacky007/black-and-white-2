@@ -44,14 +44,14 @@ class ModuleLift:
     eh_resume_points: int = 0
 
 
-def _tools(exe: Path):
+def _tools(exe: Path, computed_ret: bool = False):
     from pe_analyze import analyze_pe, build_iat_map
     from disasm32 import Disassembler
     from lift32 import Lifter
     info = analyze_pe(str(exe))
     iat = build_iat_map(info)
     dis = Disassembler(Path(exe).read_bytes(), info.image_base, info.sections)
-    return dis, Lifter(iat_map=iat, func_names={}), iat
+    return dis, Lifter(iat_map=iat, func_names={}, computed_ret=computed_ret), iat
 
 
 def _image_reader(exe: Path):
@@ -67,6 +67,20 @@ def eh_resume_points(md, read, va: int) -> set:
     from eh32 import resume_points
     insns = list(md.disasm(read(va, 96), va))[:12]
     return resume_points(md, read, insns) or set()
+
+
+PUSH_IMM = re.compile(r"PUSH32\(esp, [^;]*\); /\* 0x([0-9A-F]{8}): push ")
+
+
+def _runtime_pushes(code: str, sites, done: set) -> str:
+    """Make each `push imm32` at one of sites read its operand from guest memory."""
+    def sub(m):
+        va = int(m.group(1), 16)
+        if va not in sites:
+            return m.group(0)
+        done.add(va)
+        return f"PUSH32(esp, MEM32(0x{va + 1:08X}u)); /* 0x{va:08X}: push (operand rewritten at run time) "
+    return PUSH_IMM.sub(sub, code)
 
 
 def add_continuations(dis, iat, func, resume: set) -> None:
@@ -134,20 +148,29 @@ def _write(path: Path, text: str) -> None:
 
 def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
                 code_sections: tuple = (".text",), shard_size: int = 500,
-                cold_lines: int = COLD_LINES, extra_starts=()) -> ModuleLift:
+                cold_lines: int = COLD_LINES, extra_starts=(), computed_ret: bool = False,
+                runtime_push=frozenset()) -> ModuleLift:
+    """computed_ret: a `ret` to an address the code pushed jumps there (pcrecomp's
+    Lifter option), for hand-written code that chains through the stack: the
+    protection VM leaves its interpreter through `popal; popfd; ret`.
+
+    runtime_push: addresses of `push imm32` instructions whose operand the program
+    rewrites while it runs (the VM's re-entry stubs): each reads its operand from
+    guest memory when it runs, instead of the value the file had."""
     t0 = time.time()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in [*out_dir.glob(f"{name}_*.c"), *out_dir.glob(f"{name}*.part")]:
         stale.unlink()
     view = code_view(exe, list(code_sections), out_dir / f".{name}.view.exe")
-    dis, lifter, iat = _tools(view)
+    dis, lifter, iat = _tools(view, computed_ret)
     from capstone import CS_ARCH_X86, CS_MODE_32, Cs
     md, read = Cs(CS_ARCH_X86, CS_MODE_32), _image_reader(exe)
     starts = sorted({f["address"] for f in load_functions(catalog) if f.get("entry_kind") != "alias"}
                     | set(extra_starts))
     defined, referenced, traps = [], set(), Counter()
     eh_funcs = eh_points = 0
+    pushes_done = set()
     shards, c_bytes, chunk, cold = 0, 0, [], []
 
     def flush():
@@ -166,6 +189,8 @@ def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
         if resume:
             add_continuations(dis, iat, f, resume)
         code = lifter.lift_function(f)
+        if runtime_push:
+            code = _runtime_pushes(code, runtime_push, pushes_done)
         if resume:
             code = add_landing_pad(code, va, resume)
             eh_funcs, eh_points = eh_funcs + 1, eh_points + len(resume)
@@ -185,6 +210,9 @@ def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
             flush()
     if chunk:
         flush()
+    missing = sorted(set(runtime_push) - pushes_done)
+    if missing:
+        raise LiftError(f"{name}: run-time push sites not lifted: {', '.join(f'0x{v:08X}' for v in missing)}")
     m = ModuleLift(name, len(defined), shards, c_bytes, dict(sorted(traps.items())),
                    defined, sorted(referenced), round(time.time() - t0, 1), cold, eh_funcs, eh_points)
     doc = {k: v for k, v in asdict(m).items() if k != "seconds"}   # reproducible

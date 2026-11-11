@@ -30,3 +30,25 @@ def test_extra_starts_file(tmp_path):
     p.write_text(json.dumps({"starts": [[0x414A80, "boot"], [0x4042A0, "immediate"]]}))
     assert load_extra_starts(p) == [0x4042A0, 0x414A80]
     assert load_extra_starts(tmp_path / "missing.json") == []
+    assert load_extra_starts(None) == []
+
+
+def test_vm_pattern_starts(tmp_path):
+    # .name0 at 0x402000: the dispatcher, then two entries `push imm; jmp dispatcher`;
+    # stxt774 at 0x401000: a `mov eax, imm; ret` gadget at +0x10
+    from bw2.extrastarts import vm_pattern_starts
+    name0 = bytearray(b"\x90\xc3".ljust(0x20, b"\xcc"))
+    for off in (0x20, 0x2A):
+        name0[off:off + 10] = b"\x68" + struct.pack("<I", 0x1234) + b"\xe9" + struct.pack("<i", 0x402000 - (0x402000 + off + 10))
+    # stxt774 also starts with a thunk `jmp <entry 0x402020>` at 0x401000
+    stxt = (b"\xe9" + struct.pack("<i", 0x402020 - 0x401005)).ljust(0x10, b"\xcc") + b"\xb8" + struct.pack("<I", 0x401020) + b"\xc3"
+    exe = tmp_path / "vm.exe"
+    exe.write_bytes(make_pe([("stxt774", stxt.ljust(0x40, b"\xcc"), CODE), (".name0", bytes(name0).ljust(0x40, b"\xcc"), CODE)],
+                            {}, 0x1000))
+    assert vm_pattern_starts(exe) == [0x401000, 0x401010, 0x402020, 0x40202A]
+
+
+def test_vm_entries_are_the_push_stubs(tmp_path):
+    from bw2.extrastarts import vm_entries
+    test_vm_pattern_starts(tmp_path)
+    assert vm_entries(tmp_path / "vm.exe") == [0x402020, 0x40202A]

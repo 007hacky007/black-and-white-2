@@ -1064,3 +1064,57 @@ root: .asciz "C:\\\\"
     b = guest_engine(tmp_path, pe, [BASE, 0x402000], code_sections=(".text", "stxt774"))
     r = _run(tmp_path, b)
     assert r.returncode == 3 and "TRIPWIRE: GetDriveTypeA" in r.stderr and "VM: yes" in r.stderr, r.stderr[-2000:]
+
+
+# ---- Task 10: BW2's own shims ---------------------------------------------------
+
+def test_shims_selftest(tmp_path):
+    import subprocess
+    from bw2.build import BW2RT, FLAGS, RECOMP32, WIN32HLE, check_tools, engine_sources, sdk_path
+    srcs = [s for s in engine_sources() if s.name != "main.c"] + [BW2RT / "shims_selftest.c"]
+    exe = tmp_path / "shims_selftest"
+    subprocess.run([str(check_tools()), "-O1", *FLAGS, "-isysroot", str(sdk_path()), "-I", str(RECOMP32),
+                    "-I", str(WIN32HLE), "-I", str(BW2RT), *map(str, srcs), "-lpthread", "-lm", "-o", str(exe)],
+                   check=True, capture_output=True, text=True)
+    r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60, cwd=tmp_path)
+    assert r.returncode == 0 and "shims selftest: 0 failed" in r.stdout, r.stdout + r.stderr[-2000:]
+
+
+def test_ret_to_pushed_address_jumps(tmp_path):
+    # f: push offset g; ret   -- as the VM's exit does: on a CPU this runs g, whose ret goes home
+    asm = r"""
+    call f
+    push eax
+    call dword ptr [{IAT_ExitProcess}]
+.org 0x40
+f:
+    push offset g
+    ret
+.org 0x80
+g:
+    mov eax, 42
+    ret
+"""
+    pe = _image(asm, {K32: ["ExitProcess"]})
+    b = guest_engine(tmp_path, pe, [BASE, BASE + 0x40, BASE + 0x80], computed_ret=True)
+    r = _run(tmp_path, b)
+    assert r.returncode == 42, r.stderr[-2000:]
+
+
+def test_rewritten_push_operand_is_used(tmp_path):
+    asm = r"""
+    mov dword ptr [stub + 1], 77
+    call stub
+    push eax
+    call dword ptr [{IAT_ExitProcess}]
+.org 0x40
+stub:
+    .byte 0x68
+    .long 0
+    pop eax
+    ret
+"""
+    pe = _image(asm, {K32: ["ExitProcess"]})
+    b = guest_engine(tmp_path, pe, [BASE, BASE + 0x40], runtime_push={BASE + 0x40})
+    r = _run(tmp_path, b)
+    assert r.returncode == 77, r.stderr[-2000:]

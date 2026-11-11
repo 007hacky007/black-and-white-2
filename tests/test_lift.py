@@ -265,3 +265,25 @@ tail:
     cont = int(_re.search(r"case 0x([0-9A-F]{8})u: goto L_\1;", body).group(1), 16)
     assert f"L_{cont:08X}:" in body
     assert len(_re.findall(r"mov ecx, dword ptr \[ebp - 0xc\]", body)) == 1, body   # the tail once
+
+
+def test_computed_ret_option(tmp_path):
+    # the protection VM leaves through `popal; popfd; ret` to whatever it pushed
+    exe, cat = _module(tmp_path)
+    out_on, out_off = tmp_path / "on", tmp_path / "off"
+    lift_module("game", exe, cat, out_on, (".text",), computed_ret=True)
+    lift_module("game", exe, cat, out_off, (".text",))
+    assert "RECOMP_RET_JUMP(_rt)" in (out_on / "game_0000.c").read_text()
+    assert "RECOMP_RET_JUMP(_rt)" not in (out_off / "game_0000.c").read_text()
+
+
+def test_runtime_push_reads_its_operand(tmp_path):
+    # the protection VM rewrites the `push imm32` of its re-entry stubs; such a push must read
+    # its operand from memory when it runs
+    exe, cat = _module(tmp_path)
+    out = tmp_path / "gen"
+    text = (b"\x68" + struct.pack("<I", 0) + b"\x58\xc3").ljust(0x100, b"\xcc")   # push 0; pop eax; ret
+    exe.write_bytes(make_pe([(".text", text, CODE)], {}, 0x1000))
+    lift_module("game", exe, cat, out, (".text",), runtime_push={0x401000})
+    c = (out / "game_0000.c").read_text()
+    assert "PUSH32(esp, MEM32(0x00401001u));" in c, c

@@ -9,13 +9,14 @@ import time
 from pathlib import Path
 
 from .build import build
-from .extrastarts import load_extra_starts
+from .extrastarts import EXTRA, VM_EXTRA, load_extra_starts, vm_entries
 from .lift import ModuleLift, lift_module, link_tables
 from .paths import GAMEFILES, REPO
 from .patches import script_dll
 from .vm import VM_SECTIONS
 
 ENTRY = 0xAD8FA3
+EXTRA_FOR = {"white": EXTRA, "vm": VM_EXTRA}
 CAT = REPO / "bw2" / "catalog"
 
 
@@ -27,10 +28,16 @@ def modules():
             ("slr", dll, CAT / "scriptlibraryr-1.2.functions.json", (".text",))]
 
 
-def lift_all(gen: Path) -> list[ModuleLift]:
+def lift_all(gen: Path, only: tuple = ()) -> list[ModuleLift]:
+    """Lift every module (or only those named; the others are read back from gen)."""
     out = []
     for name, exe, cat, secs in modules():
-        m = lift_module(name, exe, cat, gen, secs, extra_starts=load_extra_starts() if name == "white" else ())
+        if only and name not in only:
+            d = json.loads((gen / f"{name}.json").read_text())
+            out.append(ModuleLift(seconds=0.0, **d))
+            continue
+        m = lift_module(name, exe, cat, gen, secs, extra_starts=load_extra_starts(EXTRA_FOR.get(name)),
+                        computed_ret=name == "vm", runtime_push=set(vm_entries(exe)) if name == "vm" else ())
         print(f"[lift] {name}: {m.functions} functions, {m.shards} shards, "
               f"{m.c_bytes / 1e6:.1f} MB, {sum(m.traps.values())} traps, {m.seconds} s", flush=True)
         out.append(m)
@@ -46,9 +53,9 @@ def load_lifted(gen: Path) -> list[ModuleLift]:
 
 
 def run_pipeline(gen: Path = REPO / "gen", out: Path = REPO / "out" / "bw2",
-                 opt: str = "-O3", lift: bool = True, do_build: bool = True) -> dict:
+                 opt: str = "-O3", lift: bool = True, do_build: bool = True, only: tuple = ()) -> dict:
     t0 = time.time()
-    mods = lift_all(gen) if lift else load_lifted(gen)
+    mods = lift_all(gen, tuple(only)) if lift else load_lifted(gen)
     link = link_tables(gen, mods, entry=ENTRY)
     print(f"[link] {link['functions']} functions, {len(link['unresolved'])} unresolved targets", flush=True)
     res = {"modules": {m.name: {k: getattr(m, k) for k in ("functions", "shards", "c_bytes", "traps", "seconds")}
@@ -70,12 +77,13 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="O1, O2 or O3 (or --opt=-O3)")
     ap.add_argument("--lift-only", action="store_true")
     ap.add_argument("--build-only", action="store_true")
+    ap.add_argument("--only", action="append", default=[], help="lift only this module (white, vm, slr)")
     return ap.parse_args(argv)
 
 
 def main(argv=None) -> int:
     a = parse_args(argv)
-    res = run_pipeline(opt=a.opt, lift=not a.build_only, do_build=not a.lift_only)
+    res = run_pipeline(opt=a.opt, lift=not a.build_only, do_build=not a.lift_only, only=tuple(a.only))
     print(json.dumps(res, indent=1))
     return 0
 
