@@ -648,3 +648,25 @@ def test_lifted_dll_base_taken_fails_loudly(tmp_path):
                      dlls={"plugins/Lib.dll": (_lib(0x400000), [])})
     r = _run(tmp_path, b, "--lifted-dll", "lib.dll=0x400000")
     assert r.returncode not in (0, 71) and "lib.dll" in r.stderr.lower() and "0x00400000" in r.stderr, r.stderr[-2000:]
+
+
+# ---- Task 6: EH landing pads -------------------------------------------------
+
+def test_no_stale_eh_frames_after_return(tmp_path):
+    from test_lift import EH_FUNC_ASM, EH_FUNCS
+    asm = EH_FUNC_ASM.replace("func:", r"""
+start:
+    mov esi, 1000
+again:
+    call func
+    dec esi
+    jnz again
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+.org 0x40
+func:""", 1).replace(".org 0x1", ".org 0x40+0x1").replace(".org 0x2", ".org 0x40+0x2").replace(".org 0x3", ".org 0x40+0x3")
+    funcs = [BASE] + [f + 0x40 for f in EH_FUNCS]
+    pe = _image(asm, {K32: ["ExitProcess"]})
+    b = guest_engine(tmp_path, pe, funcs)
+    r = _run(tmp_path, b, "--selftest-eh-depth")
+    assert r.returncode == 0 and "eh depth 0" in r.stderr, r.stderr[-2000:]

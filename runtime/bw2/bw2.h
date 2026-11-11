@@ -36,6 +36,8 @@ uint32_t bw2_run_on_main_stack(uint32_t (*fn)(void));
 void bw2_dll_init(void);
 void bw2_lifted_dll_add(const char *base_name, uint32_t image_base);
 void bw2_dll_hold(uint32_t main_base, uint32_t main_span);
+/* eh.c: guest C++ exceptions. */
+int bw2_eh_depth(void);                 /* this thread's live landing pads */
 /* shell.c: the user's folders and name. */
 extern const win32hle_shim bw2_shell_shims[];
 

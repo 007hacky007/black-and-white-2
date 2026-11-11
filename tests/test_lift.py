@@ -119,3 +119,149 @@ def test_normal_functions_stay_in_shards(tmp_path):
     exe, cat = _module(tmp_path)
     m = lift_module("game", exe, cat, tmp_path / "gen", (".text",))
     assert m.cold == [] and m.shards == 1
+
+
+# ---- plan 3 Task 6: C++ EH landing pads -----------------------------------------
+# An MSVC 7.1 C++ EH function at 0x401000: its prologue installs a frame whose handler
+# stub (0x401180) names FuncInfo (0x401200) with one try block; the catch funclet
+# (0x401100) returns the continuation `cont`.
+EH_FUNC_ASM = r"""
+func:
+    push ebp
+    mov ebp, esp
+    push -1
+    push offset handler
+    mov eax, dword ptr fs:[0]
+    push eax
+    mov dword ptr fs:[0], esp
+    sub esp, 8
+    mov dword ptr [ebp - 4], 0
+    call thrower
+    jmp cont
+cont:
+    mov dword ptr [ebp - 4], -1
+    mov ecx, dword ptr [ebp - 0x0C]
+    mov dword ptr fs:[0], ecx
+    mov esp, ebp
+    pop ebp
+    ret
+.org 0x100
+catch_funclet:
+    mov eax, offset cont
+    ret
+.org 0x180
+handler:
+    mov eax, offset funcinfo
+    .byte 0xE9
+    .long cxx_frame_handler - . - 4
+.org 0x1C0
+cxx_frame_handler:
+    ret
+.org 0x200
+funcinfo: .long 0x19930520, 1, unwindmap, 1, tryblocks
+unwindmap: .long -1, 0
+tryblocks: .long 0, 0, 1, 1, handlers
+handlers: .long 0, 0, 0, catch_funclet
+.org 0x300
+thrower:
+    ret
+"""
+EH_FUNCS = [0x401000, 0x401100, 0x401180, 0x4011C0, 0x401300]
+
+
+def _eh_module(tmp_path, asm=EH_FUNC_ASM, funcs=EH_FUNCS):
+    from fixtures import asm32
+    code = asm32(asm, base=0x401000)
+    exe = tmp_path / "eh.exe"
+    exe.write_bytes(make_pe([(".text", code.ljust(0x400, b"\xcc"), CODE)], {}, 0x1000))
+    cat = tmp_path / "eh.json"
+    cat.write_text(json.dumps({"columns": ["address", "end", "entry_kind", "is_thunk"],
+                               "functions": [[f, f + 1, "start", 0] for f in funcs]}))
+    return exe, cat
+
+
+def test_eh_function_gets_landing_pad(tmp_path):
+    exe, cat = _eh_module(tmp_path)
+    out = tmp_path / "gen"
+    m = lift_module("eh", exe, cat, out, (".text",))
+    c = (out / "eh_0000.c").read_text()
+    body = c[c.index("void sub_00401000(void)"):c.index("void sub_00401100(void)")]
+    import re as _re
+    cont = int(_re.search(r"case 0x([0-9A-F]{8})u: goto L_\1;", body).group(1), 16)
+    assert "BW2_EH_ENTER();" in body
+    assert f"L_{cont:08X}:" in body
+    assert _re.search(r"(?<!BW2_EH_LEAVE\(\); )\breturn;", body.replace("{ BW2_EH_LEAVE(); return; }", "").replace(
+        "default: bw2_eh_bad_resume", "")) is None, body
+    assert m.eh_functions == 1 and m.eh_resume_points == 1
+
+
+def test_plain_function_unchanged(tmp_path):
+    exe, cat = _module(tmp_path)
+    out = tmp_path / "gen"
+    m = lift_module("game", exe, cat, out, (".text",))
+    assert "BW2_EH" not in (out / "game_0000.c").read_text()
+    assert m.eh_functions == 0
+
+
+def test_catch_only_continuation_is_lifted(tmp_path):
+    # As white.exe 0x86C180: the try path returns by itself, so only the catch funclet
+    # reaches the continuation; it must still be lifted into the function.
+    asm = EH_FUNC_ASM.replace("""    call thrower
+    jmp cont
+cont:""", """    call thrower
+    mov esp, ebp
+    pop ebp
+    ret
+cont:""")
+    exe, cat = _eh_module(tmp_path, asm)
+    out = tmp_path / "gen"
+    m = lift_module("eh", exe, cat, out, (".text",))
+    c = (out / "eh_0000.c").read_text()
+    body = c[c.index("void sub_00401000(void)"):c.index("void sub_00401100(void)")]
+    import re as _re
+    cont = int(_re.search(r"case 0x([0-9A-F]{8})u: goto L_\1;", body).group(1), 16)
+    assert f"L_{cont:08X}:" in body and m.eh_resume_points == 1
+
+
+def test_continuation_inside_a_block_splits_it(tmp_path):
+    # As white.exe 0x9726C0: the continuation is reached by falling through, so it is
+    # in the middle of a block; it must become a label.
+    asm = EH_FUNC_ASM.replace("""    call thrower
+    jmp cont
+cont:
+    mov dword ptr [ebp - 4], -1""", """    call thrower
+    nop
+cont:
+    mov dword ptr [ebp - 4], -1""")
+    exe, cat = _eh_module(tmp_path, asm)
+    out = tmp_path / "gen"
+    lift_module("eh", exe, cat, out, (".text",))
+    c = (out / "eh_0000.c").read_text()
+    body = c[c.index("void sub_00401000(void)"):c.index("void sub_00401100(void)")]
+    import re as _re
+    cont = int(_re.search(r"case 0x([0-9A-F]{8})u: goto L_\1;", body).group(1), 16)
+    assert f"L_{cont:08X}:" in body
+
+
+def test_continuation_falling_into_the_body_is_cut(tmp_path):
+    # As white.exe 0x972BF0: only the catch reaches the continuation, and it falls
+    # into a block the entry walk already has.
+    asm = EH_FUNC_ASM.replace("""    call thrower
+    jmp cont
+cont:
+    mov dword ptr [ebp - 4], -1
+    mov ecx, dword ptr [ebp - 0x0C]""", """    call thrower
+    jmp tail
+cont:
+    mov dword ptr [ebp - 4], -1
+tail:
+    mov ecx, dword ptr [ebp - 0x0C]""")
+    exe, cat = _eh_module(tmp_path, asm)
+    out = tmp_path / "gen"
+    lift_module("eh", exe, cat, out, (".text",))
+    c = (out / "eh_0000.c").read_text()
+    body = c[c.index("void sub_00401000(void)"):c.index("void sub_00401100(void)")]
+    import re as _re
+    cont = int(_re.search(r"case 0x([0-9A-F]{8})u: goto L_\1;", body).group(1), 16)
+    assert f"L_{cont:08X}:" in body
+    assert len(_re.findall(r"mov ecx, dword ptr \[ebp - 0xc\]", body)) == 1, body   # the tail once

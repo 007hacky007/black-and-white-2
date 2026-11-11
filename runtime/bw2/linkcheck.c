@@ -50,6 +50,7 @@ void     recomp_set_seg(int sreg, uint32_t sel) { (void)sreg; die("segment load"
 void     recomp_eh_push(recomp_ehframe_t *f) { (void)f; die("SEH push", 0, g_cur_func); }
 void     recomp_eh_pop(recomp_ehframe_t *f) { (void)f; die("SEH pop", 0, g_cur_func); }
 void     recomp_eh_resume(recomp_ehframe_t *f, uint32_t resume) { (void)f; die("SEH resume", resume, g_cur_func); }
+void     bw2_eh_bad_resume(uint32_t func, uint32_t resume) { die("EH resume", resume, func); abort(); }
 
 recomp_func_t recomp_lookup(uint32_t va) {
     uint32_t lo = 0, hi = recomp_dispatch_count;

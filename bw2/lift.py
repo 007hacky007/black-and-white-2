@@ -20,7 +20,13 @@ TRAP = re.compile(r'RECOMP_TRAP\(0x[0-9A-F]{8}, "([^"]+)"\)')
 # A function this long goes to its own shard, which build() compiles at -O0: clang -O1
 # ran over 28 minutes on white.exe 0xB84D70 (~152k lines), -O0 takes 8 s.
 COLD_LINES = 50_000
-HEADER = '#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "recomp_funcs.h"\n\n'
+HEADER = ('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "recomp_funcs.h"\n'
+          '#include "bw2_lift.h"\n\n')
+RETURN = re.compile(r"\breturn;")
+
+
+class LiftError(Exception):
+    pass
 
 
 @dataclass
@@ -34,6 +40,8 @@ class ModuleLift:
     referenced: list
     seconds: float
     cold: list = field(default_factory=list)
+    eh_functions: int = 0
+    eh_resume_points: int = 0
 
 
 def _tools(exe: Path):
@@ -44,6 +52,78 @@ def _tools(exe: Path):
     iat = build_iat_map(info)
     dis = Disassembler(Path(exe).read_bytes(), info.image_base, info.sections)
     return dis, Lifter(iat_map=iat, func_names={}), iat
+
+
+def _image_reader(exe: Path):
+    """read(va, n) -> bytes of the mapped image ('' outside it)."""
+    import pefile
+    pe = pefile.PE(str(exe), fast_load=True)
+    base, img = pe.OPTIONAL_HEADER.ImageBase, pe.get_memory_mapped_image()
+    return lambda va, n: img[va - base:va - base + n] if 0 <= va - base < len(img) else b""
+
+
+def eh_resume_points(md, read, va: int) -> set:
+    """Where the function at va continues after its own catch blocks (eh32.resume_points)."""
+    from eh32 import resume_points
+    insns = list(md.disasm(read(va, 96), va))[:12]
+    return resume_points(md, read, insns) or set()
+
+
+def add_continuations(dis, iat, func, resume: set) -> None:
+    """Make each catch continuation a block of func's body. One inside a block (reached
+    by falling through, as white.exe 0x9726C0) splits it. One that only a catch funclet
+    returns to (the try path returns by itself, as white.exe 0x86C180) was never
+    reached by the walk from the entry: walk from it and merge its blocks. One that
+    would overlap an existing block any other way stops the lift."""
+    import copy
+    for r in sorted(resume):
+        if r in func.blocks:
+            continue
+        inside = next((b for b in func.blocks.values()
+                       if b.start < r < b.end and any(i.address == r for i in b.instructions)), None)
+        if inside is not None:                    # reached by falling through: split the block there
+            k = next(n for n, i in enumerate(inside.instructions) if i.address == r)
+            tail = copy.copy(inside)
+            tail.start, tail.instructions = r, inside.instructions[k:]
+            inside.instructions, inside.end, inside.successors, inside.is_exit = inside.instructions[:k], r, [r], False
+            func.blocks[r] = tail
+            continue
+        g = dis.disassemble_function(r, iat)
+        if g is None:
+            raise LiftError(f"sub_{func.address:08X}: cannot disassemble catch continuation 0x{r:08X}")
+        for addr, blk in sorted(g.blocks.items()):
+            if addr in func.blocks or any(b.start < addr < b.end for b in func.blocks.values()):
+                continue                          # code the body already has
+            cut = min((b.start for b in func.blocks.values() if blk.start < b.start < blk.end), default=None)
+            if cut is not None:                   # falls into a block the body has (white.exe 0x972BF0)
+                keep = [i for i in blk.instructions if i.address < cut]
+                if not keep or keep[-1].address + keep[-1].size != cut:
+                    raise LiftError(f"sub_{func.address:08X}: catch continuation 0x{r:08X} runs into "
+                                    f"block 0x{cut:08X} mid-instruction")
+                blk.instructions, blk.end, blk.successors, blk.is_exit = keep, cut, [cut], False
+            clash = next((b for b in func.blocks.values() if b.start < blk.end and blk.start < b.end), None)
+            if clash is not None:
+                raise LiftError(f"sub_{func.address:08X}: catch continuation 0x{r:08X} overlaps block "
+                                f"0x{clash.start:08X}")
+            func.blocks[addr] = blk
+        func.calls_to |= g.calls_to
+        func.jump_targets |= g.jump_targets
+
+
+def add_landing_pad(code: str, va: int, resume: set) -> str:
+    """Give a lifted function a setjmp landing pad (runtime/bw2/bw2_lift.h) that the
+    guest C++ exception dispatch longjmps to, and a case for each continuation."""
+    for r in sorted(resume):
+        if f"L_{r:08X}:" not in code:
+            raise LiftError(f"sub_{va:08X}: catch continuation 0x{r:08X} is not a block label")
+    enter = f"RECOMP_ENTER(0x{va:08X}u);"
+    head, tail = code.split(enter, 1)
+    body, close = tail.rsplit("}", 1)
+    body = RETURN.sub("{ BW2_EH_LEAVE(); return; }", body)
+    cases = " ".join(f"case 0x{r:08X}u: goto L_{r:08X};" for r in sorted(resume))
+    pad = (f"  _eh_resume: switch (_ehf.resume) {{ {cases} "
+           f"default: bw2_eh_bad_resume(0x{va:08X}u, _ehf.resume); }}\n")
+    return head + enter + "\n    BW2_EH_ENTER();" + body + pad + "}" + close
 
 
 def _write(path: Path, text: str) -> None:
@@ -62,8 +142,11 @@ def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
         stale.unlink()
     view = code_view(exe, list(code_sections), out_dir / f".{name}.view.exe")
     dis, lifter, iat = _tools(view)
+    from capstone import CS_ARCH_X86, CS_MODE_32, Cs
+    md, read = Cs(CS_ARCH_X86, CS_MODE_32), _image_reader(exe)
     starts = sorted({f["address"] for f in load_functions(catalog) if f.get("entry_kind") != "alias"})
     defined, referenced, traps = [], set(), Counter()
+    eh_funcs = eh_points = 0
     shards, c_bytes, chunk, cold = 0, 0, [], []
 
     def flush():
@@ -78,7 +161,13 @@ def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
         f = dis.disassemble_function(va, iat)
         if f is None:
             raise RuntimeError(f"{name}: cannot disassemble catalogued function 0x{va:08X}")
+        resume = eh_resume_points(md, read, va)
+        if resume:
+            add_continuations(dis, iat, f, resume)
         code = lifter.lift_function(f)
+        if resume:
+            code = add_landing_pad(code, va, resume)
+            eh_funcs, eh_points = eh_funcs + 1, eh_points + len(resume)
         sym = f"sub_{va:08X}"
         defined.append(sym)
         referenced.update(s for s in SYM.findall(code) if s != sym)
@@ -96,7 +185,7 @@ def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
     if chunk:
         flush()
     m = ModuleLift(name, len(defined), shards, c_bytes, dict(sorted(traps.items())),
-                   defined, sorted(referenced), round(time.time() - t0, 1), cold)
+                   defined, sorted(referenced), round(time.time() - t0, 1), cold, eh_funcs, eh_points)
     doc = {k: v for k, v in asdict(m).items() if k != "seconds"}   # reproducible
     _write(out_dir / f"{name}.json", json.dumps(doc, indent=0, sort_keys=True))
     return m

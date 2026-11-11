@@ -64,6 +64,8 @@ static uint32_t pe_field(const char *path, uint32_t opt_off) {
     return 0;
 }
 
+static void report_eh_depth(int code) { (void)code; fprintf(stderr, "eh depth %d\n", bw2_eh_depth()); }
+
 static int usage(void) {
     fprintf(stderr, "usage: bw2 --game DIR [--exe white.exe] [--strict] [--lifted-dll NAME=0xBASE]...\n");
     return BW2_EXIT_BOOT;
@@ -86,6 +88,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--selftest-dispatch")) st_dispatch = 1;
         else if (!strcmp(argv[i], "--selftest-mem")) st_mem = 1;
+        else if (!strcmp(argv[i], "--selftest-eh-depth")) hle_on_exit = report_eh_depth;
         else { fprintf(stderr, "bw2: unknown argument %s\n", argv[i]); return usage(); }
     }
     bw2_dispatch_init();
