@@ -270,6 +270,48 @@ int hle_host_path_for_write(const char *guest, char *out, size_t n, int keep) {
 
 static int host_path_plain(const char *guest, char *out, size_t n);
 
+/* ---- a mount: one guest folder that is a host folder ----
+ *
+ * hle_set_mount("C:\\Games\\Foo", "/host/foo") makes that guest folder (and
+ * everything under it) the host folder, wherever the drive itself points: a
+ * game that must see itself installed at a fixed path, with its files kept
+ * elsewhere. Matching is without case; '..' stops at the host folder.
+ * hle_guest_path maps the host folder back. */
+static char *g_mount_guest, *g_mount_host;
+
+void hle_set_mount(const char *guest_dir, const char *host_dir) {
+    free(g_mount_guest), free(g_mount_host);
+    g_mount_guest = g_mount_host = NULL;
+    if (!guest_dir || !host_dir) return;
+    g_mount_host = realpath(host_dir, NULL);
+    if (!g_mount_host) return;
+    g_mount_guest = strdup(guest_dir);
+    size_t l = strlen(g_mount_guest);
+    for (size_t i = 0; i < l; i++) if (g_mount_guest[i] == '/') g_mount_guest[i] = '\\';
+    while (l > 3 && g_mount_guest[l - 1] == '\\') g_mount_guest[--l] = 0;
+}
+
+/* What follows the mount's guest folder in guest, or NULL if guest is not in it.
+ * A rooted path without a drive ("\\Games\\Foo") is on C:. */
+static const char *mount_rest(const char *guest) {
+    if (!g_mount_guest) return NULL;
+    const char *m = g_mount_guest, *p = guest;
+    if ((p[0] == '\\' || p[0] == '/') && (m[0] | 0x20) == 'c' && m[1] == ':') m += 2;
+    while (*m) {
+        if (*m == '\\') {
+            if (*p != '\\' && *p != '/') return NULL;
+            while (*p == '\\' || *p == '/') p++;
+            m++;
+            continue;
+        }
+        if ((*m | 0x20) != (*p | 0x20) || !*p) return NULL;
+        m++, p++;
+    }
+    if (*p && *p != '\\' && *p != '/') return NULL;
+    while (*p == '\\' || *p == '/') p++;
+    return p;
+}
+
 int hle_host_path(const char *guest, char *out, size_t n) {
     int exists = host_path_plain(guest, out, n);
     char ov[1024];
@@ -293,7 +335,12 @@ static int host_path_plain(const char *guest, char *out, size_t n) {
     if (!guest) return 0;
     const char *p = guest;
     const char *anchor = NULL;
-    if (((p[0] | 0x20) >= 'a' && (p[0] | 0x20) <= 'z') && p[1] == ':') {
+    const char *in_mount = mount_rest(guest);
+    if (in_mount) {
+        anchor = g_mount_host;
+        snprintf(out, n, "%s", anchor);
+        p = in_mount;
+    } else if (((p[0] | 0x20) >= 'a' && (p[0] | 0x20) <= 'z') && p[1] == ':') {
         const char *root = drive_root((p[0] | 0x20) - 'a');
         if (!root) return 0;
         anchor = *root ? root : "/";
@@ -333,6 +380,15 @@ void hle_guest_path(const char *host, char *out, size_t n) {
     }
     char *real = realpath(abs, NULL);
     const char *h = real ? real : abs;
+    if (g_mount_host && under(h, g_mount_host)) {
+        const char *rest = h + strlen(g_mount_host);
+        snprintf(out, n, "%s", g_mount_guest);
+        size_t k = strlen(out);
+        for (; *rest && k + 1 < n; rest++) out[k++] = *rest == '/' ? '\\' : *rest;
+        out[k] = 0;
+        free(real);
+        return;
+    }
     int best = -1;
     size_t best_len = 0;
     for (int i = 0; i < 26; i++) {

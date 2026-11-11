@@ -213,6 +213,8 @@ int  hle_host_path(const char *guest, char *out, size_t n);
 /* A mod's folder over the game's: reads look in overlay first, writes go
  * there, directory listings show both (hle_path.c). NULL turns it off. */
 void hle_set_overlay(const char *base, const char *overlay);
+/* One guest folder that is a host folder, wherever its drive points (hle_path.c). */
+void hle_set_mount(const char *guest_dir, const char *host_dir);
 int  hle_overlay_of(const char *host, char *out, size_t n);       /* -1: not under base; else whether it exists there */
 int  hle_host_path_for_write(const char *guest, char *out, size_t n, int keep);
 int  hle_host_path_base(const char *guest, char *out, size_t n);  /* ignoring the overlay */
