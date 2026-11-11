@@ -106,6 +106,7 @@ void mtl_get_stats(struct mtl_stats *s);
 void mtl_archive_open(const char *path);         /* load (or start) the pipeline archive */
 void mtl_archive_save(void);
 void mtl_archive_require_hits(int on);           /* tests: pipelines must come from the archive */
+void mtl_pipeline_cache_drop(void);              /* tests: forget the in-memory libraries and pipelines */
 
 /* ff_msl.c: the MSL for a key pair; malloc'd, NUL-terminated. */
 char *ff_msl(const struct ff_vkey *vk, const struct ff_pkey *pk);

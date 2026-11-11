@@ -355,3 +355,8 @@ void mtl_draw(struct mtl_ctx *cc, const struct ff_draw *d) {
                       baseVertex:d->base_vertex baseInstance:0];
     else [e drawPrimitives:ptype(d->prim) vertexStart:d->start vertexCount:d->count];
 }
+
+void mtl_pipeline_cache_drop(void) {
+    [g_libs removeAllObjects];
+    [g_psos removeAllObjects];
+}

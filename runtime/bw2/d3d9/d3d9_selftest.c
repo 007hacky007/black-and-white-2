@@ -14,6 +14,7 @@
 #include "bw2.h"
 #include "d3d_com.h"
 #include "d3d9_device.h"
+#include "ff.h"
 
 const recomp_dispatch_entry_t recomp_dispatch_table[1] = { { 0, 0 } };
 const uint32_t recomp_dispatch_count = 0;
@@ -1490,7 +1491,184 @@ static void group_samplers(void) {
     vcall(t, 2, 0), vcall(m, 2, 0), vcall(rt, 2, 0);
 }
 
+struct xyzn { float x, y, z, nx, ny, nz; };
+struct d3dlight { uint32_t type; float diffuse[4], specular[4], ambient[4], pos[3], dir[3];
+                  float range, falloff, att0, att1, att2, theta, phi; };
+struct d3dmaterial { float diffuse[4], ambient[4], specular[4], emissive[4], power; };
+
+static void set_light(uint32_t dev, uint32_t i, const struct d3dlight *l) {
+    uint32_t p = gmem(sizeof *l);
+    memcpy(hle_ptr(p), l, sizeof *l);
+    CHECKEQ(vcall(dev, DV_SetLight, 2, i, p), D3D_OK);
+    CHECKEQ(vcall(dev, DV_LightEnable, 2, i, 1u), D3D_OK);
+}
+static void set_material(uint32_t dev, const struct d3dmaterial *m) {
+    uint32_t p = gmem(sizeof *m);
+    memcpy(hle_ptr(p), m, sizeof *m);
+    CHECKEQ(vcall(dev, DV_SetMaterial, 1, p), D3D_OK);
+}
+/* A camera-facing quad (normal toward the camera, -z) of side 4 at z = 5, under a 90 degree projection. */
+static void lit_scene(uint32_t dev) {
+    float w[16], v[16], p[16];
+    mat_identity(w), mat_identity(v);
+    mat_persp(p, 3.14159265f / 2, 1, 1, 10);
+    set_xform(dev, 256, w), set_xform(dev, 2, v), set_xform(dev, 3, p);
+}
+static void lit_quad(uint32_t dev) {
+    struct xyzn q[4] = { { -2, 2, 5, 0, 0, -1 }, { 2, 2, 5, 0, 0, -1 }, { -2, -2, 5, 0, 0, -1 }, { 2, -2, 5, 0, 0, -1 } };
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZ | FVF_NORMAL), D3D_OK);
+    draw_up(dev, PT_TRIANGLESTRIP, 2, q, 4, sizeof q[0]);
+}
+
+static void group_lighting(void) {
+    uint32_t dev = new_device(16, 16);
+    lit_scene(dev);
+    struct d3dmaterial m = { { 0.5f, 0.5f, 0.5f, 1 }, { 1, 1, 1, 1 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, 0 };
+    set_material(dev, &m);
+    rs(dev, RS_AMBIENT, 0x00202020u);                        /* 32/255 */
+    struct d3dlight dl = { 3, { 1, 0.5f, 0.25f, 1 }, { 0 }, { 0 }, { 0 }, { 0, 0, 1 }, 0, 0, 0, 0, 0, 0, 0 };
+    set_light(dev, 0, &dl);
+    tss(dev, 0, TSS_COLOROP, 2), tss(dev, 0, TSS_COLORARG1, 0);
+    clear(dev, 0xFF000000u);
+    lit_quad(dev);
+    float a = 32 / 255.0f, want[4] = { a + 0.5f, a + 0.25f, a + 0.125f, 1 };
+    uint32_t got = frame(dev, 16, 16)[8 * 16 + 8];
+    if (!near_color(got, pack(want), 2)) printf("FAIL directional: 0x%08X want 0x%08X\n", got, pack(want)), fails++;
+    /* at an angle: N.L = 0.8 */
+    dl.dir[0] = 0, dl.dir[1] = -0.6f, dl.dir[2] = 0.8f;
+    set_light(dev, 0, &dl);
+    clear(dev, 0xFF000000u);
+    lit_quad(dev);
+    float want2[4] = { a + 0.4f, a + 0.2f, a + 0.1f, 1 };
+    got = frame(dev, 16, 16)[8 * 16 + 8];
+    if (!near_color(got, pack(want2), 2)) printf("FAIL angled: 0x%08X want 0x%08X\n", got, pack(want2)), fails++;
+    /* a point light two units in front; lighting is per vertex: each corner is sqrt(12) away,
+     * N.L = 2 / sqrt(12), attenuation 1 / (att1 * d) = 1 / sqrt(12), so diffuse 0.5 * 2 / 12 */
+    CHECKEQ(vcall(dev, DV_LightEnable, 2, 0u, 0u), D3D_OK);
+    struct d3dlight pl = { 1, { 1, 1, 1, 1 }, { 0 }, { 0 }, { 0, 0, 3 }, { 0 }, 100, 0, 0, 1, 0, 0, 0 };
+    set_light(dev, 1, &pl);
+    clear(dev, 0xFF000000u);
+    lit_quad(dev);
+    float want3[4] = { a + 1 / 12.0f, a + 1 / 12.0f, a + 1 / 12.0f, 1 };
+    got = frame(dev, 16, 16)[8 * 16 + 8];
+    if (!near_color(got, pack(want3), 3)) printf("FAIL point: 0x%08X want 0x%08X\n", got, pack(want3)), fails++;
+    /* out of range: only the ambient */
+    pl.range = 1;
+    set_light(dev, 1, &pl);
+    clear(dev, 0xFF000000u);
+    lit_quad(dev);
+    float want4[4] = { a, a, a, 1 };
+    got = frame(dev, 16, 16)[8 * 16 + 8];
+    if (!near_color(got, pack(want4), 2)) printf("FAIL range: 0x%08X want 0x%08X\n", got, pack(want4)), fails++;
+    /* lighting off: the vertex has no colour, so white */
+    rs(dev, RS_LIGHTING, 0);
+    clear(dev, 0xFF000000u);
+    lit_quad(dev);
+    CHECKEQ(frame(dev, 16, 16)[8 * 16 + 8], 0xFFFFFFFFu);
+    /* the light reads back; an enabled light reports 128 */
+    uint32_t out = gmem(sizeof(struct d3dlight)), en = gmem(4);
+    CHECKEQ(vcall(dev, DV_GetLight, 2, 1u, out), D3D_OK);
+    CHECK(((struct d3dlight *)hle_ptr(out))->range == 1);
+    CHECKEQ(vcall(dev, DV_GetLightEnable, 2, 1u, en), D3D_OK);
+    CHECKEQ(MEM32(en), 128);
+    CHECKEQ(vcall(dev, DV_GetLight, 2, 7u, out), D3DERR_INVALIDCALL);
+}
+
+static void group_fog_alpha(void) {
+    uint32_t dev = new_device(8, 8), rt = argb_target(dev, 8, 8);
+    tss(dev, 0, TSS_COLOROP, 2), tss(dev, 0, TSS_COLORARG1, 0), tss(dev, 0, TSS_ALPHAOP, 2), tss(dev, 0, TSS_ALPHAARG1, 0);
+    /* linear table fog at depth 0.25 and 0.75, start 0, end 1, fog red */
+    rs(dev, RS_FOGENABLE, 1), rs(dev, RS_FOGTABLEMODE, 3), rs(dev, RS_FOGCOLOR, 0xFFFF0000u);
+    rs(dev, RS_FOGSTART, f32(0)), rs(dev, RS_FOGEND, f32(1));
+    clear(dev, 0);
+    quad_tlv(dev, -0.5f, -0.5f, 3.5f, 7.5f, 0.25f, 0xFFFFFFFFu);
+    quad_tlv(dev, 3.5f, -0.5f, 7.5f, 7.5f, 0.75f, 0xFFFFFFFFu);
+    float w1[4] = { 1, 0.75f, 0.75f, 1 }, w2[4] = { 1, 0.25f, 0.25f, 1 };
+    uint32_t g1 = read1(dev, rt, 8, 8, 1, 4), g2 = read1(dev, rt, 8, 8, 6, 4);
+    if (!near_color(g1, pack(w1), 2)) printf("FAIL table fog z 0.25: 0x%08X want 0x%08X\n", g1, pack(w1)), fails++;
+    if (!near_color(g2, pack(w2), 2)) printf("FAIL table fog z 0.75: 0x%08X want 0x%08X\n", g2, pack(w2)), fails++;
+    /* vertex fog on transformed geometry: view z 5 between 0 and 10 is half */
+    rs(dev, RS_FOGTABLEMODE, 0), rs(dev, 140, 3), rs(dev, RS_FOGEND, f32(10));
+    lit_scene(dev);
+    rs(dev, RS_LIGHTING, 0);
+    struct xyzc q[4] = { { -2, 2, 5, 0xFFFFFFFFu }, { 2, 2, 5, 0xFFFFFFFFu }, { -2, -2, 5, 0xFFFFFFFFu }, { 2, -2, 5, 0xFFFFFFFFu } };
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZ | FVF_DIFFUSE), D3D_OK);
+    clear(dev, 0);
+    draw_up(dev, PT_TRIANGLESTRIP, 2, q, 4, sizeof q[0]);
+    float w3[4] = { 1, 0.5f, 0.5f, 1 };
+    uint32_t g3 = read1(dev, rt, 8, 8, 4, 4);
+    if (!near_color(g3, pack(w3), 2)) printf("FAIL vertex fog: 0x%08X want 0x%08X\n", g3, pack(w3)), fails++;
+    rs(dev, RS_FOGENABLE, 0);
+    /* alpha test: GREATER 0x80 keeps 0x81, drops 0x80 and 0x7F; GREATEREQUAL keeps 0x80 */
+    rs(dev, RS_ALPHATESTENABLE, 1), rs(dev, RS_ALPHAFUNC, 5), rs(dev, RS_ALPHAREF, 0x80);
+    clear(dev, 0);
+    quad_tlv(dev, -0.5f, -0.5f, 1.5f, 7.5f, 0.5f, 0x7FFFFFFFu);
+    quad_tlv(dev, 1.5f, -0.5f, 3.5f, 7.5f, 0.5f, 0x80FFFFFFu);
+    quad_tlv(dev, 3.5f, -0.5f, 5.5f, 7.5f, 0.5f, 0x81FFFFFFu);
+    static uint32_t px[64];
+    read_rt(dev, rt, 8, 8, px);
+    CHECKEQ(px[8 + 0], 0);
+    CHECKEQ(px[8 + 2], 0);
+    CHECKEQ(px[8 + 4], 0x81FFFFFFu);
+    rs(dev, RS_ALPHAFUNC, 7);
+    clear(dev, 0);
+    quad_tlv(dev, 1.5f, -0.5f, 3.5f, 7.5f, 0.5f, 0x80FFFFFFu);
+    CHECKEQ(read1(dev, rt, 8, 8, 2, 1), 0x80FFFFFFu);
+    rs(dev, RS_ALPHATESTENABLE, 0);
+    /* specular add: a lit vertex's specular colour is added when SPECULARENABLE is on */
+    rs(dev, RS_SPECULARENABLE, 1);
+    struct { float x, y, z, rhw; uint32_t c, s; } sv[4] = {
+        { -0.5f, -0.5f, 0.5f, 1, 0xFF202020u, 0xFF404000u }, { 7.5f, -0.5f, 0.5f, 1, 0xFF202020u, 0xFF404000u },
+        { -0.5f, 7.5f, 0.5f, 1, 0xFF202020u, 0xFF404000u }, { 7.5f, 7.5f, 0.5f, 1, 0xFF202020u, 0xFF404000u } };
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZRHW | FVF_DIFFUSE | FVF_SPECULAR), D3D_OK);
+    clear(dev, 0);
+    draw_up(dev, PT_TRIANGLESTRIP, 2, sv, 4, sizeof sv[0]);
+    CHECK(near_color(read1(dev, rt, 8, 8, 4, 4), 0xFF606020u, 1));
+    vcall(rt, 2, 0);
+}
+
+static void group_cache(void) {
+    struct mtl_stats s0, s1, s2;
+    uint32_t dev = new_device(16, 16);
+    lit_scene(dev);
+    clear(dev, 0xFF000000u);
+    lit_quad(dev);
+    frame(dev, 16, 16);
+    mtl_get_stats(&s0);
+    CHECK(s0.libraries >= 1 && s0.pipelines >= 1);
+    CHECKEQ(vcall(dev, 2, 0), 0);                            /* the release saves the archive */
+    /* a second device with the same states compiles nothing new */
+    dev = new_device(16, 16);
+    lit_scene(dev);
+    clear(dev, 0xFF000000u);
+    lit_quad(dev);
+    frame(dev, 16, 16);
+    mtl_get_stats(&s1);
+    CHECKEQ(s1.libraries, s0.libraries);
+    CHECKEQ(s1.pipelines, s0.pipelines);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    /* from the archive on disk: the pipeline comes back without a backend compile */
+    char path[1024];
+    snprintf(path, sizeof path, "%s/ShaderCache/ff.metalar", getenv("BW2_SUPPORT"));
+    FILE *f = fopen(path, "rb");
+    CHECK(f != NULL);
+    if (f) fclose(f);
+    mtl_pipeline_cache_drop();
+    mtl_archive_open(path);
+    mtl_archive_require_hits(1);
+    dev = new_device(16, 16);
+    lit_scene(dev);
+    clear(dev, 0xFF000000u);
+    lit_quad(dev);
+    frame(dev, 16, 16);
+    mtl_get_stats(&s2);
+    CHECK(s2.archive_hits > s1.archive_hits);
+    CHECKEQ(s2.archive_misses, s1.archive_misses);
+    mtl_archive_require_hits(0);
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "lighting", group_lighting }, { "fog_alpha", group_fog_alpha }, { "cache", group_cache },
     { "stages", group_stages }, { "blend_depth_stencil", group_blend_depth_stencil }, { "samplers", group_samplers },
     { "tri_colour", group_tri_colour }, { "half_pixel", group_half_pixel }, { "transforms", group_transforms },
     { "primitive_types", group_primitive_types }, { "dynamic_discard", group_dynamic_discard },
