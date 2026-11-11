@@ -50,6 +50,20 @@ void bw2_register_shims(void) {
     win32hle_register(win32hle_advapi32);
 }
 
+/* The ImageBase in path's PE header: where recomp_pe_map put it. */
+static uint32_t image_base(const char *path) {
+    FILE *f = fopen(path, "rb");
+    uint32_t lfanew = 0, base = 0;
+    if (f && fseek(f, 0x3C, SEEK_SET) == 0 && fread(&lfanew, 4, 1, f) == 1 &&
+        fseek(f, (long)lfanew + 0x34, SEEK_SET) == 0 && fread(&base, 4, 1, f) == 1) {
+        fclose(f);
+        return base;
+    }
+    if (f) fclose(f);
+    hle_fatal("cannot read the image base of %s", path);
+    return 0;
+}
+
 static int usage(void) {
     fprintf(stderr, "usage: bw2 --game DIR [--exe white.exe] [--strict]\n");
     return BW2_EXIT_BOOT;
@@ -85,9 +99,11 @@ int main(int argc, char **argv) {
     bw2_register_shims();
     char path[4096];
     snprintf(path, sizeof path, "%s/%s", game, exe);
+    bw2_threads_init();
     if (strict ? recomp_host_boot(path) : recomp_host_boot_permissive(path)) {
         fprintf(stderr, "bw2: cannot boot %s%s\n", path, strict ? " (strict: unanswered imports above)" : "");
         return BW2_EXIT_BOOT;
     }
-    return (int)recomp_host_run();
+    bw2_tls_add_module(image_base(path));
+    return (int)bw2_run_on_main_stack(recomp_host_run);
 }

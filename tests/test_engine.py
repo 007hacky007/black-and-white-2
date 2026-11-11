@@ -325,3 +325,188 @@ name: .asciz "Data\\a.txt"
     r = _run(tmp_path, b)
     assert r.returncode == 0, r.stderr[-2000:]          # DeleteFileA fails
     assert (tmp_path / "game" / "Data" / "a.txt").read_bytes() == b"Q"
+
+
+# ---- Task 3: threads ---------------------------------------------------------
+
+THR = ["CreateThread", "WaitForSingleObject", "ExitProcess"]
+WORKER = BASE + 0x400
+
+
+def test_spin_wait_hands_over(tmp_path):
+    asm = r"""
+    push 0
+    push 0
+    push 0
+    push {worker}
+    push 0
+    push 0
+    call dword ptr [{{IAT_CreateThread}}]
+spin:
+    cmp dword ptr [flag], 0
+    je spin
+    push 5
+    call dword ptr [{{IAT_ExitProcess}}]
+flag: .long 0
+.org 0x400
+    mov dword ptr [flag], 1
+    ret 4
+""".format(worker=WORKER)
+    b = _engine(tmp_path, asm, {K32: THR}, functions=(BASE, WORKER))
+    r = _run(tmp_path, b, timeout=10)
+    assert r.returncode == 5, r.stderr[-2000:]
+
+
+def test_worker_thread_deep_stack(tmp_path):
+    # 50,000 nested lifted calls on a worker: far past pthread's default 512 KB host stack.
+    asm = r"""
+    push 0
+    push 0
+    push 0
+    push {worker}
+    push 0
+    push 0
+    call dword ptr [{{IAT_CreateThread}}]
+    push -1
+    push eax
+    call dword ptr [{{IAT_WaitForSingleObject}}]
+    push dword ptr [depth]
+    call dword ptr [{{IAT_ExitProcess}}]
+depth: .long 0
+.org 0x400
+    mov ecx, 50000
+    call rec
+    ret 4
+.org 0x500
+rec:
+    push ebp
+    mov ebp, esp
+    sub esp, 32
+    inc dword ptr [depth]
+    dec ecx
+    jz 1f
+    call rec
+1:  mov esp, ebp
+    pop ebp
+    ret
+""".format(worker=WORKER)
+    b = _engine(tmp_path, asm, {K32: THR}, functions=(BASE, WORKER, BASE + 0x500))
+    r = _run(tmp_path, b, timeout=30)
+    assert r.returncode == 50000 & 0xFF, r.stderr[-2000:]
+
+
+def _tls_image(asm):
+    # .text at 0x401000; the TLS directory sits at tlsdir (offset 0x700), its template at 0x780.
+    imports = {K32: THR}
+    pad = [(".text", b"\xcc" * 0x800, CODE)]
+    slots = {f"IAT_{fn}": iat_va(pad, imports, K32, fn) for fn in THR}
+    code = asm32(asm.format(**slots), base=BASE)
+    return make_pe([(".text", code.ljust(0x800, b"\xcc"), CODE)], imports, 0x1000, data_dirs={9: (0x1700, 24)})
+
+
+def test_tls_per_thread(tmp_path):
+    asm = r"""
+    push 0
+    push 0
+    push 0
+    push 0x401400
+    push 0
+    push 0
+    call dword ptr [{IAT_CreateThread}]
+    push -1
+    push eax
+    call dword ptr [{IAT_WaitForSingleObject}]
+    mov eax, dword ptr fs:[0x2c]
+    mov ecx, dword ptr [tls_index]
+    mov eax, dword ptr [eax + ecx*4]
+    cmp dword ptr [eax], 0x1234
+    jne bad_main
+    cmp dword ptr [wseen], 0x1234
+    jne bad_worker
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+bad_main:
+    push 1
+    call dword ptr [{IAT_ExitProcess}]
+bad_worker:
+    push 2
+    call dword ptr [{IAT_ExitProcess}]
+wseen: .long 0
+tls_index: .long 0xFFFF
+.org 0x400
+    mov eax, dword ptr fs:[0x2c]
+    mov ecx, dword ptr [tls_index]
+    mov eax, dword ptr [eax + ecx*4]
+    mov ecx, dword ptr [eax]
+    mov dword ptr [wseen], ecx
+    mov dword ptr [eax], 5
+    ret 4
+.org 0x700
+tlsdir:
+    .long tmpl
+    .long tmpl + 4
+    .long tls_index
+    .long 0
+    .long 12
+    .long 0
+.org 0x780
+tmpl: .long 0x1234
+"""
+    pe = _tls_image(asm)
+    b = guest_engine(tmp_path, pe, [BASE, BASE + 0x400])
+    r = _run(tmp_path, b, timeout=20)
+    assert r.returncode == 0, r.stderr[-2000:]
+
+
+def test_exit_from_worker_thread(tmp_path):
+    asm = r"""
+    push offset hk
+    push 0xF003F
+    push 0
+    push offset key
+    push 0x80000001
+    call dword ptr [{{IAT_RegOpenKeyExA}}]
+    push offset disp
+    push offset hk
+    push 0
+    push 0xF003F
+    push 0
+    push 0
+    push 0
+    push offset key
+    push 0x80000001
+    call dword ptr [{{IAT_RegCreateKeyExA}}]
+    push 4
+    push offset val
+    push 4
+    push 0
+    push offset vname
+    push dword ptr [hk]
+    call dword ptr [{{IAT_RegSetValueExA}}]
+    push 0
+    push 0
+    push 0
+    push {worker}
+    push 0
+    push 0
+    call dword ptr [{{IAT_CreateThread}}]
+    push -1
+    push eax
+    call dword ptr [{{IAT_WaitForSingleObject}}]
+    push 1
+    call dword ptr [{{IAT_ExitProcess}}]
+key: .asciz "Software\\BW2Exit"
+vname: .asciz "flushed"
+hk: .long 0
+disp: .long 0
+val: .long 7
+.org 0x400
+    push 9
+    call dword ptr [{{IAT_ExitProcess}}]
+    ret 4
+""".format(worker=WORKER)
+    b = _engine(tmp_path, asm, {K32: THR, "ADVAPI32.dll": ["RegOpenKeyExA", "RegCreateKeyExA", "RegSetValueExA"]},
+                functions=(BASE, WORKER))
+    r = _run(tmp_path, b, timeout=20)
+    assert r.returncode == 9, r.stderr[-2000:]
+    assert "flushed" in (tmp_path / "support" / "registry.txt").read_text()

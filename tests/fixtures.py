@@ -124,7 +124,9 @@ def _rsrc(resources: dict[tuple[int, int], bytes], rva: int) -> bytes:
 
 
 def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]],
-            entry_rva: int, resources: dict[tuple[int, int], bytes] | None = None) -> bytes:
+            entry_rva: int, resources: dict[tuple[int, int], bytes] | None = None,
+            data_dirs: dict[int, tuple[int, int]] | None = None) -> bytes:
+    """A PE32 image at IMAGE_BASE; data_dirs sets extra directories, {index: (rva, size)}."""
     secs = list(sections)
     rva = SECT_ALIGN
     layout = []
@@ -160,6 +162,8 @@ def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]
     dirs = [(0, 0)] * 16
     dirs[1] = (imp_rva, imp_size)
     dirs[2] = (rsrc_rva, rsrc_size)
+    for k, v in (data_dirs or {}).items():
+        dirs[k] = v
     _st.pack_into("<HBBIIIIIIIIIHHHHHHIIIIHHIIIIII", out, opt,
                   0x10B, 7, 10, 0, 0, 0, entry_rva, SECT_ALIGN, 0, IMAGE_BASE,
                   SECT_ALIGN, FILE_ALIGN, 4, 0, 0, 0, 4, 0, 0, size_of_image, headers,

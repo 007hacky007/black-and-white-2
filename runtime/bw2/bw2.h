@@ -28,6 +28,10 @@ recomp_func_t bw2_hle_shim(const char *name);
 int  bw2_mount(const char *game_dir, const char *support_dir);
 int  bw2_in_game_tree(const char *host_path);
 extern const win32hle_shim bw2_mount_shims[];
+/* threads.c: big host stacks, per-thread static TLS, crash reports on an alt stack. */
+void     bw2_threads_init(void);
+int      bw2_tls_add_module(uint32_t image_base);
+uint32_t bw2_run_on_main_stack(uint32_t (*fn)(void));
 /* shell.c: the user's folders and name. */
 extern const win32hle_shim bw2_shell_shims[];
 
