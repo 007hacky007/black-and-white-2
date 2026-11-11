@@ -41,6 +41,9 @@ int bw2_eh_depth(void);                 /* this thread's live landing pads */
 void bw2_eh_add_image(uint32_t base, uint32_t span);   /* where EH tables may be */
 extern int bw2_eh_trace;                /* --trace-eh */
 extern const win32hle_shim bw2_eh_shims[];
+/* guard.c: the tripwire for disc and driver checks (exit 3, the user decides). */
+void bw2_guard_init(uint32_t main_image_base);
+extern const win32hle_shim bw2_guard_shims[];
 /* shell.c: the user's folders and name. */
 extern const win32hle_shim bw2_shell_shims[];
 

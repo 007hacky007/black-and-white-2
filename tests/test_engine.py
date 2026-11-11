@@ -1001,3 +1001,66 @@ full:
     b = _engine(tmp_path, asm, {K32: HEAP})
     r = _run(tmp_path, b)
     assert r.returncode == 0, r.stderr[-2000:]
+
+
+# ---- Task 9: disc and driver tripwire ----------------------------------------
+
+def test_deviceiocontrol_trips(tmp_path):
+    asm = r"""
+    push 0
+    push 0
+    push 0
+    push 0
+    push 0
+    push 0
+    push 0x2D1400
+    push 0x100
+    call dword ptr [{IAT_DeviceIoControl}]
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+"""
+    b = _engine(tmp_path, asm, {K32: ["DeviceIoControl", "ExitProcess"]})
+    r = _run(tmp_path, b)
+    assert r.returncode == 3 and "TRIPWIRE: DeviceIoControl" in r.stderr, r.stderr[-2000:]
+    assert "VM: no" in r.stderr
+
+
+def test_drive_type_from_game_answers(tmp_path):
+    asm = r"""
+    push offset root
+    call dword ptr [{IAT_GetDriveTypeA}]
+    cmp eax, 3
+    jne bad
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+bad:
+    push 1
+    call dword ptr [{IAT_ExitProcess}]
+root: .asciz "C:\\"
+"""
+    b = _engine(tmp_path, asm, {K32: ["GetDriveTypeA", "ExitProcess"]})
+    r = _run(tmp_path, b)
+    assert r.returncode == 0, r.stderr[-2000:]
+
+
+def test_drive_type_from_vm_range_trips(tmp_path):
+    imports = {K32: ["GetDriveTypeA", "ExitProcess"]}
+    pad = [(".text", b"\xcc" * 0x100, CODE), ("stxt774", b"\xcc" * 0x100, CODE)]
+    slot = lambda fn: iat_va(pad, imports, K32, fn)
+    main = asm32(f"""
+    mov eax, 0x402000
+    call eax
+    push 0
+    call dword ptr [{slot("ExitProcess"):#x}]
+""", base=BASE)
+    vm = asm32(f"""
+    push offset root
+    call dword ptr [{slot("GetDriveTypeA"):#x}]
+    ret
+root: .asciz "C:\\\\"
+""", base=0x402000)
+    pe = make_pe([(".text", main.ljust(0x100, b"\xcc"), CODE), ("stxt774", vm.ljust(0x100, b"\xcc"), CODE)],
+                 imports, 0x1000)
+    b = guest_engine(tmp_path, pe, [BASE, 0x402000], code_sections=(".text", "stxt774"))
+    r = _run(tmp_path, b)
+    assert r.returncode == 3 and "TRIPWIRE: GetDriveTypeA" in r.stderr and "VM: yes" in r.stderr, r.stderr[-2000:]

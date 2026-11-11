@@ -282,7 +282,7 @@ def _catalog(path: Path, functions: list[int]) -> Path:
 
 
 def guest_engine(tmp_path: Path, pe: bytes, functions: list[int], exe_name: str = "game.exe",
-                 dlls: dict | None = None) -> Path:
+                 dlls: dict | None = None, code_sections: tuple = (".text",)) -> Path:
     """Lift a synthetic PE (and DLLs: {relative path: (bytes, function starts)}) and link
     it with the engine host; the files go to tmp_path/game, the binary is returned."""
     import struct
@@ -293,7 +293,7 @@ def guest_engine(tmp_path: Path, pe: bytes, functions: list[int], exe_name: str 
     game.mkdir(exist_ok=True)
     (game / exe_name).write_bytes(pe)
     gen = tmp_path / "gen"
-    mods = [lift_module("main", game / exe_name, _catalog(tmp_path / "main.json", functions), gen, (".text",))]
+    mods = [lift_module("main", game / exe_name, _catalog(tmp_path / "main.json", functions), gen, code_sections)]
     for i, (rel, (data, funcs)) in enumerate(sorted((dlls or {}).items())):
         p = game / rel
         p.parent.mkdir(parents=True, exist_ok=True)

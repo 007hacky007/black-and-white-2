@@ -34,7 +34,8 @@ recomp_func_t bw2_hle_shim(const char *name) {
 }
 
 void bw2_register_shims(void) {
-    win32hle_register(bw2_mount_shims);         /* BW2's own first: hle_resolve takes the first */
+    win32hle_register(bw2_guard_shims);         /* BW2's own first: hle_resolve takes the first */
+    win32hle_register(bw2_mount_shims);
     win32hle_register(bw2_shell_shims);
     win32hle_register(bw2_eh_shims);
     win32hle_register(win32hle_kernel32);
@@ -121,6 +122,7 @@ int main(int argc, char **argv) {
         return BW2_EXIT_BOOT;
     }
     bw2_tls_add_module(pe_field(path, 0x1C));
+    bw2_guard_init(pe_field(path, 0x1C));
     bw2_eh_add_image(pe_field(path, 0x1C), pe_field(path, 0x38));
     return (int)bw2_run_on_main_stack(recomp_host_run);
 }
