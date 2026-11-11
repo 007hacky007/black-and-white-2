@@ -252,6 +252,13 @@ int   hle_exe_path(char *out, size_t n);           /* this program's own path (t
  * The host adds its main image (main_image 1); LoadLibraryA adds DLLs. A
  * NULL module is the main image. */
 int      hle_module_add(const char *guest_path, uint32_t base, uint32_t rsrc_rva, uint32_t rsrc_size, int main_image);
+/* LoadLibraryA asks this first, for a DLL whose code the host lifted (module.c):
+ * base_name is lower case ("foo.dll"), host_path NULL if the file was not found.
+ * Return 1 with *hmod set when it loaded it (and added it with hle_module_add),
+ * 0 when it is not one of the host's, -1 on failure (last error set). */
+extern int (*hle_lifted_dll_hook)(const char *base_name, const char *host_path, uint32_t *hmod);
+/* An export of the mapped image at base, by name or ordinal: its VA, or 0. */
+uint32_t hle_pe_export(uint32_t base, uint32_t name_or_ord);
 uint32_t hle_find_resource(uint32_t hmod, uint32_t name, uint32_t type);   /* HRSRC, or 0 */
 uint32_t hle_resource_data(uint32_t hmod, uint32_t hrsrc, uint32_t *size); /* its bytes' VA */
 int      hle_load_string(uint32_t hmod, uint32_t id, char *buf, int n);

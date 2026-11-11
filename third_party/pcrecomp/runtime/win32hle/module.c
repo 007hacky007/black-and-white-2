@@ -139,6 +139,14 @@ static void k_LoadLibraryA(void) {
         snprintf(g, sizeof g, "%.*s\\%s", bs ? (int)(bs - g_mod[g_main].guest) : 0, g_mod[g_main].guest, name);
         found = hle_host_path(g, host, sizeof host);
     }
+    if (hle_lifted_dll_hook) {                           /* a DLL whose code is lifted: the host loads it */
+        char b[64];
+        uint32_t h = 0;
+        base_of(name, b, sizeof b);
+        int r = hle_lifted_dll_hook(b, found ? host : NULL, &h);
+        if (r > 0) RET(h, 1);
+        if (r < 0) RET(0, 1);
+    }
     pe_image img;
     if (!found || recomp_pe_map_any(host, &img) != 0) {
         fprintf(stderr, "[module] LoadLibraryA(\"%s\"): not found\n", name);
@@ -153,9 +161,33 @@ static void k_LoadLibraryA(void) {
 }
 static void k_FreeLibrary(void) { int i = find_mod(A32(0)); if (i >= 0 && g_mod[i].refs > 1) g_mod[i].refs--; RET(1, 1); }
 
+int (*hle_lifted_dll_hook)(const char *base_name, const char *host_path, uint32_t *hmod);
+
+/* An export of the image at base, by name or (below 0x10000) ordinal: its VA, or 0.
+ * A forwarder (an RVA inside the export directory) is not followed. */
+uint32_t hle_pe_export(uint32_t base, uint32_t name_or_ord) {
+    uint32_t nt = base + MEM32(base + 0x3C);
+    uint32_t dir_rva = MEM32(nt + 0x78), dir_size = MEM32(nt + 0x7C);
+    if (!dir_rva) return 0;
+    uint32_t d = base + dir_rva, ord_base = MEM32(d + 16), nfunc = MEM32(d + 20), nname = MEM32(d + 24);
+    uint32_t funcs = base + MEM32(d + 28), names = base + MEM32(d + 32), ords = base + MEM32(d + 36);
+    uint32_t idx = 0xFFFFFFFFu;
+    if (name_or_ord < 0x10000u) idx = name_or_ord - ord_base;
+    else {
+        const char *want = (const char *)hle_ptr(name_or_ord);
+        for (uint32_t k = 0; k < nname; k++)
+            if (!strcmp((const char *)hle_ptr(base + MEM32(names + 4 * k)), want)) { idx = MEM16(ords + 2 * k); break; }
+    }
+    if (idx >= nfunc) return 0;
+    uint32_t rva = MEM32(funcs + 4 * idx);
+    if (!rva || (rva >= dir_rva && rva < dir_rva + dir_size)) return 0;
+    return base + rva;
+}
+
 static void k_GetProcAddress(void) {                     /* (hModule, name or ordinal) */
     int i = find_mod(A32(0));
     uint32_t n = A32(1), va = 0;
+    if (i >= 0 && !g_mod[i].system && g_mod[i].base) va = hle_pe_export(g_mod[i].base, n);
     if (i >= 0 && g_mod[i].system) {
         if (n < 0x10000u) {
             char nm[96];
