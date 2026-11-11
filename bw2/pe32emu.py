@@ -70,6 +70,11 @@ class Pe32Host:
         mu.hook_add(UC_HOOK_CODE, self._on_stub, begin=STUBS, end=STUBS + STUBS_SIZE - 1)
         self.api["VirtualAlloc"] = (4, self._virtual_alloc_api)
         self.api["VirtualFree"] = (3, lambda a, n, t: 1)
+        self.api["RaiseException"] = (4, self._raise_exception)
+        self.api["RtlUnwind"] = (4, self._rtl_unwind)
+        self.api["__seh_ret"] = (0, self._seh_ret)
+        self._seh_ret_stub = self._stub("__seh_ret")
+        self._seh: list[dict] = []
 
     # ---- set-up ----
     def _setup_segments(self) -> None:
@@ -197,6 +202,99 @@ class Pe32Host:
         except BaseException as e:                 # Unicorn swallows exceptions in hooks
             self._error = e
             uc.emu_stop()
+
+    # ---- structured exception handling ----
+    # Unicorn cannot run a nested emu_start inside a hook, so a handler call is
+    # a jump into guest code with __seh_ret as its return address; __seh_ret
+    # picks up the dispatch or unwind that made the call.
+    _CTX = {"edi": 0x9C, "esi": 0xA0, "ebx": 0xA4, "edx": 0xA8, "ecx": 0xAC, "eax": 0xB0,
+            "ebp": 0xB4, "eip": 0xB8, "eflags": 0xC0, "esp": 0xC4}
+
+    def _call_handler(self, st: dict, frame: int) -> object:
+        handler = self.u32(frame + 4)
+        sp = st["area"]
+        for a in (st["disp"], st["ctx"], frame, st["rec"]):
+            sp -= 4
+            self.w32(sp, a)
+        sp -= 4
+        self.w32(sp, self._seh_ret_stub)
+        st["frame"] = frame
+        self.set_reg("esp", sp)
+        self.set_reg("eip", handler)
+        return _DIVERTED
+
+    def _new_records(self, esp0: int, code: int, flags: int, nparams: int, argv: int,
+                     address: int) -> dict:
+        area = esp0 - 0x800
+        rec, ctx, disp = area, area + 0x100, area + 0x400
+        params = [self.u32(argv + 4 * i) for i in range(min(nparams, 15))] if argv else []
+        self.write(rec, struct.pack("<IIIII", code, flags, 0, address, len(params))
+                   + b"".join(struct.pack("<I", p) for p in params).ljust(60, b"\0"))
+        self.write(ctx, b"\0" * 0x2CC)
+        self.w32(ctx, 0x10007)
+        for r, off in self._CTX.items():
+            self.w32(ctx + off, self.reg(r))
+        self.w32(disp, 0)
+        return {"rec": rec, "ctx": ctx, "disp": disp, "area": area - 0x40}
+
+    def _raise_exception(self, code: int, flags: int, nparams: int, argv: int) -> object:
+        esp0 = self.reg("esp")
+        st = self._new_records(esp0, code, flags & 1, nparams, argv, self.u32(esp0))
+        self.w32(st["ctx"] + self._CTX["eip"], self.u32(esp0))
+        self.w32(st["ctx"] + self._CTX["esp"], esp0 + 4 + 16)
+        st.update(kind="dispatch", code=code)
+        frame = self.u32(self.teb)
+        if frame == 0xFFFFFFFF:
+            raise GuestException(f"unhandled guest exception {code:#010x}")
+        self._seh.append(st)
+        return self._call_handler(st, frame)
+
+    def _rtl_unwind(self, target: int, ip: int, rec: int, value: int) -> object:
+        esp0 = self.reg("esp")
+        self._seh = [s for s in self._seh if s["kind"] != "dispatch"]   # a handler claimed it
+        st = self._new_records(esp0, 0xC0000027, 2, 0, 0, self.u32(esp0))
+        if rec:
+            st["rec"] = rec
+            self.w32(rec + 4, self.u32(rec + 4) | 2)                    # EH_UNWINDING
+        if target == 0:
+            self.w32(st["rec"] + 4, self.u32(st["rec"] + 4) | 4)        # EH_EXIT_UNWIND
+        st.update(kind="unwind", target=target or 0xFFFFFFFF, value=value,
+                  ret=ip or self.u32(esp0), esp=esp0 + 4 + 16,
+                  saved={r: self.reg(r) for r in ("ebx", "esi", "edi", "ebp")})
+        return self._unwind_next(st)
+
+    def _unwind_next(self, st: dict) -> object:
+        frame = self.u32(self.teb)
+        if frame == st["target"] or frame == 0xFFFFFFFF:
+            for r, v in st["saved"].items():
+                self.set_reg(r, v)
+            self.set_reg("eax", st["value"])
+            self.set_reg("esp", st["esp"])
+            self.set_reg("eip", st["ret"])
+            return _DIVERTED
+        self._seh.append(st)
+        return self._call_handler(st, frame)
+
+    def _seh_ret(self) -> object:
+        if not self._seh:
+            raise GuestException("SEH handler returned with no dispatch in progress")
+        st = self._seh.pop()
+        disposition = self.reg("eax")
+        if st["kind"] == "unwind":
+            self.w32(self.teb, self.u32(st["frame"]))                   # unlink that frame
+            return self._unwind_next(st)
+        if disposition == 0:                                            # continue execution
+            for r, off in self._CTX.items():
+                self.set_reg(r, self.u32(st["ctx"] + off))
+            return _DIVERTED
+        if disposition == 1:                                            # continue search
+            nxt = self.u32(st["frame"])
+            if nxt == 0xFFFFFFFF:
+                raise GuestException(f"unhandled guest exception {st['code']:#010x}")
+            self._seh.append(st)
+            return self._call_handler(st, nxt)
+        raise GuestException(f"SEH handler returned disposition {disposition} "
+                             f"for exception {st['code']:#010x}")
 
 
 _DIVERTED = object()

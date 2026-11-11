@@ -82,3 +82,128 @@ def test_callback_runs_python():
 def test_call_passes_args_and_returns():
     h = Pe32Host(build("mov eax, dword ptr [esp + 4]\nadd eax, dword ptr [esp + 8]\nret 8"))
     assert h.call(ENTRY, 40, 2) == 42
+
+
+SEH_CONTINUE = """
+    push ebp
+    mov ebp, esp
+    call 1f
+1:  pop ecx
+    mov edx, ecx
+    .att_syntax
+    addl $(handler - 1b), %edx
+    .intel_syntax noprefix
+    push edx
+    push dword ptr fs:[0]
+    mov dword ptr fs:[0], esp
+    push 0
+    push 0
+    push 0
+    push 0xE0000001
+    call dword ptr [{RaiseException}]
+    mov eax, 99
+resume:
+    mov ecx, dword ptr [esp]
+    mov dword ptr fs:[0], ecx
+    add esp, 8
+    pop ebp
+    ret
+handler:
+    call 2f
+2:  pop eax
+    .att_syntax
+    addl $(resume - 2b), %eax
+    .intel_syntax noprefix
+    mov ecx, dword ptr [esp + 12]
+    mov dword ptr [ecx + 0xB8], eax
+    mov dword ptr [ecx + 0xB0], 7
+    xor eax, eax
+    ret
+"""
+
+SEH_UNWIND = """
+    push ebp
+    mov ebp, esp
+    call 1f
+1:  pop ecx
+    mov edx, ecx
+    .att_syntax
+    addl $(h_outer - 1b), %edx
+    .intel_syntax noprefix
+    push edx
+    push dword ptr fs:[0]
+    mov dword ptr fs:[0], esp
+    mov edx, ecx
+    .att_syntax
+    addl $(h_inner - 1b), %edx
+    .intel_syntax noprefix
+    push edx
+    push dword ptr fs:[0]
+    mov dword ptr fs:[0], esp
+    push 0
+    push 0
+    push 0
+    push 0xE0000002
+    call dword ptr [{RaiseException}]
+    mov eax, 99
+    jmp done
+except_block:
+    lea ebp, [esp + 8]
+    mov eax, 42
+done:
+    mov ecx, dword ptr [ebp - 8]
+    mov dword ptr fs:[0], ecx
+    mov esp, ebp
+    pop ebp
+    ret
+h_inner:
+    mov eax, dword ptr [esp + 4]
+    test dword ptr [eax + 4], 2
+    jz 2f
+    mov eax, dword ptr [esp + 8]
+    mov eax, dword ptr [eax + 24]
+    inc dword ptr [eax]
+2:  mov eax, 1
+    ret
+h_outer:
+    mov eax, dword ptr [esp + 4]
+    test dword ptr [eax + 4], 2
+    jnz 3f
+    mov edx, dword ptr [esp + 8]
+    push 0
+    push dword ptr [esp + 8]
+    push 0
+    push edx
+    call dword ptr [{RtlUnwind}]
+    mov esp, dword ptr [esp + 8]
+    call 4f
+4:  pop ecx
+    .att_syntax
+    addl $(except_block - 4b), %ecx
+    .intel_syntax noprefix
+    jmp ecx
+3:  mov eax, 1
+    ret
+"""
+
+
+def test_seh_continue_execution():
+    h = Pe32Host(build(SEH_CONTINUE, {"KERNEL32.dll": ["RaiseException"]}))
+    assert h.call(ENTRY) == 7
+    assert h.u32(h.teb) == 0xFFFFFFFF
+
+
+def test_seh_unwind_to_except_block():
+    h = Pe32Host(build(SEH_UNWIND, {"KERNEL32.dll": ["RaiseException", "RtlUnwind"]}))
+    counter = h.virtual_alloc(4)
+    assert h.call(ENTRY, counter) == 42
+    assert h.u32(counter) == 1                 # the inner handler ran once, unwinding
+    assert h.u32(h.teb) == 0xFFFFFFFF          # the outer frame's next
+
+
+def test_unhandled_exception_raises_with_code():
+    from bw2.pe32emu import GuestException
+    h = Pe32Host(build("push 0\npush 0\npush 1\npush 0xE06D7363\ncall dword ptr [{RaiseException}]\nret",
+                       {"KERNEL32.dll": ["RaiseException"]}))
+    with pytest.raises(GuestException, match="0xe06d7363|0xE06D7363"):
+        h.call(ENTRY)
