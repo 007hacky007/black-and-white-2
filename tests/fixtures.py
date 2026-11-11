@@ -123,10 +123,33 @@ def _rsrc(resources: dict[tuple[int, int], bytes], rva: int) -> bytes:
     return bytes(out + blobs)
 
 
+def _edata(exports: dict[str, int], rva: int, dll_name: str) -> bytes:
+    """An export directory: names sorted, ordinals from 1 in that order, at `rva`."""
+    names = sorted(exports)
+    n = len(names)
+    funcs_off = 40
+    names_off = funcs_off + 4 * n
+    ords_off = names_off + 4 * n
+    str_off = ords_off + 2 * n
+    strings = bytearray(dll_name.encode() + b"\0")
+    name_rvas = []
+    for nm in names:
+        name_rvas.append(rva + str_off + len(strings))
+        strings += nm.encode() + b"\0"
+    out = bytearray(_st.pack("<IIHHIIIIIII", 0, 0, 0, 0, rva + str_off, 1, n, n,
+                             rva + funcs_off, rva + names_off, rva + ords_off))
+    out += b"".join(_st.pack("<I", exports[nm]) for nm in names)
+    out += b"".join(_st.pack("<I", r) for r in name_rvas)
+    out += b"".join(_st.pack("<H", i) for i in range(n))
+    return bytes(out + strings)
+
+
 def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]],
             entry_rva: int, resources: dict[tuple[int, int], bytes] | None = None,
-            data_dirs: dict[int, tuple[int, int]] | None = None) -> bytes:
-    """A PE32 image at IMAGE_BASE; data_dirs sets extra directories, {index: (rva, size)}."""
+            data_dirs: dict[int, tuple[int, int]] | None = None, image_base: int = IMAGE_BASE,
+            exports: dict[str, int] | None = None, dll_name: str = "") -> bytes:
+    """A PE32 image; data_dirs sets extra directories, {index: (rva, size)}. With exports
+    ({name: rva}) it is a DLL named dll_name."""
     secs = list(sections)
     rva = SECT_ALIGN
     layout = []
@@ -147,6 +170,13 @@ def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]
         rsrc_size = len(data)
         layout.append([".rsrc", data, DATA, rva])
         rva += _align(len(data), SECT_ALIGN)
+    exp_rva = exp_size = 0
+    if exports:
+        exp_rva = rva
+        data = _edata(exports, rva, dll_name or "test.dll")
+        exp_size = len(data)
+        layout.append([".edata", data, DATA, rva])
+        rva += _align(len(data), SECT_ALIGN)
     size_of_image = rva
     headers = 0x400
     raw = headers
@@ -157,15 +187,16 @@ def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]
     out[0:2] = b"MZ"
     _st.pack_into("<I", out, 0x3C, 0x40)
     out[0x40:0x44] = b"PE\0\0"
-    _st.pack_into("<HHIIIHH", out, 0x44, 0x14C, len(layout), 0, 0, 0, 224, 0x010F)
+    _st.pack_into("<HHIIIHH", out, 0x44, 0x14C, len(layout), 0, 0, 0, 224, 0x210E if exports else 0x010F)
     opt = 0x58
     dirs = [(0, 0)] * 16
     dirs[1] = (imp_rva, imp_size)
+    dirs[0] = (exp_rva, exp_size)
     dirs[2] = (rsrc_rva, rsrc_size)
     for k, v in (data_dirs or {}).items():
         dirs[k] = v
     _st.pack_into("<HBBIIIIIIIIIHHHHHHIIIIHHIIIIII", out, opt,
-                  0x10B, 7, 10, 0, 0, 0, entry_rva, SECT_ALIGN, 0, IMAGE_BASE,
+                  0x10B, 7, 10, 0, 0, 0, entry_rva, SECT_ALIGN, 0, image_base,
                   SECT_ALIGN, FILE_ALIGN, 4, 0, 0, 0, 4, 0, 0, size_of_image, headers,
                   0, 2, 0, 0x100000, 0x1000, 0x100000, 0x1000, 0, 16)
     for i, (r, s) in enumerate(dirs):

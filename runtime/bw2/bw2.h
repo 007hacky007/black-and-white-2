@@ -32,6 +32,10 @@ extern const win32hle_shim bw2_mount_shims[];
 void     bw2_threads_init(void);
 int      bw2_tls_add_module(uint32_t image_base);
 uint32_t bw2_run_on_main_stack(uint32_t (*fn)(void));
+/* dll.c: DLLs lifted with the game, loaded at their base with DllMain run. */
+void bw2_dll_init(void);
+void bw2_lifted_dll_add(const char *base_name, uint32_t image_base);
+void bw2_dll_hold(uint32_t main_base, uint32_t main_span);
 /* shell.c: the user's folders and name. */
 extern const win32hle_shim bw2_shell_shims[];
 

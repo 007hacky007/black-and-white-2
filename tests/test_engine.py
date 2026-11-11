@@ -575,3 +575,76 @@ hi: .long 0
     b = _engine(tmp_path, asm, {K32: ["Sleep", "ExitProcess"]})
     r = _run(tmp_path, b)
     assert r.returncode == 0, f"code {r.returncode} (1: below 3 GHz, 2: above)\n" + r.stderr[-2000:]
+
+
+# ---- Task 5: lifted DLLs -----------------------------------------------------
+
+DLL_BASE = 0x10000000
+DLL_TEXT = DLL_BASE + 0x1000
+LIB_ASM = r"""
+dllmain:                       # DllMain(hmod, reason, reserved): count attaches
+    inc dword ptr [attaches]
+    mov eax, 1
+    ret 12
+.org 0x100
+add2:
+    mov eax, dword ptr [esp + 4]
+    add eax, dword ptr [esp + 8]
+    ret 8
+.org 0x200
+get_count:
+    mov eax, dword ptr [attaches]
+    ret
+.org 0x300
+attaches: .long 0
+"""
+
+
+def _lib(image_base=DLL_BASE):
+    code = asm32(LIB_ASM, base=image_base + 0x1000)
+    return make_pe([(".text", code.ljust(0x400, b"\xcc"), CODE)], {}, 0x1000, image_base=image_base,
+                   exports={"Add2": 0x1100, "GetCount": 0x1200}, dll_name="Lib.dll")
+
+
+MAIN_LOADS_LIB = r"""
+    push offset libname
+    call dword ptr [{IAT_LoadLibraryA}]
+    push offset libname
+    call dword ptr [{IAT_LoadLibraryA}]
+    mov esi, eax
+    push offset n_add2
+    push esi
+    call dword ptr [{IAT_GetProcAddress}]
+    push 4
+    push 3
+    call eax
+    mov edi, eax
+    push offset n_count
+    push esi
+    call dword ptr [{IAT_GetProcAddress}]
+    call eax
+    imul edi, edi, 10
+    add edi, eax
+    push edi
+    call dword ptr [{IAT_ExitProcess}]
+libname: .asciz "plugins\\Lib.dll"
+n_add2: .asciz "Add2"
+n_count: .asciz "GetCount"
+"""
+LIB_IMPORTS = {K32: ["LoadLibraryA", "GetProcAddress", "ExitProcess"]}
+
+
+def test_lifted_dll_loads_at_base(tmp_path):
+    pe = _image(MAIN_LOADS_LIB, LIB_IMPORTS)
+    b = guest_engine(tmp_path, pe, [BASE],
+                     dlls={"plugins/Lib.dll": (_lib(), [DLL_TEXT, DLL_TEXT + 0x100, DLL_TEXT + 0x200])})
+    r = _run(tmp_path, b, "--lifted-dll", "lib.dll=0x10000000")
+    assert r.returncode == 71, r.stderr[-2000:]           # Add2(3, 4) = 7, DllMain ran once
+
+
+def test_lifted_dll_base_taken_fails_loudly(tmp_path):
+    pe = _image(MAIN_LOADS_LIB, LIB_IMPORTS)
+    b = guest_engine(tmp_path, pe, [BASE],
+                     dlls={"plugins/Lib.dll": (_lib(0x400000), [])})
+    r = _run(tmp_path, b, "--lifted-dll", "lib.dll=0x400000")
+    assert r.returncode not in (0, 71) and "lib.dll" in r.stderr.lower() and "0x00400000" in r.stderr, r.stderr[-2000:]
