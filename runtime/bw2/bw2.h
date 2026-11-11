@@ -38,6 +38,9 @@ void bw2_lifted_dll_add(const char *base_name, uint32_t image_base);
 void bw2_dll_hold(uint32_t main_base, uint32_t main_span);
 /* eh.c: guest C++ exceptions. */
 int bw2_eh_depth(void);                 /* this thread's live landing pads */
+void bw2_eh_add_image(uint32_t base, uint32_t span);   /* where EH tables may be */
+extern int bw2_eh_trace;                /* --trace-eh */
+extern const win32hle_shim bw2_eh_shims[];
 /* shell.c: the user's folders and name. */
 extern const win32hle_shim bw2_shell_shims[];
 

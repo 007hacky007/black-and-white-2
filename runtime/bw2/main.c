@@ -2,7 +2,7 @@
  * main.c - the BW2 engine's process entry: arguments, the shim modules, the
  * boot of the game image and its run.
  *
- *   bw2 --game DIR [--exe white.exe] [--strict] [--lifted-dll NAME=0xBASE]...
+ *   bw2 --game DIR [--exe white.exe] [--strict] [--trace-eh] [--lifted-dll NAME=0xBASE]...
  *
  * The support folder (saves, settings, registry, everything the game writes)
  * is $BW2_SUPPORT, or ~/Library/Application Support/Black & White 2.
@@ -36,6 +36,7 @@ recomp_func_t bw2_hle_shim(const char *name) {
 void bw2_register_shims(void) {
     win32hle_register(bw2_mount_shims);         /* BW2's own first: hle_resolve takes the first */
     win32hle_register(bw2_shell_shims);
+    win32hle_register(bw2_eh_shims);
     win32hle_register(win32hle_kernel32);
     win32hle_register(win32hle_kernel32_ext);
     win32hle_register(win32hle_kernel32_crt);
@@ -67,7 +68,7 @@ static uint32_t pe_field(const char *path, uint32_t opt_off) {
 static void report_eh_depth(int code) { (void)code; fprintf(stderr, "eh depth %d\n", bw2_eh_depth()); }
 
 static int usage(void) {
-    fprintf(stderr, "usage: bw2 --game DIR [--exe white.exe] [--strict] [--lifted-dll NAME=0xBASE]...\n");
+    fprintf(stderr, "usage: bw2 --game DIR [--exe white.exe] [--strict] [--trace-eh] [--lifted-dll NAME=0xBASE]...\n");
     return BW2_EXIT_BOOT;
 }
 
@@ -79,6 +80,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--game") && i + 1 < argc) game = argv[++i];
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
         else if (!strcmp(argv[i], "--strict")) strict = 1;
+        else if (!strcmp(argv[i], "--trace-eh")) bw2_eh_trace = 1;
         else if (!strcmp(argv[i], "--lifted-dll") && i + 1 < argc) {
             char *eq = strchr(argv[++i], '=');
             if (!eq) return usage();
@@ -119,5 +121,6 @@ int main(int argc, char **argv) {
         return BW2_EXIT_BOOT;
     }
     bw2_tls_add_module(pe_field(path, 0x1C));
+    bw2_eh_add_image(pe_field(path, 0x1C), pe_field(path, 0x38));
     return (int)bw2_run_on_main_stack(recomp_host_run);
 }

@@ -670,3 +670,246 @@ func:""", 1).replace(".org 0x1", ".org 0x40+0x1").replace(".org 0x2", ".org 0x40
     b = guest_engine(tmp_path, pe, funcs)
     r = _run(tmp_path, b, "--selftest-eh-depth")
     assert r.returncode == 0 and "eh depth 0" in r.stderr, r.stderr[-2000:]
+
+
+# ---- Task 7: guest C++ exception dispatch --------------------------------------
+# MSVC 7.1 EH data as eh32 reads it:
+#   FuncInfo          magic, maxState, pUnwindMap, nTryBlocks, pTryBlockMap
+#   UnwindMapEntry    toState, action
+#   TryBlockMapEntry  tryLow, tryHigh, catchHigh, nCatches, pHandlerArray
+#   HandlerType       adjectives, pType, dispCatchObj, addressOfHandler
+#   ThrowInfo         attributes, pmfnUnwind, pForwardCompat, pCatchableTypeArray
+#   CatchableType     properties, pType, mdisp, pdisp, vdisp, size, copyFunction
+#   TypeDescriptor    pVFTable, spare, name
+
+EH_COMMON = r"""
+cxx_throw:                       # _CxxThrowException(obj, info), stdcall, as MSVC's
+    push ebp
+    mov ebp, esp
+    sub esp, 12
+    mov dword ptr [ebp - 12], 0x19930520
+    mov eax, dword ptr [ebp + 8]
+    mov dword ptr [ebp - 8], eax
+    mov eax, dword ptr [ebp + 12]
+    mov dword ptr [ebp - 4], eax
+    lea eax, [ebp - 12]
+    push eax
+    push 3
+    push 1
+    push 0xE06D7363
+    call dword ptr [{IAT_RaiseException}]
+    int3
+"""
+EH_DATA = r"""
+td_int: .long 0, 0
+    .asciz ".H"
+.p2align 2
+td_float: .long 0, 0
+    .asciz ".M"
+.p2align 2
+ct_int: .long 1, td_int, 0, -1, 0, 4, 0
+cta_int: .long 1, ct_int
+info_int: .long 0, 0, 0, cta_int
+info_int_dtor: .long 0, obj_dtor, 0, cta_int
+obj_int: .long 5
+dtor_count: .long 0
+"""
+
+
+SLOT = 0x100
+
+
+class EH:
+    """An image built from pieces, each at its own SLOT-byte slot; functions are catalogued."""
+
+    def __init__(self):
+        self.pieces, self.funcs = [], []
+
+    def func(self, body):
+        self.funcs.append(BASE + SLOT * len(self.pieces))
+        self.pieces.append(body)
+
+    def data(self, body):
+        self.pieces.append(body)
+
+    def catcher(self, name, try_body, handlers, cont, epilogue_ret="ret"):
+        """A function with an MSVC EH frame: locals [ebp-0x14] (catch variable) and
+        [ebp-0x18] (= 100, set before the try); one try block, state 0, whose
+        handlers are (type label or 0, catch funclet body)."""
+        self.func(rf"""
+{name}:
+    push ebp
+    mov ebp, esp
+    push -1
+    push offset {name}_handler
+    mov eax, dword ptr fs:[0]
+    push eax
+    mov dword ptr fs:[0], esp
+    sub esp, 12
+    mov dword ptr [ebp - 0x10], esp
+    mov dword ptr [ebp - 0x14], 0
+    mov dword ptr [ebp - 0x18], 100
+    mov dword ptr [ebp - 4], 0
+{try_body}
+    mov dword ptr [ebp - 4], -1
+    mov eax, 1
+    jmp {name}_done
+{name}_cont:
+{cont}
+{name}_done:
+    mov ecx, dword ptr [ebp - 0x0C]
+    mov dword ptr fs:[0], ecx
+    mov esp, ebp
+    pop ebp
+    {epilogue_ret}
+""")
+        for i, (_t, body) in enumerate(handlers):
+            self.func(f"{name}_catch{i}:\n{body}\n")
+        self.func(f"{name}_handler:\n    mov eax, offset {name}_fi\n    .byte 0xE9\n"
+                  f"    .long cxx_frame_handler - . - 4\n")
+        hs = "\n".join(f"    .long 0, {t}, 0xFFFFFFEC, {name}_catch{i}" for i, (t, _b) in enumerate(handlers))
+        self.data(f"{name}_fi: .long 0x19930520, 1, {name}_unwind, 1, {name}_try\n"
+                  f"{name}_unwind: .long -1, 0\n"
+                  f"{name}_try: .long 0, 0, 1, {len(handlers)}, {name}_hs\n{name}_hs:\n{hs}\n")
+
+    def build(self, tmp_path, start):
+        e = EH()
+        e.func(start)
+        e.func(EH_COMMON)
+        e.func("cxx_frame_handler:\n    int3\n")
+        e.func("obj_dtor:\n    cmp ecx, offset obj_int\n    jne 1f\n    inc dword ptr [dtor_count]\n1:  ret\n")
+        e.pieces += self.pieces
+        e.funcs += [f + SLOT * 4 for f in self.funcs]
+        e.data(EH_DATA)
+        asm = "".join(f".org {SLOT * i:#x}\n{p}\n" for i, p in enumerate(e.pieces))
+        pe = _image(asm, {K32: ["RaiseException", "ExitProcess"]}, text_len=SLOT * len(e.pieces) + 0x200)
+        return guest_engine(tmp_path, pe, e.funcs)
+
+
+EXIT_EAX = "    push eax\n    call dword ptr [{IAT_ExitProcess}]\n"
+THROW_INT = "    push offset info_int\n    push offset obj_int\n    call cxx_throw\n"
+CATCH_RET_CONT = "    mov eax, offset {name}_cont\n    ret"
+SUM_CONT = "    mov eax, dword ptr [ebp - 0x14]\n    add eax, dword ptr [ebp - 0x18]"
+
+
+def _catcher(eh, name, try_body, types=("td_int",), cont=SUM_CONT):
+    eh.catcher(name, try_body, [(t, CATCH_RET_CONT.format(name=name)) for t in types], cont)
+
+
+def test_throw_caught_one_frame_up(tmp_path):
+    eh = EH()
+    _catcher(eh, "c1", "    call thrower")
+    eh.func("thrower:\n" + THROW_INT + "    ret\n")
+    b = eh.build(tmp_path, "    call c1\n" + EXIT_EAX)
+    r = _run(tmp_path, b, "--trace-eh")
+    assert r.returncode == 105, r.stderr[-3000:]          # 5 caught + the local 100
+
+
+def test_unwind_runs_destructors(tmp_path):
+    eh = EH()
+    _catcher(eh, "c1", "    call mid")
+    eh.func(r"""
+mid:                              # an EH frame with only an unwind action for state 0
+    push ebp
+    mov ebp, esp
+    push -1
+    push offset mid_handler
+    mov eax, dword ptr fs:[0]
+    push eax
+    mov dword ptr fs:[0], esp
+    mov dword ptr [ebp - 4], 0
+    call thrower
+    mov ecx, dword ptr [ebp - 0x0C]
+    mov dword ptr fs:[0], ecx
+    mov esp, ebp
+    pop ebp
+    ret
+""")
+    eh.func("mid_dtor:\n    inc dword ptr [dtor_count]\n    ret\n")
+    eh.func("mid_handler:\n    mov eax, offset mid_fi\n    .byte 0xE9\n    .long cxx_frame_handler - . - 4\n")
+    eh.data("mid_fi: .long 0x19930520, 1, mid_unwind, 0, 0\nmid_unwind: .long -1, mid_dtor\n")
+    eh.func("thrower:\n" + THROW_INT + "    ret\n")
+    b = eh.build(tmp_path, "    call c1\n    add eax, dword ptr [dtor_count]\n" + EXIT_EAX)
+    r = _run(tmp_path, b)
+    assert r.returncode == 106, r.stderr[-3000:]          # 105 + one destructor
+
+
+def test_catch_all(tmp_path):
+    eh = EH()
+    _catcher(eh, "c1", "    call thrower", types=("0",), cont="    mov eax, 77")
+    eh.func("thrower:\n" + THROW_INT + "    ret\n")
+    b = eh.build(tmp_path, "    call c1\n" + EXIT_EAX)
+    r = _run(tmp_path, b)
+    assert r.returncode == 77, r.stderr[-3000:]
+
+
+def test_type_mismatch_goes_outward(tmp_path):
+    eh = EH()
+    _catcher(eh, "outer", "    call inner")
+    _catcher(eh, "inner", "    call thrower", types=("td_float",), cont="    mov eax, 9")
+    eh.func("thrower:\n" + THROW_INT + "    ret\n")
+    b = eh.build(tmp_path, "    call outer\n" + EXIT_EAX)
+    r = _run(tmp_path, b)
+    assert r.returncode == 105, r.stderr[-3000:]
+
+
+def test_rethrow_caught_outside(tmp_path):
+    eh = EH()
+    _catcher(eh, "outer", "    call inner")
+    eh.catcher("inner", "    call thrower",
+               [("td_int", "    push 0\n    push 0\n    call cxx_throw\n    int3")], "    mov eax, 9")
+    eh.func("thrower:\n" + THROW_INT + "    ret\n")
+    b = eh.build(tmp_path, "    call outer\n" + EXIT_EAX)
+    r = _run(tmp_path, b)
+    assert r.returncode == 105, r.stderr[-3000:]
+
+
+def test_recursive_catch_resumes_right_activation(tmp_path):
+    eh = EH()
+    # rec(n): try { if (n == 3) throw n; return rec(n + 1); } catch (int e) { return e * 10 + n; }
+    eh.catcher("rec", r"""
+    mov eax, dword ptr [ebp + 8]
+    cmp eax, 3
+    jne rec_down
+    mov dword ptr [obj_int], eax
+""" + THROW_INT + r"""
+rec_down:
+    inc eax
+    push eax
+    call rec
+    add esp, 4
+    mov dword ptr [ebp - 4], -1
+    jmp rec_done""", [("td_int", CATCH_RET_CONT.format(name="rec"))],
+               "    mov eax, dword ptr [ebp - 0x14]\n    imul eax, eax, 10\n    add eax, dword ptr [ebp + 8]")
+    b = eh.build(tmp_path, "    push 1\n    call rec\n    add esp, 4\n" + EXIT_EAX)
+    r = _run(tmp_path, b)
+    assert r.returncode == 33, r.stderr[-3000:]           # depth 3 caught its own throw
+
+
+def test_exception_object_destroyed_after_catch(tmp_path):
+    eh = EH()
+    # the catch funclet records the count while the catch runs; the continuation adds it after
+    during = ("    mov eax, dword ptr [dtor_count]\n    mov dword ptr [ebp - 0x14], eax\n"
+              "    mov eax, offset c1_cont\n    ret")
+    eh.catcher("c1", "    call thrower", [("td_int", during)],
+               "    mov eax, dword ptr [ebp - 0x14]\n    imul eax, eax, 10\n    add eax, dword ptr [dtor_count]")
+    eh.func("thrower:\n    push offset info_int_dtor\n    push offset obj_int\n    call cxx_throw\n    ret\n")
+    b = eh.build(tmp_path, "    call c1\n" + EXIT_EAX)
+    r = _run(tmp_path, b)
+    assert r.returncode == 1, r.stderr[-3000:]            # 0 during the catch, 1 after it
+
+
+def test_uncaught_throw_named(tmp_path):
+    eh = EH()
+    eh.func("thrower:\n" + THROW_INT + "    ret\n")
+    b = eh.build(tmp_path, "    call thrower\n    push 0\n    call dword ptr [{IAT_ExitProcess}]\n")
+    r = _run(tmp_path, b)
+    assert r.returncode != 0 and "uncaught C++ exception" in r.stderr and ".H" in r.stderr, r.stderr[-3000:]
+
+
+def test_other_raise_is_loud(tmp_path):
+    eh = EH()
+    b = eh.build(tmp_path, "    push 0\n    push 0\n    push 0\n    push 0x12345678\n"
+                           "    call dword ptr [{IAT_RaiseException}]\n    push 0\n    call dword ptr [{IAT_ExitProcess}]\n")
+    r = _run(tmp_path, b)
+    assert r.returncode != 0 and "0x12345678" in r.stderr, r.stderr[-3000:]

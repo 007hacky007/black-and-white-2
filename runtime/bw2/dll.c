@@ -54,6 +54,7 @@ static int load(const char *base_name, const char *host, uint32_t *hmod) {
     hle_module_add(guest, img.base, img.resource_rva, img.resource_size, 0);
     int unresolved = recomp_pe_bind(&img, hle_resolve_or_stub);
     bw2_tls_add_module(img.base);
+    bw2_eh_add_image(img.base, img.span);
     fprintf(stderr, "[bw2] %s: lifted DLL at 0x%08X, %d imports unanswered\n", base_name, img.base, unresolved);
     uint32_t args[3] = { img.base, 1u /* DLL_PROCESS_ATTACH */, 0 };
     if (img.entry != img.base && !hle_call_guest(img.entry, 3, args)) {
