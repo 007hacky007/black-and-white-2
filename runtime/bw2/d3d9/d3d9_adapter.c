@@ -104,23 +104,25 @@ void d3d_fill_caps(uint32_t c) {
     MEM32(c + 0xB8) = 0xFFFFFF;                    /* MaxVertexIndex */
     MEM32(c + 0xBC) = 16;                          /* MaxStreams */
     MEM32(c + 0xC0) = 2048;                        /* MaxStreamStride */
-    MEM32(c + 0xC4) = 0xFFFE0300u;                 /* VertexShaderVersion vs_3_0 */
+    MEM32(c + 0xC4) = 0xFFFE0200u;                 /* VertexShaderVersion vs_2_0 (plan 5: what the game ships) */
     MEM32(c + 0xC8) = 256;                         /* MaxVertexShaderConst */
-    MEM32(c + 0xCC) = 0xFFFF0300u;                 /* PixelShaderVersion ps_3_0 */
+    MEM32(c + 0xCC) = 0xFFFF0200u;                 /* PixelShaderVersion ps_2_0 */
     putf(c + 0xD0, 65504.0f);                      /* PixelShader1xMaxValue */
     MEM32(c + 0xD4) = 0x1 | 0x10 | 0x40;           /* DevCaps2: STREAMOFFSET, STRETCHRECT_FROM_TEXTURES, VERTEXELEMENTSCANSHARESTREAMOFFSET */
     MEM32(c + 0xE8) = 1;                           /* NumberOfAdaptersInGroup */
     MEM32(c + 0xEC) = 0x33F;                       /* DeclTypes */
     MEM32(c + 0xF0) = 4;                           /* NumSimultaneousRTs */
     MEM32(c + 0xF4) = 0x03000300;                  /* StretchRectFilterCaps */
-    MEM32(c + 0xF8) = 1, MEM32(c + 0xFC) = 24, MEM32(c + 0x100) = 32, MEM32(c + 0x104) = 4;           /* VS20Caps */
-    MEM32(c + 0x108) = 0x1F, MEM32(c + 0x10C) = 24, MEM32(c + 0x110) = 32, MEM32(c + 0x114) = 4;      /* PS20Caps */
-    MEM32(c + 0x118) = 512;
+    /* VS20Caps {Caps, DynamicFlowControlDepth, NumTemps, StaticFlowControlDepth} */
+    MEM32(c + 0xF8) = 0, MEM32(c + 0xFC) = 0, MEM32(c + 0x100) = 12, MEM32(c + 0x104) = 1;
+    /* PS20Caps {Caps, DynamicFlowControlDepth, NumTemps, StaticFlowControlDepth, NumInstructionSlots} */
+    MEM32(c + 0x108) = 0, MEM32(c + 0x10C) = 0, MEM32(c + 0x110) = 12, MEM32(c + 0x114) = 0;
+    MEM32(c + 0x118) = 96;
     MEM32(c + 0x11C) = 0x01000100;                 /* VertexTextureFilterCaps: point */
     MEM32(c + 0x120) = 65535;                      /* MaxVShaderInstructionsExecuted */
-    MEM32(c + 0x124) = 65535;                      /* MaxPShaderInstructionsExecuted */
-    MEM32(c + 0x128) = 32768;                      /* MaxVertexShader30InstructionSlots */
-    MEM32(c + 0x12C) = 32768;                      /* MaxPixelShader30InstructionSlots */
+    MEM32(c + 0x124) = 96;                         /* MaxPShaderInstructionsExecuted */
+    MEM32(c + 0x128) = 0;                          /* MaxVertexShader30InstructionSlots: no 3.0 */
+    MEM32(c + 0x12C) = 0;                          /* MaxPixelShader30InstructionSlots */
 }
 
 /* ---- IDirect3D9 ---- */

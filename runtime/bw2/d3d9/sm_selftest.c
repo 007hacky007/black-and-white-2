@@ -1,6 +1,7 @@
 /*
  * sm_selftest.c - the shader assembler and decoder (plan 5 Task 2), called
- * directly and through D3DX's imports as lifted code calls them. Built with
+ * directly and through D3DX's imports as lifted code calls them, and vertex
+ * shaders drawn on a headless device (Task 3). Built with
  * the engine (minus main.c) by tests/test_shaders.py;
  * `sm_selftest <group> [arg]` runs one group and prints "<group>: <n> failed".
  *
@@ -16,6 +17,7 @@
 #include "bw2.h"
 #include "d3d_com.h"
 #include "sm.h"
+#include "ff.h"
 
 const recomp_dispatch_entry_t recomp_dispatch_table[1] = { { 0, 0 } };
 const uint32_t recomp_dispatch_count = 0;
@@ -510,6 +512,530 @@ static void group_asm_loud(const char *what) {
     printf("asm_loud: returned\n");
 }
 
+/* ---- Task 3: vertex shaders on Metal ---- */
+
+/* IDirect3DDevice9 slots */
+enum { DV_GetDeviceCaps = 7, DV_Release = 2, DV_GetBackBuffer = 18, DV_CreateTexture = 23, DV_CreateRenderTarget = 28,
+       DV_GetRenderTargetData = 32, DV_CreateOffscreenPlainSurface = 36, DV_SetRenderTarget = 37, DV_Clear = 43,
+       DV_SetClipPlane = 55, DV_SetRenderState = 57, DV_SetTexture = 65, DV_SetTextureStageState = 67,
+       DV_SetSamplerState = 69, DV_DrawPrimitiveUP = 83, DV_CreateVertexDeclaration = 86,
+       DV_SetVertexDeclaration = 87, DV_SetFVF = 89, DV_CreateVertexShader = 91, DV_SetVertexShader = 92,
+       DV_GetVertexShader = 93, DV_SetVertexShaderConstantF = 94, DV_SetVertexShaderConstantI = 96,
+       DV_SetVertexShaderConstantB = 98 };
+enum { SF_GetDesc = 12, SF_LockRect, SF_UnlockRect };
+enum { TX_LockRect = 19, TX_UnlockRect };
+enum { SH_GetDevice = 3, SH_GetFunction };
+#define D3DERR_INVALIDCALL_ 0x8876086Cu
+#define FMT_A8R8G8B8 21u
+
+static uint32_t f2u(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+
+static uint32_t new_device(uint32_t w, uint32_t h) {
+    static uint32_t d3d;
+    if (!d3d) d3d = call("Direct3DCreate9", 1, 32u);
+    uint32_t pp = gmem(56), out = gmem(4);
+    MEM32(pp + 0) = w, MEM32(pp + 4) = h, MEM32(pp + 8) = 22, MEM32(pp + 12) = 1, MEM32(pp + 24) = 1;
+    MEM32(pp + 28) = 0x10001u, MEM32(pp + 32) = 1, MEM32(pp + 36) = 1, MEM32(pp + 40) = 75;   /* D24S8 */
+    CHECKEQ(vcall(d3d, 16, 6, 0u, 1u, 0x10001u, 0x40u, pp, out), D3D_OK);
+    return MEM32(out);
+}
+static void rs(uint32_t dev, uint32_t s, uint32_t v) { CHECKEQ(vcall(dev, DV_SetRenderState, 2, s, v), D3D_OK); }
+static void tss(uint32_t dev, uint32_t st, uint32_t s, uint32_t v) {
+    CHECKEQ(vcall(dev, DV_SetTextureStageState, 3, st, s, v), D3D_OK);
+}
+/* an A8R8G8B8 target of the device's size, bound as target 0, the fixed pixel pipeline passing diffuse */
+static uint32_t argb_target(uint32_t dev, uint32_t w, uint32_t h) {
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateRenderTarget, 8, w, h, FMT_A8R8G8B8, 0u, 0u, 0u, out, 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetRenderTarget, 2, 0u, MEM32(out)), D3D_OK);
+    rs(dev, 7, 0);                                           /* no depth test */
+    tss(dev, 0, 1, 2), tss(dev, 0, 2, 0), tss(dev, 0, 4, 2), tss(dev, 0, 5, 0);   /* SELECTARG1 DIFFUSE */
+    return MEM32(out);
+}
+static void read_rt(uint32_t dev, uint32_t rt, uint32_t w, uint32_t h, uint32_t *px) {
+    uint32_t desc = gmem(32), out = gmem(4);
+    CHECKEQ(vcall(rt, SF_GetDesc, 1, desc), D3D_OK);
+    CHECKEQ(vcall(dev, DV_CreateOffscreenPlainSurface, 6, w, h, MEM32(desc), 2u, out, 0u), D3D_OK);
+    uint32_t s = MEM32(out), lr = gmem(8);
+    CHECKEQ(vcall(dev, DV_GetRenderTargetData, 2, rt, s), D3D_OK);
+    CHECKEQ(vcall(s, SF_LockRect, 3, lr, 0u, 0x10u), D3D_OK);
+    for (uint32_t y = 0; y < h; y++) memcpy(px + y * w, hle_ptr(MEM32(lr + 4) + y * MEM32(lr)), w * 4);
+    CHECKEQ(vcall(s, SF_UnlockRect, 0), D3D_OK);
+    vcall(s, 2, 0);
+}
+static void clear(uint32_t dev, uint32_t c) {
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, 7u, c, f2u(1.0f), 0u), D3D_OK);
+}
+/* a vertex declaration from (stream, offset, type, usage, index) rows */
+static uint32_t vdecl(uint32_t dev, int n, const uint8_t (*rows)[5]) {
+    uint32_t el = gmem(8 * (uint32_t)(n + 1)), out = gmem(4);
+    for (int i = 0; i <= n; i++) {
+        uint32_t p = el + 8 * (uint32_t)i;
+        if (i == n) { MEM16(p) = 0xFF, MEM16(p + 2) = 0, MEM8(p + 4) = 17, MEM8(p + 5) = 0, MEM8(p + 6) = 0, MEM8(p + 7) = 0; break; }
+        MEM16(p) = rows[i][0], MEM16(p + 2) = rows[i][1], MEM8(p + 4) = rows[i][2], MEM8(p + 5) = 0;
+        MEM8(p + 6) = rows[i][3], MEM8(p + 7) = rows[i][4];
+    }
+    CHECKEQ(vcall(dev, DV_CreateVertexDeclaration, 2, el, out), D3D_OK);
+    return MEM32(out);
+}
+/* assemble on the host, create through the device */
+static uint32_t vs_new(uint32_t dev, const char *src) {
+    uint32_t *t = NULL, nt = 0, out = gmem(4);
+    char *errs = NULL;
+    if (sm_assemble(src, strlen(src), NULL, &t, &nt, &errs)) {
+        printf("FAIL does not assemble:\n%s\n%s", src, errs);
+        fails++;
+        free(errs);
+        return 0;
+    }
+    uint32_t g = gbytes(t, 4 * nt);
+    free(t);
+    CHECKEQ(vcall(dev, DV_CreateVertexShader, 2, g, out), D3D_OK);
+    return MEM32(out);
+}
+static void vsf(uint32_t dev, uint32_t start, const float *v, uint32_t n) {
+    CHECKEQ(vcall(dev, DV_SetVertexShaderConstantF, 3, start, gbytes(v, 16 * n), n), D3D_OK);
+}
+static void draw_up(uint32_t dev, uint32_t type, uint32_t prims, const void *v, uint32_t nverts, uint32_t stride) {
+    CHECKEQ(vcall(dev, DV_DrawPrimitiveUP, 4, type, prims, gbytes(v, nverts * stride), stride), D3D_OK);
+}
+struct xyz { float x, y, z; };
+static const uint8_t g_pos_decl[1][5] = { { 0, 0, 2, 0, 0 } };      /* POSITION float3 */
+/* a strip over clip space x0..x1, y0..y1 at z 0.5 (position only) */
+static void quad_clip(uint32_t dev, float x0, float y0, float x1, float y1) {
+    struct xyz q[4] = { { x0, y1, 0.5f }, { x1, y1, 0.5f }, { x0, y0, 0.5f }, { x1, y0, 0.5f } };
+    draw_up(dev, 5, 2, q, 4, sizeof q[0]);
+}
+static int chan_near(uint32_t px, const float *want, int tol) {
+    int c[4] = { (int)(px >> 16 & 0xFF), (int)(px >> 8 & 0xFF), (int)(px & 0xFF), (int)(px >> 24) };
+    for (int i = 0; i < 4; i++) {
+        float w = want[i] < 0 ? 0 : want[i] > 1 ? 1 : want[i];
+        int e = (int)(w * 255.0f + 0.5f);
+        if (abs(c[i] - e) > tol) return 0;
+    }
+    return 1;
+}
+static uint32_t g_px[64 * 64];
+/* draw a full-target quad through the shader and read the centre pixel */
+static uint32_t draw_centre(uint32_t dev, uint32_t rt, uint32_t vs) {
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, vs), D3D_OK);
+    clear(dev, 0x00000000u);
+    quad_clip(dev, -1, -1, 1, 1);
+    read_rt(dev, rt, 64, 64, g_px);
+    return g_px[32 * 64 + 32];
+}
+static void expect_px(const char *what, uint32_t px, const float *want) {
+    if (!chan_near(px, want, 1)) {
+        printf("FAIL %s: pixel 0x%08X, want (%g, %g, %g, %g)\n", what, px, want[0], want[1], want[2], want[3]);
+        fails++;
+    }
+}
+static uint32_t pos_device(uint32_t *rt) {
+    uint32_t dev = new_device(64, 64);
+    *rt = argb_target(dev, 64, 64);
+    uint32_t d = vdecl(dev, 1, g_pos_decl);
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, d), D3D_OK);
+    return dev;
+}
+
+static void group_vs_basic(void) {
+    uint32_t rt, dev = pos_device(&rt);
+    uint32_t vs = vs_new(dev, "vs_1_1\ndcl_position v0\nm4x4 oPos, v0, c0\nmov oD0, c4\n");
+    const float c[5][4] = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 }, { 1, 0.5f, 0.25f, 1 } };
+    vsf(dev, 0, c[0], 5);
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, vs), D3D_OK);
+    clear(dev, 0xFF000000u);
+    quad_clip(dev, -0.5f, -0.5f, 0.5f, 0.5f);
+    read_rt(dev, rt, 64, 64, g_px);
+    int inside = 0, outside = 0;
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) {
+            uint32_t p = g_px[y * 64 + x];
+            if (x >= 16 && x < 48 && y >= 16 && y < 48) inside += chan_near(p, c[4], 1);
+            else outside += p == 0xFF000000u;
+        }
+    CHECKEQ(inside, 32 * 32);
+    CHECKEQ(outside, 64 * 64 - 32 * 32);
+}
+
+/* One instruction (or a few) per case; its result reaches oD0. c0-c3 are set, the rest def'd. */
+struct vs_case { const char *name, *src; float c[4][4]; float want[4]; };
+#define V11 "vs_1_1\ndcl_position v0\nmov oPos, v0\n"
+#define V20 "vs_2_0\ndcl_position v0\nmov oPos, v0\n"
+static const struct vs_case g_vs_cases[] = {
+    { "add", V11 "add oD0, c0, c1\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.3f, 0.5f, 0.7f, 0.9f } },
+    { "add_neg", V11 "add oD0, c1, -c0\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.4f, 0.6f, 0.8f } }, { 0.1f, 0.2f, 0.3f, 0.4f } },
+    { "sub", V11 "sub oD0, c1, c0\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.4f, 0.6f, 0.8f } }, { 0.1f, 0.2f, 0.3f, 0.4f } },
+    { "swizzle_mask", V11 "mov r0, c1\nmov r0.yw, c0.wzyx\nmov oD0, r0\n",
+      { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.5f, 0.6f, 0.7f, 0.8f } }, { 0.5f, 0.3f, 0.7f, 0.1f } },
+    { "abs", V20 "abs oD0, c0\n", { { -0.25f, 0.5f, -0.75f, 1 } }, { 0.25f, 0.5f, 0.75f, 1 } },
+    { "dp3", V11 "dp3 oD0, c0, c1\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.2f, 0.2f, 0.2f, 0.2f } },
+    { "dp4", V11 "dp4 oD0, c0, c1\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.4f, 0.4f, 0.4f, 0.4f } },
+    /* vs_1_1 expp: (2^floor(w), frac(w), 2^w, 1) */
+    { "expp11", V11 "expp oD0, c0.x\n", { { -0.5f } }, { 0.5f, 0.5f, 0.70710678f, 1 } },
+    { "expp20", V20 "expp oD0, c0.x\n", { { -0.5f } }, { 0.70710678f, 0.70710678f, 0.70710678f, 0.70710678f } },
+    { "exp", V11 "exp oD0, c0.y\n", { { 0, -1 } }, { 0.5f, 0.5f, 0.5f, 0.5f } },
+    { "frc11", V11 "mov r0, c1\nfrc r0.xy, c0\nmov oD0, r0\n", { { 1.25f, -0.25f }, { 0, 0, 0.5f, 1 } }, { 0.25f, 0.75f, 0.5f, 1 } },
+    { "frc20", V20 "frc oD0, c0\n", { { 1.25f, -0.25f, 2.5f, 3.75f } }, { 0.25f, 0.75f, 0.5f, 0.75f } },
+    { "lrp", V20 "lrp oD0, c0, c1, c2\n", { { 0, 1, 0.5f, 0.25f }, { 0.8f, 0.8f, 0.8f, 0.8f }, { 0.4f, 0.4f, 0.4f, 0.4f } },
+      { 0.4f, 0.8f, 0.6f, 0.5f } },
+    { "mad", V11 "mad oD0, c0, c1, c2\n", { { 0.5f, 0.5f, 0.5f, 0.5f }, { 0.2f, 0.4f, 0.6f, 0.8f }, { 0.1f, 0.1f, 0.1f, 0.1f } },
+      { 0.2f, 0.3f, 0.4f, 0.5f } },
+    { "max", V11 "max oD0, c0, c1\n", { { 0.1f, 0.9f, 0.3f, 0.6f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.2f, 0.9f, 0.4f, 0.6f } },
+    { "min", V11 "min oD0, c0, c1\n", { { 0.1f, 0.9f, 0.3f, 0.6f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.1f, 0.3f, 0.3f, 0.5f } },
+    { "mov", V11 "mov oD0, c0\n", { { 0.1f, 0.9f, 0.3f, 0.6f } }, { 0.1f, 0.9f, 0.3f, 0.6f } },
+    { "mul", V11 "mul oD0, c0, c1\n", { { 0.5f, 0.5f, 0.25f, 1 }, { 0.2f, 0.4f, 0.8f, 0.6f } }, { 0.1f, 0.2f, 0.2f, 0.6f } },
+    { "nrm", V20 "nrm oD0, c0\n", { { 0.3f, 0, 0.4f, 0.25f } }, { 0.6f, 0, 0.8f, 0.5f } },
+    { "nrm_zero", V20 "nrm r0, c0\nadd oD0, r0, c1\n", { { 0, 0, 0, 0.5f }, { 0.25f, 0.25f, 0.25f, 0.25f } },
+      { 0.25f, 0.25f, 0.25f, 0.25f } },
+    { "rcp", V11 "rcp oD0, c0.z\n", { { 0, 0, 4 } }, { 0.25f, 0.25f, 0.25f, 0.25f } },
+    /* rcp(0) is +infinity: above 1e30 */
+    { "rcp_zero", V11 "rcp r0, c0.x\nslt oD0, c1, r0\n", { { 0 }, { 1e30f, 1e30f, 1e30f, 1e30f } }, { 1, 1, 1, 1 } },
+    { "rsq", V11 "rsq oD0, c0.w\n", { { 0, 0, 0, 4 } }, { 0.5f, 0.5f, 0.5f, 0.5f } },
+    { "rsq_abs", V11 "rsq oD0, c0.w\n", { { 0, 0, 0, -16 } }, { 0.25f, 0.25f, 0.25f, 0.25f } },
+    { "sincos", "vs_2_0\ndcl_position v0\nmov oPos, v0\ndef c10, -1.5500992e-006, -2.1701389e-005, 0.0026041667, 0.00026041668\n"
+      "def c11, -0.020833334, -0.12500000, 1, 0.5\nmov r0, c1\nsincos r0.xy, c0.x, c10, c11\nmov oD0, r0\n",
+      { { 0.5f }, { 0, 0, 0.25f, 0.75f } }, { 0.87758256f, 0.47942554f, 0.25f, 0.75f } },
+    { "slt", V11 "slt oD0, c0, c1\n", { { 0.1f, 0.5f, 0.3f, 0.3f }, { 0.2f, 0.3f, 0.3f, 0.4f } }, { 1, 0, 0, 1 } },
+    { "sge", V11 "sge oD0, c0, c1\n", { { 0.1f, 0.5f, 0.3f, 0.3f }, { 0.2f, 0.3f, 0.3f, 0.4f } }, { 0, 1, 1, 0 } },
+    /* lit: (1, max(x, 0), x > 0 && y > 0 ? y^w : 0, 1) */
+    { "lit", V11 "lit oD0, c0\n", { { 0.5f, 0.25f, 0, 2 } }, { 1, 0.5f, 0.0625f, 1 } },
+    { "lit_back", V11 "lit oD0, c0\n", { { -0.5f, 0.25f, 0, 2 } }, { 1, 0, 0, 1 } },
+    /* dst: (1, a.y * b.y, a.z, b.w) */
+    { "dst", V11 "dst oD0, c0, c1\n", { { 9, 0.5f, 0.25f, 9 }, { 9, 0.8f, 9, 0.4f } }, { 1, 0.4f, 0.25f, 0.4f } },
+    { "log", V11 "log oD0, c0.x\n", { { 1.5f } }, { 0.5849625f, 0.5849625f, 0.5849625f, 0.5849625f } },
+    { "log_abs", V11 "log oD0, c0.x\n", { { -1.5f } }, { 0.5849625f, 0.5849625f, 0.5849625f, 0.5849625f } },
+    /* the matrix macros: rows from consecutive constants (c4-c7 def'd) */
+    { "m4x4", V11 "def c4, 0.5, 0, 0, 0\ndef c5, 0, 0.25, 0, 0\ndef c6, 0.1, 0.1, 0.1, 0.1\ndef c7, 0, 0, 0, 1\n"
+      "m4x4 oD0, c0, c4\n", { { 1, 1, 1, 0.5f } }, { 0.5f, 0.25f, 0.35f, 0.5f } },
+    { "m4x3", V11 "def c4, 0.5, 0, 0, 0\ndef c5, 0, 0.25, 0, 0\ndef c6, 0.1, 0.1, 0.1, 0.1\n"
+      "mov r0, c1\nm4x3 r0.xyz, c0, c4\nmov oD0, r0\n", { { 1, 1, 1, 0.5f }, { 0, 0, 0, 0.75f } }, { 0.5f, 0.25f, 0.35f, 0.75f } },
+    { "m3x4", V11 "def c4, 0.5, 0, 0, 0\ndef c5, 0, 0.25, 0, 0\ndef c6, 0.1, 0.1, 0.1, 0.1\ndef c7, 0.2, 0.2, 0.2, 1\n"
+      "m3x4 oD0, c0, c4\n", { { 1, 1, 1, 0.5f } }, { 0.5f, 0.25f, 0.3f, 0.6f } },
+    { "m3x3", V11 "def c4, 0.5, 0, 0, 0\ndef c5, 0, 0.25, 0, 0\ndef c6, 0.1, 0.1, 0.1, 0.1\n"
+      "mov r0, c1\nm3x3 r0.xyz, c0, c4\nmov oD0, r0\n", { { 1, 1, 1, 0.5f }, { 0, 0, 0, 0.75f } }, { 0.5f, 0.25f, 0.3f, 0.75f } },
+    { "m3x2", V11 "def c4, 0.5, 0, 0, 0\ndef c5, 0, 0.25, 0, 0\n"
+      "mov r0, c1\nm3x2 r0.xy, c0, c4\nmov oD0, r0\n", { { 1, 1, 1, 0.5f }, { 0, 0, 0.6f, 0.75f } }, { 0.5f, 0.25f, 0.6f, 0.75f } },
+    { "crs", V20 "mov r0, c2\ncrs r0.xyz, c0, c1\nmov oD0, r0\n", { { 0.5f, 0, 0 }, { 0, 0.5f, 0 }, { 0.9f, 0.9f, 0.9f, 0.6f } },
+      { 0, 0, 0.25f, 0.6f } },
+    /* sgn: -1, 0, 1 mapped to 0, 0.5, 1 */
+    { "sgn", V20 "sgn r0, c0, r1, r2\nmad oD0, r0, c1, c1\n", { { -0.5f, 0, 0.7f, 2 }, { 0.5f, 0.5f, 0.5f, 0.5f } },
+      { 0, 0.5f, 1, 1 } },
+    { "pow", V20 "pow oD0, c0.x, c0.y\n", { { 0.25f, 0.5f } }, { 0.5f, 0.5f, 0.5f, 0.5f } },
+    { "pow_abs", V20 "pow oD0, c0.x, c0.y\n", { { -0.25f, 0.5f } }, { 0.5f, 0.5f, 0.5f, 0.5f } },
+    /* unwritten colour outputs read as white */
+    { "od1_default", "vs_1_1\ndcl_position v0\nmov oPos, v0\nmov oD1, c0\n", { { 0 } }, { 1, 1, 1, 1 } },
+};
+
+static void group_vs_ops(void) {
+    uint32_t rt, dev = pos_device(&rt);
+    for (size_t i = 0; i < sizeof g_vs_cases / sizeof *g_vs_cases; i++) {
+        const struct vs_case *k = &g_vs_cases[i];
+        uint32_t vs = vs_new(dev, k->src);
+        if (!vs) continue;
+        vsf(dev, 0, k->c[0], 4);
+        uint32_t px = draw_centre(dev, rt, vs);
+        expect_px(k->name, px, k->want);
+        CHECKEQ(vcall(dev, DV_SetVertexShader, 1, 0u), D3D_OK);
+        CHECKEQ(vcall(vs, 2, 0), 0);
+    }
+}
+
+/* c[a0.x + n] at the ends of a 20-entry array, and outside the register file (zero) */
+static void group_vs_reladdr(void) {
+    uint32_t rt, dev = pos_device(&rt);
+    static float c[256][4];
+    for (int i = 0; i < 256; i++)
+        c[i][0] = (float)(i % 16) / 16.0f, c[i][1] = (float)(i / 16) / 16.0f, c[i][2] = 0.5f, c[i][3] = 1;
+    vsf(dev, 0, c[0], 256);
+    uint32_t v20lo = vs_new(dev, V20 "mova a0.x, c100.x\nmov oD0, c[a0.x]\n");
+    uint32_t v20hi = vs_new(dev, V20 "mova a0.x, c100.x\nmov oD0, c[a0.x + 236]\n");
+    uint32_t v20mid = vs_new(dev, V20 "mova a0.x, c100.y\nmov oD0, c[a0.x + 50]\n");
+    uint32_t v11lo = vs_new(dev, V11 "mov a0.x, c100.x\nmov oD0, c[a0.x + 0]\n");
+    uint32_t v11hi = vs_new(dev, V11 "mov a0.x, c100.x\nmov oD0, c[a0.x + 236]\n");
+    static const float zero[4] = { 0, 0, 0, 0 };
+    struct { uint32_t vs; float a; int reg; } k[] = {
+        { v20lo, 0, 0 }, { v20lo, 19, 19 }, { v20lo, -1, -1 }, { v20lo, 18.5f, 19 }, { v20lo, -0.4f, 0 },
+        { v20lo, -0.5f, -1 }, { v20lo, 1.5f, 2 },
+        { v20hi, 0, 236 }, { v20hi, 19, 255 }, { v20hi, 20, -1 }, { v20hi, -1, 235 },
+        { v11lo, 19.7f, 19 }, { v11lo, -0.3f, -1 }, { v11lo, 0.9f, 0 },
+        { v11hi, 19.7f, 255 }, { v11hi, 20, -1 }, { v11hi, -0.3f, 235 },
+    };
+    for (size_t i = 0; i < sizeof k / sizeof *k; i++) {
+        float idx[4] = { k[i].a, -1, 0, 0 };
+        vsf(dev, 100, idx, 1);
+        char what[64];
+        snprintf(what, sizeof what, "case %zu (a %g)", i, k[i].a);
+        expect_px(what, draw_centre(dev, rt, k[i].vs), k[i].reg < 0 ? zero : c[k[i].reg]);
+    }
+    float idx[4] = { 0, -1, 0, 0 };
+    vsf(dev, 100, idx, 1);
+    expect_px("mid -1", draw_centre(dev, rt, v20mid), c[49]);
+}
+
+static void group_vs_flow(void) {
+    uint32_t rt, dev = pos_device(&rt);
+    uint32_t vs = vs_new(dev, V20
+        "def c20, 0, 0, 0, 0\ndef c21, 0.25, 0, 0, 0\ndef c22, 0, 0.25, 0, 0\ndef c23, 0, 0, 0, 0.125\n"
+        "def c24, 0, 0, 0, 0.5\n"
+        "mov r0, c20\nif b0\nadd r0, r0, c21\nelse\nadd r0, r0, c22\nendif\n"
+        "loop aL, i0\nadd r0, r0, c[aL]\nendloop\n"
+        "rep i1\nadd r0, r0, c23\nendrep\n"
+        "call l0\nmov oD0, r0\nret\n"
+        "label l0\nadd r0, r0, c24\nret\n");
+    float c[7][4] = { { 0 } };
+    for (int i = 2; i <= 6; i++) c[i][2] = i % 2 ? 0.4f : 0.1f;      /* aL 2, 4, 6 read 0.1 each */
+    vsf(dev, 0, c[0], 7);
+    int32_t ii[2][4] = { { 3, 2, 2, 0 }, { 2, 0, 0, 0 } };
+    CHECKEQ(vcall(dev, DV_SetVertexShaderConstantI, 3, 0u, gbytes(ii, sizeof ii), 2u), D3D_OK);
+    uint32_t b = 1;
+    CHECKEQ(vcall(dev, DV_SetVertexShaderConstantB, 3, 0u, gbytes(&b, 4), 1u), D3D_OK);
+    const float want_t[4] = { 0.25f, 0, 0.3f, 0.75f }, want_f[4] = { 0, 0.25f, 0.3f, 0.75f };
+    expect_px("b0 true", draw_centre(dev, rt, vs), want_t);
+    b = 0;
+    CHECKEQ(vcall(dev, DV_SetVertexShaderConstantB, 3, 0u, gbytes(&b, 4), 1u), D3D_OK);
+    expect_px("b0 false", draw_centre(dev, rt, vs), want_f);
+    /* a loop count of 0 runs nothing; rep 1 */
+    int32_t i0[2][4] = { { 0, 2, 2, 0 }, { 1, 0, 0, 0 } };
+    CHECKEQ(vcall(dev, DV_SetVertexShaderConstantI, 3, 0u, gbytes(i0, sizeof i0), 2u), D3D_OK);
+    const float want_0[4] = { 0, 0.25f, 0, 0.625f };
+    expect_px("loop 0", draw_centre(dev, rt, vs), want_0);
+}
+
+/* the declaration's usages to the shader's input registers */
+struct vin { float x, y, z, nx, ny, nz, u, v; uint32_t col; uint8_t bi[4]; int16_t s2[2]; };
+static void group_vs_inputs(void) {
+    uint32_t dev = new_device(64, 64), rt = argb_target(dev, 64, 64);
+    static const uint8_t rows[6][5] = { { 0, 0, 2, 0, 0 }, { 0, 12, 2, 3, 0 }, { 0, 24, 1, 5, 1 }, { 0, 32, 4, 10, 0 },
+                                        { 0, 36, 5, 2, 0 }, { 0, 40, 6, 5, 3 } };
+    uint32_t d = vdecl(dev, 6, rows), dpos = vdecl(dev, 1, g_pos_decl);
+    struct vin q[4];
+    const float xy[4][2] = { { -1, 1 }, { 1, 1 }, { -1, -1 }, { 1, -1 } };
+    for (int i = 0; i < 4; i++)
+        q[i] = (struct vin){ xy[i][0], xy[i][1], 0.5f, 0.5f, 0.25f, 0.125f, 0.25f, 0.75f, 0x80FF4000u, { 1, 2, 3, 4 },
+                             { 64, 32 } };
+    const char *head = "vs_1_1\ndcl_position v0\ndcl_normal v1\ndcl_color v2\ndcl_texcoord1 v3\n"
+                       "dcl_blendindices v4\ndcl_texcoord3 v5\nmov oPos, v0\n";
+    struct { const char *body; float c0[4]; float want[4]; } k[] = {
+        { "mov oD0, v3\n", { 0 }, { 0.25f, 0.75f, 0, 1 } },
+        { "mov oD0, v2\n", { 0 }, { 1, 0.25f, 0, 128 / 255.0f } },
+        { "mov oD0, v1\n", { 0 }, { 0.5f, 0.25f, 0.125f, 1 } },
+        { "mul oD0, v4, c0\n", { 0.125f, 0.125f, 0.125f, 0.125f }, { 0.125f, 0.25f, 0.375f, 0.5f } },
+        { "mul oD0, v5, c0\n", { 1 / 128.0f, 1 / 128.0f, 1, 1 }, { 0.5f, 0.25f, 0, 1 } },
+    };
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, d), D3D_OK);
+    char src[512];
+    for (size_t i = 0; i < sizeof k / sizeof *k; i++) {
+        snprintf(src, sizeof src, "%s%s", head, k[i].body);
+        uint32_t vs = vs_new(dev, src);
+        vsf(dev, 0, k[i].c0, 1);
+        CHECKEQ(vcall(dev, DV_SetVertexShader, 1, vs), D3D_OK);
+        clear(dev, 0);
+        draw_up(dev, 5, 2, q, 4, sizeof q[0]);
+        read_rt(dev, rt, 64, 64, g_px);
+        expect_px(k[i].body, g_px[32 * 64 + 32], k[i].want);
+        CHECKEQ(vcall(dev, DV_SetVertexShader, 1, 0u), D3D_OK);
+        vcall(vs, 2, 0);
+    }
+    /* a dcl with no element reads (0, 0, 0, 1) */
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, dpos), D3D_OK);
+    uint32_t vs = vs_new(dev, "vs_1_1\ndcl_position v0\ndcl_normal v1\nmov oPos, v0\nmov oD0, v1\n");
+    const float want[4] = { 0, 0, 0, 1 };
+    expect_px("no normal element", draw_centre(dev, rt, vs), want);
+}
+
+/* a 1:1 textured quad through a vertex shader: texel centres on pixel centres */
+struct xyzuv { float x, y, z, u, v; };
+static void group_vs_halfpixel(void) {
+    uint32_t dev = new_device(4, 4), out = gmem(4), lr = gmem(8), tx[16], px[16];
+    for (int i = 0; i < 16; i++) tx[i] = 0xFF000000u | (uint32_t)(i * 16) << 16 | (uint32_t)(255 - i * 16) << 8 | (uint32_t)(i * 5);
+    CHECKEQ(vcall(dev, DV_CreateTexture, 8, 4u, 4u, 1u, 0u, FMT_A8R8G8B8, 1u, out, 0u), D3D_OK);
+    uint32_t t = MEM32(out);
+    CHECKEQ(vcall(t, TX_LockRect, 4, 0u, lr, 0u, 0u), D3D_OK);
+    for (int y = 0; y < 4; y++) memcpy((uint8_t *)hle_ptr(MEM32(lr + 4)) + y * MEM32(lr), tx + 4 * y, 16);
+    CHECKEQ(vcall(t, TX_UnlockRect, 1, 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, t), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetSamplerState, 3, 0u, 5u, 2u), D3D_OK);     /* linear: an offset would mix texels */
+    CHECKEQ(vcall(dev, DV_SetSamplerState, 3, 0u, 6u, 2u), D3D_OK);
+    tss(dev, 0, 1, 2), tss(dev, 0, 2, 2), tss(dev, 0, 4, 2), tss(dev, 0, 5, 2);   /* SELECTARG1 TEXTURE */
+    static const uint8_t rows[2][5] = { { 0, 0, 2, 0, 0 }, { 0, 12, 1, 5, 0 } };
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, vdecl(dev, 2, rows)), D3D_OK);
+    /* screen coordinates to clip space: x / 2 - 1, 1 - y / 2 */
+    uint32_t vs = vs_new(dev, "vs_1_1\ndcl_position v0\ndcl_texcoord v1\ndef c0, 0.5, -0.5, 1, 1\ndef c1, -1, 1, 0, 0\n"
+                              "mad oPos, v0, c0, c1\nmov oT0, v1\n");
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, vs), D3D_OK);
+    rs(dev, 7, 0);
+    clear(dev, 0xFF000000u);
+    struct xyzuv q[4] = { { -0.5f, -0.5f, 0.5f, 0, 0 }, { 3.5f, -0.5f, 0.5f, 1, 0 }, { -0.5f, 3.5f, 0.5f, 0, 1 },
+                          { 3.5f, 3.5f, 0.5f, 1, 1 } };
+    draw_up(dev, 5, 2, q, 4, sizeof q[0]);
+    uint32_t bb = gmem(4);
+    CHECKEQ(vcall(dev, DV_GetBackBuffer, 4, 0u, 0u, 0u, bb), D3D_OK);
+    read_rt(dev, MEM32(bb), 4, 4, px);
+    for (int i = 0; i < 16; i++) {
+        int ok = 1;
+        for (int s = 0; s < 24; s += 8) ok &= abs((int)(px[i] >> s & 0xFF) - (int)(tx[i] >> s & 0xFF)) <= 1;
+        if (!ok) printf("FAIL pixel %d 0x%08X want 0x%08X\n", i, px[i], tx[i]), fails++;
+    }
+}
+
+/* one user clip plane in clip space keeps x >= -1/64: the right half */
+static void group_vs_clip(void) {
+    uint32_t rt, dev = pos_device(&rt);
+    uint32_t vs = vs_new(dev, V11 "def c0, 1, 1, 1, 1\nmov oD0, c0\n");
+    const float plane[4] = { 1, 0, 0, 1 / 64.0f };
+    CHECKEQ(vcall(dev, DV_SetClipPlane, 2, 0u, gbytes(plane, 16)), D3D_OK);
+    rs(dev, 152, 1);
+    draw_centre(dev, rt, vs);
+    int white = 0, left = 0;
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) {
+            uint32_t p = g_px[y * 64 + x];
+            white += p == 0xFFFFFFFFu;
+            if (x < 32) left += p == 0;
+        }
+    CHECKEQ(white, 32 * 64);
+    CHECKEQ(left, 32 * 64);
+    rs(dev, 152, 0);
+    draw_centre(dev, rt, vs);
+    int all = 0;
+    for (int i = 0; i < 64 * 64; i++) all += g_px[i] == 0xFFFFFFFFu;
+    CHECKEQ(all, 64 * 64);
+}
+
+static void check_caps(uint32_t caps) {
+    CHECKEQ(MEM32(caps + 0xC4), 0xFFFE0200u);                /* VertexShaderVersion */
+    CHECKEQ(MEM32(caps + 0xC8), 256);                        /* MaxVertexShaderConst */
+    CHECKEQ(MEM32(caps + 0xCC), 0xFFFF0200u);                /* PixelShaderVersion */
+    static const uint32_t vs20[4] = { 0, 0, 12, 1 }, ps20[5] = { 0, 0, 12, 0, 96 };
+    for (int i = 0; i < 4; i++) CHECKEQ(MEM32(caps + 0xF8 + 4u * (uint32_t)i), vs20[i]);
+    for (int i = 0; i < 5; i++) CHECKEQ(MEM32(caps + 0x108 + 4u * (uint32_t)i), ps20[i]);
+    CHECKEQ(MEM32(caps + 0x120), 65535);                     /* MaxVShaderInstructionsExecuted */
+    CHECKEQ(MEM32(caps + 0x124), 96);                        /* MaxPShaderInstructionsExecuted */
+    CHECKEQ(MEM32(caps + 0x128), 0);
+    CHECKEQ(MEM32(caps + 0x12C), 0);
+}
+static void group_caps_sm2(void) {
+    uint32_t d3d = call("Direct3DCreate9", 1, 32u), caps = gmem(304);
+    CHECKEQ(vcall(d3d, 14, 3, 0u, 1u, caps), D3D_OK);
+    check_caps(caps);
+    uint32_t dev = new_device(16, 16);
+    memset(hle_ptr(caps), 0, 304);
+    CHECKEQ(vcall(dev, DV_GetDeviceCaps, 1, caps), D3D_OK);
+    check_caps(caps);
+}
+
+static uint32_t refs(uint32_t o) { vcall(o, 1, 0); return vcall(o, 2, 0); }
+
+static void group_shader_objects(void) {
+    uint32_t rt, dev = pos_device(&rt), out = gmem(4), size = gmem(4);
+    /* tokens with a comment block: GetFunction gives them back as given */
+    uint32_t *t = NULL, nt = 0;
+    char *errs = NULL;
+    const char *src = V11 "def c0, 0, 1, 0, 1\nmov oD0, c0\n";
+    CHECKEQ(sm_assemble(src, strlen(src), NULL, &t, &nt, &errs), 0);
+    uint32_t tok[64];
+    tok[0] = t[0], tok[1] = 0xFFFE | 2u << 16, tok[2] = 0x12345678u, tok[3] = 0x9ABCDEF0u;
+    memcpy(tok + 4, t + 1, 4 * (nt - 1));
+    uint32_t n = nt + 3, g = gbytes(tok, 4 * n);
+    free(t);
+    CHECKEQ(vcall(dev, DV_CreateVertexShader, 2, g, out), D3D_OK);
+    uint32_t vs = MEM32(out);
+    CHECK(vs != 0);
+    CHECKEQ(refs(vs), 1);
+    MEM32(size) = 0;
+    CHECKEQ(vcall(vs, SH_GetFunction, 2, 0u, size), D3D_OK);
+    CHECKEQ(MEM32(size), 4 * n);
+    uint32_t buf = gmem(4 * n);
+    MEM32(size) = 4 * n - 4;
+    CHECKEQ(vcall(vs, SH_GetFunction, 2, buf, size), D3DERR_INVALIDCALL_);
+    MEM32(size) = 4 * n;
+    CHECKEQ(vcall(vs, SH_GetFunction, 2, buf, size), D3D_OK);
+    CHECK(!memcmp(hle_ptr(buf), tok, 4 * n));
+    uint32_t r0 = refs(dev);
+    CHECKEQ(vcall(vs, SH_GetDevice, 1, out), D3D_OK);
+    CHECKEQ(MEM32(out), dev);
+    CHECKEQ(refs(dev), r0 + 1);
+    vcall(dev, 2, 0);
+    /* bound: the device holds a reference; Get AddRefs */
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, vs), D3D_OK);
+    CHECKEQ(refs(vs), 2);
+    MEM32(out) = 0;
+    CHECKEQ(vcall(dev, DV_GetVertexShader, 1, out), D3D_OK);
+    CHECKEQ(MEM32(out), vs);
+    CHECKEQ(refs(vs), 3);
+    vcall(vs, 2, 0);
+    /* drawn through the shader, then SetVertexShader(NULL) is the fixed pipeline again */
+    const float green[4] = { 0, 1, 0, 1 };
+    expect_px("shader", draw_centre(dev, rt, vs), green);
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, 0u), D3D_OK);
+    CHECKEQ(refs(vs), 1);
+    MEM32(out) = 0xDEAD;
+    CHECKEQ(vcall(dev, DV_GetVertexShader, 1, out), D3D_OK);
+    CHECKEQ(MEM32(out), 0);
+    struct { float x, y, z, rhw; uint32_t c; } q[4] = { { -0.5f, -0.5f, 0.5f, 1, 0xFFFF0000u },
+        { 63.5f, -0.5f, 0.5f, 1, 0xFFFF0000u }, { -0.5f, 63.5f, 0.5f, 1, 0xFFFF0000u }, { 63.5f, 63.5f, 0.5f, 1, 0xFFFF0000u } };
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, 0x044u), D3D_OK);
+    clear(dev, 0);
+    draw_up(dev, 5, 2, q, 4, sizeof q[0]);
+    read_rt(dev, rt, 64, 64, g_px);
+    CHECKEQ(g_px[32 * 64 + 32], 0xFFFF0000u);
+    /* bad calls */
+    CHECKEQ(vcall(dev, DV_CreateVertexShader, 2, 0u, out), D3DERR_INVALIDCALL_);
+    CHECKEQ(vcall(dev, DV_CreateVertexShader, 2, g, 0u), D3DERR_INVALIDCALL_);
+    static const uint32_t ps[] = { 0xFFFF0200u, 0x02000001, 0x800F0800, 0xA0E40000, 0x0000FFFF };
+    CHECKEQ(vcall(dev, DV_CreateVertexShader, 2, gbytes(ps, sizeof ps), out), D3DERR_INVALIDCALL_);
+    CHECKEQ(vcall(vs, SH_GetFunction, 2, buf, 0u), D3DERR_INVALIDCALL_);
+    CHECKEQ(vcall(vs, 2, 0), 0);
+}
+
+/* the same shader on a second device: no new MSL compile; after a cache drop, the pipeline from the archive */
+static void cache_draw(void) {
+    uint32_t dev = new_device(64, 64), bb = gmem(4);
+    rs(dev, 7, 0);
+    tss(dev, 0, 1, 2), tss(dev, 0, 2, 0), tss(dev, 0, 4, 2), tss(dev, 0, 5, 0);
+    uint32_t d = vdecl(dev, 1, g_pos_decl);
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, d), D3D_OK);
+    uint32_t vs = vs_new(dev, V20 "def c5, 0.5, 0.25, 1, 1\nmul oD0, c0, c5\n");
+    const float c0[4] = { 1, 1, 1, 1 }, want[4] = { 0.5f, 0.25f, 1, 1 };
+    vsf(dev, 0, c0, 1);
+    CHECKEQ(vcall(dev, DV_GetBackBuffer, 4, 0u, 0u, 0u, bb), D3D_OK);
+    expect_px("cache", draw_centre(dev, MEM32(bb), vs), want);
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, 0u), D3D_OK);
+    vcall(vs, 2, 0), vcall(d, 2, 0), vcall(MEM32(bb), 2, 0);
+    CHECKEQ(vcall(dev, 2, 0), 0);                            /* the release saves the archive */
+}
+static void group_vs_cache(void) {
+    struct mtl_stats s0, s1, s2;
+    cache_draw();
+    mtl_get_stats(&s0);
+    CHECK(s0.libraries >= 2 && s0.pipelines >= 1);
+    cache_draw();
+    mtl_get_stats(&s1);
+    CHECKEQ(s1.libraries, s0.libraries);
+    CHECKEQ(s1.pipelines, s0.pipelines);
+    char path[1024];
+    snprintf(path, sizeof path, "%s/ShaderCache", getenv("BW2_SUPPORT"));
+    mtl_pipeline_cache_drop();
+    mtl_archive_open(path);
+    mtl_archive_require_hits(1);
+    cache_draw();
+    mtl_get_stats(&s2);
+    CHECK(s2.archive_hits > s1.archive_hits);
+    CHECKEQ(s2.archive_misses, s1.archive_misses);
+    mtl_archive_require_hits(0);
+}
+
+/* shader model 3.0 is not this device's: creating one stops the run, naming it */
+static void group_vs_loud(void) {
+    uint32_t dev = new_device(16, 16), out = gmem(4);
+    static const uint32_t vs30[] = { 0xFFFE0300u, 0x0200001F, 0x80000000, 0x900F0000, 0x0200001F, 0x80000000,
+                                     0xE00F0000, 0x02000001, 0xE00F0000, 0x90E40000, 0x0000FFFF };
+    vcall(dev, DV_CreateVertexShader, 2, gbytes(vs30, sizeof vs30), out);
+    printf("vs_loud: returned\n");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: sm_selftest <group> [arg]\n"); return 2; }
     hle_mem_init();
@@ -524,6 +1050,17 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "decode_files") && arg) group_decode_files(arg);
     else if (!strcmp(argv[1], "profiles")) group_profiles();
     else if (!strcmp(argv[1], "asm_loud") && arg) group_asm_loud(arg);
+    else if (!strcmp(argv[1], "vs_basic")) group_vs_basic();
+    else if (!strcmp(argv[1], "vs_ops")) group_vs_ops();
+    else if (!strcmp(argv[1], "vs_reladdr")) group_vs_reladdr();
+    else if (!strcmp(argv[1], "vs_flow")) group_vs_flow();
+    else if (!strcmp(argv[1], "vs_inputs")) group_vs_inputs();
+    else if (!strcmp(argv[1], "vs_halfpixel")) group_vs_halfpixel();
+    else if (!strcmp(argv[1], "vs_clip")) group_vs_clip();
+    else if (!strcmp(argv[1], "caps_sm2")) group_caps_sm2();
+    else if (!strcmp(argv[1], "shader_objects")) group_shader_objects();
+    else if (!strcmp(argv[1], "vs_cache")) group_vs_cache();
+    else if (!strcmp(argv[1], "vs_loud")) group_vs_loud();
     else { fprintf(stderr, "sm_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

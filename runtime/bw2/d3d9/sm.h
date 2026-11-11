@@ -129,4 +129,17 @@ struct sm_define { const char *name, *value; };
 int sm_assemble(const char *text, size_t len, const struct sm_define *defines, uint32_t **tokens,
                 uint32_t *ntokens, char **errors);
 
+/* Translation to Metal (sm_msl.c, Task 3). A vertex shader becomes one `vertex VOut vsh(...)`:
+ * buffer(0) plan 4's VU uniforms, buffer(1) float4 c[256], buffer(2) int4 i[16] then uint b[16]; input
+ * register v# is attribute(#). The variant is what the draw adds: per input register the kind of the
+ * declaration element feeding it (none reads (0, 0, 0, 1)), the user clip planes, points, flat shading. */
+enum { SM_IN_NONE, SM_IN_FLOAT, SM_IN_UINT, SM_IN_INT };
+struct sm_vs_variant {
+    uint8_t input[16];
+    uint8_t nclip, points, flat, pad;
+};
+/* malloc'd MSL; an instruction or register the translator lacks stops the run, naming the shader
+ * version, the instruction and its token offset. */
+char *sm_msl_vertex(const struct sm_shader *s, const struct sm_vs_variant *v);
+
 #endif

@@ -155,8 +155,8 @@ static void group_adapter(void) {
     uint32_t caps = gmem(304);
     CHECKEQ(vcall(d, D9_GetDeviceCaps, 3, 0u, HAL, caps), D3D_OK);
     CHECKEQ(MEM32(caps + 0x00), HAL);
-    CHECKEQ(MEM32(caps + 0xC4), 0xFFFE0300u);
-    CHECKEQ(MEM32(caps + 0xCC), 0xFFFF0300u);
+    CHECKEQ(MEM32(caps + 0xC4), 0xFFFE0200u);                /* shader model 2.0 (plan 5) */
+    CHECKEQ(MEM32(caps + 0xCC), 0xFFFF0200u);
     CHECKEQ(MEM32(caps + 0xC8), 256);
     CHECKEQ(MEM32(caps + 0x58), 4096);
     CHECKEQ(MEM32(caps + 0x94), 8);
@@ -520,7 +520,7 @@ static void group_defaults(void) {
     CHECKEQ(vcall(dev, DV_TestCooperativeLevel, 0), D3D_OK);
     uint32_t caps = gmem(304);
     CHECKEQ(vcall(dev, DV_GetDeviceCaps, 1, caps), D3D_OK);
-    CHECKEQ(MEM32(caps + 0xCC), 0xFFFF0300u);
+    CHECKEQ(MEM32(caps + 0xCC), 0xFFFF0200u);                /* ps_2_0 (plan 5) */
     uint32_t cp = gmem(16);
     CHECKEQ(vcall(dev, DV_GetCreationParameters, 1, cp), D3D_OK);
     CHECK(MEM32(cp) == 0 && MEM32(cp + 4) == HAL && MEM32(cp + 8) == 0x10001u && MEM32(cp + 12) == CREATE_HWVP);

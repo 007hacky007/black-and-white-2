@@ -63,21 +63,21 @@ static int type_comps(uint32_t t) {
     return t < 17 ? n[t] : 0;
 }
 
-void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint32_t prim, struct ff_draw *dr,
-              struct ff_vkey *vk, struct ff_pkey *pk, struct ff_vs_u *vu, struct ff_ps_u *pu) {
+void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint32_t prim, int with_vs,
+              struct ff_draw *dr, struct ff_vkey *vk, struct ff_pkey *pk, struct ff_vs_u *vu, struct ff_ps_u *pu) {
     struct d3d_state *st = &dv->st;
     const uint32_t *rs = st->rs;
-    if (rs[151]) d3d_fail("D3DRS_VERTEXBLEND %u is not supported", rs[151]);
-    if (rs[167]) d3d_fail("D3DRS_INDEXEDVERTEXBLENDENABLE is not supported");
+    if (rs[151] && !with_vs) d3d_fail("D3DRS_VERTEXBLEND %u is not supported", rs[151]);
+    if (rs[167] && !with_vs) d3d_fail("D3DRS_INDEXEDVERTEXBLENDENABLE is not supported");
     if (rs[156]) d3d_fail("D3DRS_POINTSPRITEENABLE is not supported");
     if (rs[8] == 1) d3d_fail("D3DFILL_POINT is not supported");
     memset(vk, 0, sizeof *vk), memset(pk, 0, sizeof *pk), memset(vu, 0, sizeof *vu), memset(pu, 0, sizeof *pu);
 
-    /* the vertex layout */
+    /* the vertex layout (a vertex shader's inputs are d3d_vs_inputs') */
     dr->nattr = 0;
-    int have_pos = 0;
+    int have_pos = with_vs;
     uint32_t taken = 0;                                  /* slots used: a repeated usage keeps its first */
-    for (uint32_t i = 0; i < nel; i++) {
+    for (uint32_t i = 0; i < nel && !with_vs; i++) {
         uint32_t stream = el[i][0] | el[i][1] << 8, off = el[i][2] | el[i][3] << 8, type = el[i][4];
         uint32_t usage = el[i][6], idx = el[i][7];
         int slot = -1;
@@ -138,7 +138,7 @@ void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint3
     /* vertex processing */
     vk->points = prim == 1;
     vk->flat = pk->flat = rs[9] == 1;
-    if (!vk->pretransformed) {
+    if (!vk->pretransformed && !with_vs) {
         vk->lighting = rs[137] != 0;
         vk->normalize = rs[143] != 0, vk->localviewer = rs[142] != 0, vk->specular = rs[29] != 0;
         int cv = rs[141] != 0;

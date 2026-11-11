@@ -49,8 +49,9 @@ struct ff_vs_u {
     float mat_diffuse[4], mat_ambient[4], mat_specular[4], mat_emissive[4];
     float ambient[4];
     float fog[4];                     /* start, end, density, 0 */
-    float clip[6][4];                 /* world space */
-    float mat_power, pad[3];
+    float clip[6][4];                 /* world space (with a vertex shader: clip space) */
+    float mat_power;
+    float vs_wfog, vs_psize, pad;     /* with a vertex shader: table fog from w (1) or z/w (0); D3DRS_POINTSIZE */
     struct ff_light_u light[8];
 };
 struct ff_ps_u {
@@ -79,6 +80,17 @@ struct ff_sampler { uint32_t u, v, w, mag, min, mip, aniso, maxmip, border; };
 
 struct ff_attr { uint8_t slot, decltype, stream, pad; uint32_t offset; };
 
+/* A programmable stage of a draw (plan 5): its Metal library, what keys its pipeline, its constants. */
+struct ff_prog {
+    mtl_obj lib;                      /* mtl_library_async's handle: "vsh" or "psh" */
+    uint64_t hash;                    /* the shader's tokens */
+    uint8_t variant[32];              /* the variant it was translated for (sm.h) */
+    const void *f;                    /* buffer(1): float constants */
+    uint32_t fsize;
+    const void *ib;                   /* buffer(2): int4 i[16], then uint b[16] */
+    uint32_t ibsize;
+};
+
 struct ff_draw {
     const struct ff_vkey *vk;
     const struct ff_pkey *pk;
@@ -86,7 +98,8 @@ struct ff_draw {
     const struct ff_ps_u *pu;
     struct ff_fixed fx;
     uint32_t nattr;
-    struct ff_attr attr[VA_COUNT];
+    struct ff_attr attr[VA_COUNT];    /* with a vertex shader, slot is the input register */
+    const struct ff_prog *vs, *ps;    /* NULL: the fixed-function stage */
     void *stream_buf[16];             /* id<MTLBuffer> per stream, or NULL */
     uint32_t stream_off[16], stream_stride[16];
     mtl_obj tex[8];                   /* sampling views */
@@ -107,8 +120,16 @@ void mtl_archive_open(const char *dir);          /* the pipeline cache directory
 void mtl_archive_save(void);
 void mtl_archive_require_hits(int on);           /* tests: pipelines must come from the archive */
 void mtl_pipeline_cache_drop(void);              /* tests: forget the in-memory libraries and pipelines */
+/* A library compiled from msl on a background queue (one per distinct source); the first draw that
+ * needs it waits. name labels a compile error. The handle is retained: mtl_release drops it. */
+mtl_obj mtl_library_async(const char *msl, const char *name);
 
 /* ff_msl.c: the MSL for a key pair; malloc'd, NUL-terminated. */
 char *ff_msl(const struct ff_vkey *vk, const struct ff_pkey *pk);
+/* The fixed pixel pipeline alone (fragment "fff"), after a vertex shader writing ntc texture coordinates. */
+char *ff_msl_fragment(const struct ff_pkey *pk, unsigned ntc);
+/* What every vertex function writes and every fragment function reads: the uniform structs, then
+ * struct VOut { pos, c0, c1, tc0..tc(ntc-1), fog, fogz, [psize], [clip[nclip]] }. malloc'd. */
+char *ff_msl_vout(unsigned ntc, int flat, int points, unsigned nclip);
 
 #endif

@@ -1,6 +1,6 @@
 /*
  * d3d_register.c - the graphics layers' imports and method implementations
- * (plan 4; plan 5 adds the shader assembler), registered before win32hle's tables (register.c).
+ * (plan 4; plan 5 adds shaders and the shader assembler), registered before win32hle's tables (register.c).
  */
 #include "bw2.h"
 
@@ -13,6 +13,7 @@ void d3d9_texture_register(void);
 void d3d9_buffer_register(void);
 void d3d9_copy_register(void);
 void d3d9_draw_register(void);
+void d3d9_shader_register(void);
 void d3d9_stateblock_register(void);
 void d3d9_query_register(void);
 void d3dx_math_register(void);
@@ -29,6 +30,7 @@ void bw2_d3d_register(void) {
     d3d9_buffer_register();
     d3d9_copy_register();
     d3d9_draw_register();
+    d3d9_shader_register();
     d3d9_stateblock_register();
     d3d9_query_register();
     d3dx_math_register();

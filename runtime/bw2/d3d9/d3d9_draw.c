@@ -1,8 +1,9 @@
 /*
  * d3d9_draw.c - vertex declarations, FVFs and the draw calls (plan 4 Task 6),
  * and the state the fixed-function pipeline reads that is not a render state:
- * transforms, lights, the material, clip planes. Programmable shaders are
- * plan 5's: their constants are kept here, creating one exits 4.
+ * transforms, lights, the material, clip planes. Programmable shaders
+ * (plan 5): creating, setting and getting them and their constants are here,
+ * the objects in d3d9_shader.c. Pixel shaders are Task 4's: creating one exits 4.
  */
 #include <stdlib.h>
 #include <string.h>
@@ -177,7 +178,7 @@ static uint32_t draw(struct d3d_device *d, uint32_t type, uint32_t prims, uint32
     if (!prims) return D3D_OK;
     uint32_t nv = prim_vertices(type, prims);
     if (!nv) return D3DERR_INVALIDCALL;
-    if (d->st.vs || d->st.ps) d3d_fail("draw with a programmable shader (plan 5)");
+    if (d->st.ps) d3d_fail("draw with a pixel shader (plan 5 Task 4)");
     if (!d->st.vdecl) return D3DERR_INVALIDCALL;
     struct d3d_vdecl *v = vdecl(d->st.vdecl);
     struct ff_draw dr;
@@ -185,9 +186,15 @@ static uint32_t draw(struct d3d_device *d, uint32_t type, uint32_t prims, uint32
     struct ff_pkey pk;
     struct ff_vs_u vu;
     struct ff_ps_u pu;
+    struct ff_prog vsp;
+    struct d3d_vs_consts vsc;
     memset(&dr, 0, sizeof dr);
     d3d_apply_targets(d);
-    ff_build(d, (const uint8_t (*)[8])v->el, v->n, type, &dr, &vk, &pk, &vu, &pu);
+    ff_build(d, (const uint8_t (*)[8])v->el, v->n, type, d->st.vs != 0, &dr, &vk, &pk, &vu, &pu);
+    if (d->st.vs) {
+        d3d_vs_build(d, d->st.vs, (const uint8_t (*)[8])v->el, v->n, type, &dr, &vu, &vsp, &vsc);
+        dr.vs = &vsp;
+    }
     for (uint32_t i = 0; i < dr.nattr; i++) {
         uint32_t s = dr.attr[i].stream;
         if (dr.stream_buf[s]) continue;
@@ -379,13 +386,18 @@ static void dv_GetClipPlane(void) {
     RET(D3D_OK, 3);
 }
 
-/* ---- programmable shaders: plan 5 ---- */
-static void dv_CreateVertexShader(void) { d3d_later("IDirect3DDevice9::CreateVertexShader"); }
+/* ---- programmable shaders (plan 5) ---- */
+static void dv_CreateVertexShader(void) {  /* (this, const DWORD* function, IDirect3DVertexShader9**) */
+    (void)d3d_dev(A32(0));
+    uint32_t out = 0, hr = d3d_vs_create(A32(0), A32(1) ? APTR(1) : NULL, A32(2) ? &out : NULL);
+    if (!hr) MEM32(A32(2)) = out;
+    RET(hr, 3);
+}
 static void dv_CreatePixelShader(void) { d3d_later("IDirect3DDevice9::CreatePixelShader"); }
-static void dv_SetVertexShader(void) {
+static void dv_SetVertexShader(void) {     /* (this, shader or NULL: the fixed vertex pipeline) */
     struct d3d_device *d = d3d_dev(A32(0));
-    if (A32(1)) d3d_fail("SetVertexShader of a shader this plan cannot have made");
-    d3d_bind(&d3d_ws(d, SBW_VS, 0, 0)->vs, 0);
+    if (A32(1)) (void)d3d_host(A32(1), D3DK_VSHADER);
+    d3d_bind(&d3d_ws(d, SBW_VS, 0, 0)->vs, A32(1));
     RET(D3D_OK, 2);
 }
 static void dv_SetPixelShader(void) {
@@ -394,16 +406,18 @@ static void dv_SetPixelShader(void) {
     d3d_bind(&d3d_ws(d, SBW_PS, 0, 0)->ps, 0);
     RET(D3D_OK, 2);
 }
-static void dv_GetVertexShader(void) {
+static void dv_GetVertexShader(void) {     /* AddRef'd, as every D3D9 Get of an object */
     struct d3d_device *d = d3d_dev(A32(0));
     if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
     MEM32(A32(1)) = d->st.vs;
+    if (d->st.vs) d3d_addref(d->st.vs);
     RET(D3D_OK, 2);
 }
 static void dv_GetPixelShader(void) {
     struct d3d_device *d = d3d_dev(A32(0));
     if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
     MEM32(A32(1)) = d->st.ps;
+    if (d->st.ps) d3d_addref(d->st.ps);
     RET(D3D_OK, 2);
 }
 /* Constants: (this, start register, data, count); F in vec4s, I in int4s, B in BOOLs. */

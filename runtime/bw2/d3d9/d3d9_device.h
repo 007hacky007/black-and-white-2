@@ -195,11 +195,20 @@ struct d3d_buffer *d3d_buf(uint32_t obj);              /* a vertex or index buff
 void *d3d_buffer_for_draw(uint32_t obj, uint32_t *offset);             /* id<MTLBuffer>; marks it in use */
 void d3d9_buffer_register(void);
 
-/* d3d9_draw.c, ff_key.c */
-struct ff_draw; struct ff_vkey; struct ff_pkey; struct ff_vs_u; struct ff_ps_u;
-void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint32_t prim, struct ff_draw *dr,
-              struct ff_vkey *vk, struct ff_pkey *pk, struct ff_vs_u *vu, struct ff_ps_u *pu);
+/* d3d9_draw.c, ff_key.c. with_vs: a vertex shader replaces the fixed vertex stage (its inputs and
+ * uniforms are d3d_vs_build's). */
+struct ff_draw; struct ff_vkey; struct ff_pkey; struct ff_vs_u; struct ff_ps_u; struct ff_prog;
+void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint32_t prim, int with_vs,
+              struct ff_draw *dr, struct ff_vkey *vk, struct ff_pkey *pk, struct ff_vs_u *vu, struct ff_ps_u *pu);
 void d3d9_draw_register(void);
+
+/* d3d9_shader.c (plan 5): the shader objects, and a vertex shader's part of a draw: its inputs from the
+ * declaration (into dr->attr, slot = input register), its variant and library, its constants (into
+ * consts, which must live until the draw is recorded) and its uniforms. */
+struct d3d_vs_consts { float f[256][4]; int32_t i[16][4]; uint32_t b[16]; };
+uint32_t d3d_vs_create(uint32_t device, const uint32_t *tokens, uint32_t *out);   /* D3D_OK or an error */
+void d3d_vs_build(struct d3d_device *d, uint32_t vs, const uint8_t (*el)[8], uint32_t nel, uint32_t prim,
+                  struct ff_draw *dr, struct ff_vs_u *vu, struct ff_prog *p, struct d3d_vs_consts *consts);
 
 /* d3d9_copy.c */
 void d3d9_copy_register(void);

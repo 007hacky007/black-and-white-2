@@ -1,6 +1,7 @@
 /*
- * mtl_pipeline.m - fixed-function draws on Metal (plan 4 Task 6): libraries
- * compiled from ff_msl.c's source and cached by it, render pipelines cached by
+ * mtl_pipeline.m - draws on Metal (plan 4 Task 6, plan 5): libraries
+ * compiled from ff_msl.c's source and cached by it, translated shaders'
+ * libraries compiled on a background queue, render pipelines cached by
  * their whole key and kept in a binary archive on disk, depth-stencil and
  * sampler states cached by value, and the draw itself.
  */
@@ -29,6 +30,57 @@ void mtl_get_stats(struct mtl_stats *s) { *s = g_stats; }
 void mtl_archive_require_hits(int on) { g_require_hits = on; }
 
 static id<MTLDevice> dev0(void) { return MTLCreateSystemDefaultDevice(); }
+
+/* ---- translated shaders: one library per distinct source, compiled in the background ---- */
+@interface MtlAsyncLib : NSObject
+@property(strong) id<MTLLibrary> lib;
+@property(strong) NSError *err;
+@property(strong) NSString *src, *name;
+@property(strong) dispatch_group_t done;
+@end
+@implementation MtlAsyncLib
+@end
+static NSMutableDictionary<NSString *, MtlAsyncLib *> *g_async;
+
+/* D3D9's results need IEEE infinities (rcp(0), log(0)): no fast math, which may assume there are none */
+static MTLCompileOptions *sm_options(void) {
+    MTLCompileOptions *o = [MTLCompileOptions new];
+    if (@available(macOS 15.0, *)) o.mathMode = MTLMathModeRelaxed;
+    else o.fastMathEnabled = NO;
+    return o;
+}
+
+mtl_obj mtl_library_async(const char *msl, const char *name) {
+    if (!g_async) g_async = [NSMutableDictionary dictionary];
+    NSString *s = [NSString stringWithUTF8String:msl];
+    MtlAsyncLib *l = g_async[s];
+    if (!l) {
+        l = [MtlAsyncLib new];
+        l.src = s, l.name = [NSString stringWithUTF8String:name];
+        l.done = dispatch_group_create();
+        dispatch_group_enter(l.done);
+        g_stats.libraries++;
+        MtlAsyncLib *w = l;
+        [dev0() newLibraryWithSource:s options:sm_options()
+                   completionHandler:^(id<MTLLibrary> lib, NSError *err) {
+                       w.lib = lib, w.err = err;
+                       dispatch_group_leave(w.done);
+                   }];
+        g_async[s] = l;
+    }
+    return (__bridge_retained void *)l;
+}
+
+static id<MTLLibrary> library_wait(mtl_obj h) {
+    MtlAsyncLib *l = (__bridge MtlAsyncLib *)h;
+    dispatch_group_wait(l.done, DISPATCH_TIME_FOREVER);
+    if (!l.lib) {
+        fprintf(stderr, "[bw2] FATAL: d3d9: %s does not compile: %s\n%s\n", l.name.UTF8String,
+                l.err.description.UTF8String, l.src.UTF8String);
+        abort();
+    }
+    return l.lib;
+}
 
 void mtl_archive_save(void) {
     if (!g_archive || !g_archive_dir || !g_archive_dirty) return;
@@ -75,9 +127,9 @@ void mtl_archive_open(const char *dir) {
     g_archive_dirty = 0;
 }
 
-static id<MTLLibrary> library(id<MTLDevice> dev, const struct ff_vkey *vk, const struct ff_pkey *pk) {
+/* A fixed-function library from its source (src is freed). */
+static id<MTLLibrary> library(id<MTLDevice> dev, char *src) {
     if (!g_libs) g_libs = [NSMutableDictionary dictionary];
-    char *src = ff_msl(vk, pk);
     NSString *s = [NSString stringWithUTF8String:src];
     free(src);
     id<MTLLibrary> lib = g_libs[s];
@@ -185,12 +237,18 @@ static id<MTLRenderPipelineState> pipeline(MtlCtx *c, const struct ff_draw *d) {
     if (!g_psos) g_psos = [NSMutableDictionary dictionary];
     struct {
         struct ff_vkey vk; struct ff_pkey pk;
+        uint64_t vs_hash, ps_hash;
+        uint8_t vs_var[32], ps_var[32];
         uint32_t nattr; struct ff_attr attr[VA_COUNT]; uint32_t stride[16];
         uint32_t blend, src, dst, op, srca, dsta, opa, wmask[4];
         uint64_t fmt[5];
+        uint32_t points;
     } key;
     memset(&key, 0, sizeof key);
-    key.vk = *d->vk, key.pk = *d->pk, key.nattr = d->nattr;
+    if (!d->vs) key.vk = *d->vk;          /* with a shader, the stage's key is the shader and its variant */
+    else key.vs_hash = d->vs->hash, memcpy(key.vs_var, d->vs->variant, sizeof key.vs_var);
+    key.pk = *d->pk, key.nattr = d->nattr;
+    key.points = d->prim == 1;
     memcpy(key.attr, d->attr, sizeof d->attr[0] * d->nattr);
     for (uint32_t i = 0; i < d->nattr; i++) key.stride[d->attr[i].stream] = d->stream_stride[d->attr[i].stream];
     key.blend = d->fx.blend, key.src = d->fx.src, key.dst = d->fx.dst, key.op = d->fx.op;
@@ -205,10 +263,15 @@ static id<MTLRenderPipelineState> pipeline(MtlCtx *c, const struct ff_draw *d) {
     id<MTLRenderPipelineState> p = g_psos[k];
     if (p) return p;
 
-    id<MTLLibrary> lib = library(c.dev, d->vk, d->pk);
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-    pd.vertexFunction = [lib newFunctionWithName:@"ffv"];
-    pd.fragmentFunction = [lib newFunctionWithName:@"fff"];
+    if (d->vs) {                                        /* the stages from separate libraries */
+        pd.vertexFunction = [library_wait(d->vs->lib) newFunctionWithName:@"vsh"];
+        pd.fragmentFunction = [library(c.dev, ff_msl_fragment(d->pk, 8)) newFunctionWithName:@"fff"];
+    } else {
+        id<MTLLibrary> lib = library(c.dev, ff_msl(d->vk, d->pk));
+        pd.vertexFunction = [lib newFunctionWithName:@"ffv"];
+        pd.fragmentFunction = [lib newFunctionWithName:@"fff"];
+    }
     MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
     for (uint32_t i = 0; i < d->nattr; i++) {
         const struct ff_attr *a = &d->attr[i];
@@ -234,7 +297,7 @@ static id<MTLRenderPipelineState> pipeline(MtlCtx *c, const struct ff_draw *d) {
             ca.alphaBlendOperation = bop(key.opa);
         }
     }
-    if (key.vk.points) pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
+    if (key.points) pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
     NSError *err = nil;
     if (g_archive) {
         NSMutableArray *all = [NSMutableArray arrayWithArray:g_loaded];
@@ -249,7 +312,8 @@ static id<MTLRenderPipelineState> pipeline(MtlCtx *c, const struct ff_draw *d) {
     }
     if (!p) p = [c.dev newRenderPipelineStateWithDescriptor:pd error:&err];
     if (!p) {
-        fprintf(stderr, "[bw2] FATAL: d3d9: fixed-function pipeline: %s\n", err.description.UTF8String);
+        fprintf(stderr, "[bw2] FATAL: d3d9: %s pipeline: %s\n", d->vs ? "vertex shader" : "fixed-function",
+                err.description.UTF8String);
         abort();
     }
     if (g_archive && !g_require_hits) {
@@ -367,6 +431,10 @@ void mtl_draw(struct mtl_ctx *cc, const struct ff_draw *d) {
     [e setScissorRect:(MTLScissorRect){ sx, sy, sw, sh }];
     [e setVertexBytes:d->vu length:sizeof *d->vu atIndex:0];
     [e setFragmentBytes:d->pu length:sizeof *d->pu atIndex:0];
+    if (d->vs) {
+        [e setVertexBytes:d->vs->f length:d->vs->fsize atIndex:1];
+        [e setVertexBytes:d->vs->ib length:d->vs->ibsize atIndex:2];
+    }
     for (int i = 0; i < 16; i++)
         if (d->stream_buf[i])
             [e setVertexBuffer:(__bridge id<MTLBuffer>)d->stream_buf[i] offset:d->stream_off[i]
@@ -386,5 +454,6 @@ void mtl_draw(struct mtl_ctx *cc, const struct ff_draw *d) {
 
 void mtl_pipeline_cache_drop(void) {
     [g_libs removeAllObjects];
+    [g_async removeAllObjects];
     [g_psos removeAllObjects];
 }

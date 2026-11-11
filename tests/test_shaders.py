@@ -1,4 +1,5 @@
-"""Plan 5 Task 2: the D3DX shader assembler and the bytecode decoder (runtime/bw2/d3d9/sm_selftest.c).
+"""Plan 5 Tasks 2-3: the D3DX shader assembler, the bytecode decoder and vertex shaders on Metal
+(runtime/bw2/d3d9/sm_selftest.c).
 
 Every shader here is written by the test. The expected tokens follow the D3D9 token format
 (version, instruction, destination and source parameter tokens). The game's own assembly files
@@ -183,3 +184,17 @@ def test_decode_game_effect_shaders(selftest, tmp_path):
         (d / f"{h}.bin").write_bytes(b)
     r = check(selftest, "decode_files", tmp_path, d)
     assert r.stdout.count("roundtrip ok") == len(blobs), r.stdout[-4000:]
+
+
+# ---- Task 3: vertex shaders on Metal (pixel tests on a headless 64x64 device) ----
+
+@pytest.mark.parametrize("group", ["vs_basic", "vs_ops", "vs_reladdr", "vs_flow", "vs_inputs", "vs_halfpixel",
+                                   "vs_clip", "caps_sm2", "shader_objects", "vs_cache"])
+def test_vertex_shaders(selftest, tmp_path, group):
+    check(selftest, group, tmp_path)
+
+
+def test_vs30_is_loud(selftest, tmp_path):
+    r = run_group(selftest, "vs_loud", tmp_path)
+    assert r.returncode != 0 and "vs_loud: returned" not in r.stdout, r.stdout[-2000:]
+    assert "FATAL: d3d9: IDirect3DDevice9::CreateVertexShader: vs_3_0" in r.stderr, r.stderr[-2000:]

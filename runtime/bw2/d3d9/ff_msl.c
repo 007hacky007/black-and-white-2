@@ -40,19 +40,32 @@ enum { DISABLE = 1, SELECTARG1, SELECTARG2, MODULATE, MODULATE2X, MODULATE4X, AD
        PREMODULATE, MODULATEALPHA_ADDCOLOR, MODULATECOLOR_ADDALPHA, MODULATEINVALPHA_ADDCOLOR,
        MODULATEINVCOLOR_ADDALPHA, BUMPENVMAP, BUMPENVMAPLUMINANCE, DOTPRODUCT3, MULTIPLYADD, LERP };
 
+/* The one VOut emitter: the fixed-function stages and the translated shaders agree through it. */
+static void vout(struct sb *b, unsigned ntc, int flat, int points, unsigned nclip) {
+    put(b, "struct VOut {\n  float4 pos [[position]];\n");
+    put(b, "  float4 c0%s;\n  float4 c1%s;\n", flat ? " [[flat]]" : "", flat ? " [[flat]]" : "");
+    for (unsigned i = 0; i < ntc; i++) put(b, "  float4 tc%u;\n", i);
+    put(b, "  float fog;\n  float fogz;\n");
+    if (points) put(b, "  float psize [[point_size]];\n");
+    if (nclip) put(b, "  float clip [[clip_distance]] [%u];\n", nclip);
+    put(b, "};\n");
+}
+
+char *ff_msl_vout(unsigned ntc, int flat, int points, unsigned nclip) {
+    struct sb b = { 0 };
+    put(&b, "%s", HEADER);
+    vout(&b, ntc, flat, points, nclip);
+    return b.s;
+}
+
 static void vertex(struct sb *b, const struct ff_vkey *k) {
     put(b, "struct VIn {\n  float4 pos [[attribute(%d)]];\n", VA_POSITION);
     if (k->has_normal) put(b, "  float4 normal [[attribute(%d)]];\n", VA_NORMAL);
     if (k->has_diffuse) put(b, "  float4 c0 [[attribute(%d)]];\n", VA_COLOR0);
     if (k->has_specular) put(b, "  float4 c1 [[attribute(%d)]];\n", VA_COLOR1);
     for (int i = 0; i < 8; i++) if (k->tex_comps[i]) put(b, "  float4 t%d [[attribute(%d)]];\n", i, VA_TEX0 + i);
-    put(b, "};\nstruct VOut {\n  float4 pos [[position]];\n");
-    put(b, "  float4 c0%s;\n  float4 c1%s;\n", k->flat ? " [[flat]]" : "", k->flat ? " [[flat]]" : "");
-    for (int i = 0; i < k->nstages; i++) put(b, "  float4 tc%d;\n", i);
-    put(b, "  float fog;\n  float fogz;\n");
-    if (k->points) put(b, "  float psize [[point_size]];\n");
-    if (k->nclip) put(b, "  float clip [[clip_distance]] [%d];\n", k->nclip);
     put(b, "};\n");
+    vout(b, k->nstages, k->flat, k->points, k->nclip);
     put(b, "vertex VOut ffv(VIn in [[stage_in]], constant VU &u [[buffer(0)]]) {\n  VOut o;\n");
     put(b, "  float4 vc0 = %s, vc1 = %s;\n", k->has_diffuse ? "in.c0" : "float4(1.0)",
         k->has_specular ? "in.c1" : "float4(0.0)");
@@ -205,7 +218,7 @@ static const char *cmp_op(int f) {
     }
 }
 
-static void pixel(struct sb *b, const struct ff_pkey *k, const struct ff_vkey *vk) {
+static void pixel(struct sb *b, const struct ff_pkey *k, unsigned ntc) {
     static const char *types[] = { NULL, "texture2d<float>", "texturecube<float>", "texture3d<float>" };
     put(b, "fragment float4 fff(VOut in [[stage_in]], constant PU &u [[buffer(0)]]");
     for (int i = 0; i < k->nstages; i++)
@@ -215,7 +228,7 @@ static void pixel(struct sb *b, const struct ff_pkey *k, const struct ff_vkey *v
         int prev = i ? k->colorop[i - 1] : 0;
         if (k->textype[i]) {
             int n = k->tcount[i] ? k->tcount[i] : (k->textype[i] == 1 ? 2 : 3);
-            put(b, "  float4 c%d = in.tc%d;\n", i, i < vk->nstages ? i : 0);
+            put(b, "  float4 c%d = in.tc%d;\n", i, (unsigned)i < ntc ? i : 0);
             if (k->projected[i]) put(b, "  c%d /= c%d[%d];\n", i, i, n - 1);
             if (k->textype[i] == 1) {
                 put(b, "  float2 uv%d = c%d.xy;\n", i, i);
@@ -263,6 +276,14 @@ char *ff_msl(const struct ff_vkey *vk, const struct ff_pkey *pk) {
     struct sb b = { 0 };
     put(&b, "%s", HEADER);
     vertex(&b, vk);
-    pixel(&b, pk, vk);
+    pixel(&b, pk, vk->nstages);
+    return b.s;
+}
+
+char *ff_msl_fragment(const struct ff_pkey *pk, unsigned ntc) {
+    struct sb b = { 0 };
+    put(&b, "%s", HEADER);
+    vout(&b, ntc, pk->flat, 0, 0);
+    pixel(&b, pk, ntc);
     return b.s;
 }
