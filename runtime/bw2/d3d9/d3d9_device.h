@@ -91,6 +91,7 @@ struct d3d_texture {
     uint32_t fmt, usage, pool, w, h, d, levels, faces;
     const struct d3d_format *f;
     mtl_obj tex, view;                   /* the Metal texture and its sampling view (NULL in system memory) */
+    mtl_obj srgb_view;                   /* made when SRGBTEXTURE first samples it */
     uint32_t mtl_levels;                 /* AUTOGENMIPMAP: the full chain, of which the guest sees 1 */
     int autogen;
     uint32_t *mem;                       /* per subresource (face * levels + level): guest staging, or 0 */
@@ -160,12 +161,19 @@ uint32_t d3d_tex_level_h(const struct d3d_texture *t, uint32_t level);
 uint32_t d3d_tex_level_d(const struct d3d_texture *t, uint32_t level);
 uint32_t d3d_tex_mem(struct d3d_texture *t, uint32_t sub);              /* the staging copy, made on first use */
 void d3d_tex_upload(struct d3d_texture *t, uint32_t sub, const struct d3d_box *b);
+mtl_obj d3d_tex_srgb_view(struct d3d_texture *t);
 void d3d9_texture_register(void);
 
 /* d3d9_buffer.c */
 struct d3d_buffer *d3d_buf(uint32_t obj);              /* a vertex or index buffer */
 void *d3d_buffer_for_draw(uint32_t obj, uint32_t *offset);             /* id<MTLBuffer>; marks it in use */
 void d3d9_buffer_register(void);
+
+/* d3d9_draw.c, ff_key.c */
+struct ff_draw; struct ff_vkey; struct ff_pkey; struct ff_vs_u; struct ff_ps_u;
+void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint32_t prim, struct ff_draw *dr,
+              struct ff_vkey *vk, struct ff_pkey *pk, struct ff_vs_u *vu, struct ff_ps_u *pu);
+void d3d9_draw_register(void);
 
 /* d3d9_copy.c */
 void d3d9_copy_register(void);

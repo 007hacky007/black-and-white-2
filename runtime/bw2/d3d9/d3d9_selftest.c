@@ -851,7 +851,354 @@ static void group_formats_check(void) {
         }
 }
 
+/* ---- Task 6: draws and the fixed-function pipeline ---- */
+
+#define FVF_XYZ 0x002u
+#define FVF_XYZRHW 0x004u
+#define FVF_NORMAL 0x010u
+#define FVF_DIFFUSE 0x040u
+#define FVF_SPECULAR 0x080u
+#define FVF_TEX1 0x100u
+#define PT_POINTLIST 1u
+#define PT_LINELIST 2u
+#define PT_LINESTRIP 3u
+#define PT_TRIANGLELIST 4u
+#define PT_TRIANGLESTRIP 5u
+#define PT_TRIANGLEFAN 6u
+#define RS_ZENABLE 7u
+#define RS_ZWRITEENABLE 14u
+#define RS_ALPHATESTENABLE 15u
+#define RS_SRCBLEND 19u
+#define RS_DESTBLEND 20u
+#define RS_CULLMODE 22u
+#define RS_ZFUNC 23u
+#define RS_ALPHAREF 24u
+#define RS_ALPHAFUNC 25u
+#define RS_ALPHABLENDENABLE 27u
+#define RS_FOGENABLE 28u
+#define RS_SPECULARENABLE 29u
+#define RS_FOGCOLOR 34u
+#define RS_FOGTABLEMODE 35u
+#define RS_FOGSTART 36u
+#define RS_FOGEND 37u
+#define RS_STENCILENABLE 52u
+#define RS_STENCILPASS 55u
+#define RS_STENCILFUNC 56u
+#define RS_STENCILREF 57u
+#define RS_TEXTUREFACTOR 60u
+#define RS_LIGHTING 137u
+#define RS_AMBIENT 139u
+#define RS_BLENDOP 171u
+#define TSS_COLOROP 1u
+#define TSS_COLORARG1 2u
+#define TSS_COLORARG2 3u
+#define TSS_ALPHAOP 4u
+#define TSS_ALPHAARG1 5u
+#define TSS_ALPHAARG2 6u
+#define SS_ADDRESSU 1u
+#define SS_ADDRESSV 2u
+#define SS_MAGFILTER 5u
+#define SS_MINFILTER 6u
+#define SS_MIPFILTER 7u
+#define SS_MAXMIPLEVEL 9u
+#define SS_MAXANISOTROPY 10u
+
+/* pretransformed, coloured: x, y, z, rhw, diffuse */
+struct tlv { float x, y, z, rhw; uint32_t c; };
+/* pretransformed, coloured, textured */
+struct tlvt { float x, y, z, rhw; uint32_t c; float u, v; };
+
+static uint32_t up(const void *v, uint32_t bytes) { uint32_t p = gmem(bytes); memcpy(hle_ptr(p), v, bytes); return p; }
+static void draw_up(uint32_t dev, uint32_t type, uint32_t prims, const void *v, uint32_t nverts, uint32_t stride) {
+    CHECKEQ(vcall(dev, DV_DrawPrimitiveUP, 4, type, prims, up(v, nverts * stride), stride), D3D_OK);
+}
+static void quad_tlv(uint32_t dev, float x0, float y0, float x1, float y1, float z, uint32_t c) {
+    struct tlv q[4] = { { x0, y0, z, 1, c }, { x1, y0, z, 1, c }, { x0, y1, z, 1, c }, { x1, y1, z, 1, c } };
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZRHW | FVF_DIFFUSE), D3D_OK);
+    draw_up(dev, PT_TRIANGLESTRIP, 2, q, 4, sizeof q[0]);
+}
+static uint32_t count_color(const uint32_t *px, uint32_t n, uint32_t c) {
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++) k += px[i] == c;
+    return k;
+}
+static void clear(uint32_t dev, uint32_t c) {
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET | CLEAR_ZBUFFER | CLEAR_STENCIL, c, f32(1.0f), 0u), D3D_OK);
+}
+static void rs(uint32_t dev, uint32_t s, uint32_t v) { CHECKEQ(vcall(dev, DV_SetRenderState, 2, s, v), D3D_OK); }
+static void tss(uint32_t dev, uint32_t st, uint32_t s, uint32_t v) { CHECKEQ(vcall(dev, DV_SetTextureStageState, 3, st, s, v), D3D_OK); }
+static void sst(uint32_t dev, uint32_t smp, uint32_t s, uint32_t v) { CHECKEQ(vcall(dev, DV_SetSamplerState, 3, smp, s, v), D3D_OK); }
+static uint32_t *frame(uint32_t dev, uint32_t w, uint32_t h) {
+    static uint32_t buf[256 * 256];
+    read_rt(dev, back_buffer(dev), w, h, buf);
+    return buf;
+}
+
+static void group_tri_colour(void) {
+    uint32_t dev = new_device(64, 64);
+    clear(dev, 0xFF000000u);
+    struct tlv t[3] = { { 0, 0, 0.5f, 1, 0xFFFF0000u }, { 64, 0, 0.5f, 1, 0xFF00FF00u }, { 0, 64, 0.5f, 1, 0xFF0000FFu } };
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZRHW | FVF_DIFFUSE), D3D_OK);
+    draw_up(dev, PT_TRIANGLELIST, 1, t, 3, sizeof t[0]);
+    uint32_t *px = frame(dev, 64, 64);
+    /* pixel (10, 50): the centre is (10, 50) in D3D9; weights 4/64 red, 10/64 green, 50/64 blue */
+    uint32_t want = 0xFF000000u | (uint32_t)(255 * 4 / 64.0 + 0.5) << 16 | (uint32_t)(255 * 10 / 64.0 + 0.5) << 8 |
+                    (uint32_t)(255 * 50 / 64.0 + 0.5);
+    if (!near_color(px[50 * 64 + 10], want, 2)) printf("FAIL pixel (10,50) 0x%08X want 0x%08X\n", px[50 * 64 + 10], want), fails++;
+    CHECKEQ(px[63 * 64 + 63], 0xFF000000u);
+    /* a quad from (0,0) to (32,32) covers exactly 32x32 pixels (top-left rule) */
+    clear(dev, 0xFF000000u);
+    quad_tlv(dev, 0, 0, 32, 32, 0.5f, 0xFFFFFFFFu);
+    px = frame(dev, 64, 64);
+    CHECKEQ(count_color(px, 64 * 64, 0xFFFFFFFFu), 32 * 32);
+    CHECKEQ(px[31 * 64 + 31], 0xFFFFFFFFu);
+    CHECKEQ(px[32 * 64 + 31], 0xFF000000u);
+}
+
+static uint32_t texture_argb(uint32_t dev, uint32_t w, uint32_t h, const uint32_t *texels) {
+    uint32_t t = texture(dev, w, h, 1, FMT_A8R8G8B8), lr = gmem(8);
+    CHECKEQ(vcall(t, TX_LockRect, 4, 0u, lr, 0u, 0u), D3D_OK);
+    for (uint32_t y = 0; y < h; y++) memcpy((uint8_t *)hle_ptr(MEM32(lr + 4)) + y * MEM32(lr), texels + y * w, w * 4);
+    CHECKEQ(vcall(t, TX_UnlockRect, 1, 0u), D3D_OK);
+    return t;
+}
+static void quad_tex(uint32_t dev, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint32_t c) {
+    struct tlvt q[4] = { { x0, y0, 0.5f, 1, c, u0, v0 }, { x1, y0, 0.5f, 1, c, u1, v0 },
+                         { x0, y1, 0.5f, 1, c, u0, v1 }, { x1, y1, 0.5f, 1, c, u1, v1 } };
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZRHW | FVF_DIFFUSE | FVF_TEX1), D3D_OK);
+    draw_up(dev, PT_TRIANGLESTRIP, 2, q, 4, sizeof q[0]);
+}
+
+static void group_half_pixel(void) {
+    uint32_t dev = new_device(4, 4), tx[16];
+    for (int i = 0; i < 16; i++) tx[i] = 0xFF000000u | (uint32_t)(i * 16) << 16 | (uint32_t)(255 - i * 16) << 8 | (uint32_t)(i * 5);
+    uint32_t t = texture_argb(dev, 4, 4, tx);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, t), D3D_OK);
+    sst(dev, 0, SS_MAGFILTER, 2), sst(dev, 0, SS_MINFILTER, 2);   /* linear: an offset would mix texels */
+    clear(dev, 0xFF000000u);
+    /* the D3D9 1:1 mapping: a quad from (-0.5, -0.5) puts texel centres on pixel centres */
+    quad_tex(dev, -0.5f, -0.5f, 3.5f, 3.5f, 0, 0, 1, 1, 0xFFFFFFFFu);
+    uint32_t *px = frame(dev, 4, 4);
+    for (int i = 0; i < 16; i++)
+        if (!near_color(px[i], tx[i], 1)) printf("FAIL pixel %d 0x%08X want 0x%08X\n", i, px[i], tx[i]), fails++;
+}
+
+static void mat_identity(float *m) { memset(m, 0, 64); m[0] = m[5] = m[10] = m[15] = 1; }
+static void set_xform(uint32_t dev, uint32_t which, const float *m) {
+    uint32_t p = gmem(64);
+    memcpy(hle_ptr(p), m, 64);
+    CHECKEQ(vcall(dev, DV_SetTransform, 2, which, p), D3D_OK);
+}
+/* D3DXMatrixPerspectiveFovLH */
+static void mat_persp(float *m, float fovy, float aspect, float zn, float zf) {
+    memset(m, 0, 64);
+    float ys = 1.0f / tanf(fovy / 2), xs = ys / aspect, q = zf / (zf - zn);
+    m[0] = xs, m[5] = ys, m[10] = q, m[11] = 1, m[14] = -zn * q;
+}
+struct xyzc { float x, y, z; uint32_t c; };
+
+static void group_transforms(void) {
+    uint32_t dev = new_device(64, 64);
+    float w[16], v[16], p[16];
+    mat_identity(w), mat_identity(v);
+    mat_persp(p, 3.14159265f / 2, 1, 1, 10);
+    set_xform(dev, 256, w), set_xform(dev, 2, v), set_xform(dev, 3, p);
+    rs(dev, RS_LIGHTING, 0);
+    /* a 2x2 square at z = 5: NDC +-0.2, screen 25.6 to 38.4; D3D9 pixel centres 26..38 inside */
+    struct xyzc q[4] = { { -1, 1, 5, 0xFFFFFFFFu }, { 1, 1, 5, 0xFFFFFFFFu }, { -1, -1, 5, 0xFFFFFFFFu }, { 1, -1, 5, 0xFFFFFFFFu } };
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZ | FVF_DIFFUSE), D3D_OK);
+    clear(dev, 0xFF000000u);
+    draw_up(dev, PT_TRIANGLESTRIP, 2, q, 4, sizeof q[0]);
+    uint32_t *px = frame(dev, 64, 64);
+    CHECKEQ(count_color(px, 64 * 64, 0xFFFFFFFFu), 13 * 13);
+    CHECKEQ(px[26 * 64 + 26], 0xFFFFFFFFu);
+    CHECKEQ(px[38 * 64 + 38], 0xFFFFFFFFu);
+    CHECKEQ(px[25 * 64 + 26], 0xFF000000u);
+    /* world moves it right by one unit: 6.4 pixels; the view is applied after the world */
+    w[12] = 1.0f;
+    set_xform(dev, 256, w);
+    v[13] = 1.0f;                                           /* the view moves everything up one unit */
+    set_xform(dev, 2, v);
+    clear(dev, 0xFF000000u);
+    draw_up(dev, PT_TRIANGLESTRIP, 2, q, 4, sizeof q[0]);
+    px = frame(dev, 64, 64);
+    int minx = 64, maxx = -1, miny = 64, maxy = -1;
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++)
+            if (px[y * 64 + x] == 0xFFFFFFFFu) {
+                if (x < minx) minx = x;
+                if (x > maxx) maxx = x;
+                if (y < miny) miny = y;
+                if (y > maxy) maxy = y;
+            }
+    /* x 32.0 to 44.8: the left edge is in (top-left rule), centres 32..44; y 19.2 to 32.0: centres 20..31 */
+    if (!(minx == 32 && maxx == 44 && miny == 20 && maxy == 31))
+        printf("FAIL moved square at x %d..%d y %d..%d, want 32..44 20..31\n", minx, maxx, miny, maxy), fails++;
+    /* culling: D3D's default culls counter-clockwise triangles (as seen on screen) */
+    mat_identity(w), mat_identity(v);
+    set_xform(dev, 256, w), set_xform(dev, 2, v);
+    clear(dev, 0xFF000000u);
+    struct tlv cw[3] = { { 0, 0, 0.5f, 1, 0xFFFFFFFFu }, { 16, 0, 0.5f, 1, 0xFFFFFFFFu }, { 0, 16, 0.5f, 1, 0xFFFFFFFFu } };
+    struct tlv ccw[3] = { { 32, 32, 0.5f, 1, 0xFFFFFFFFu }, { 32, 48, 0.5f, 1, 0xFFFFFFFFu }, { 48, 32, 0.5f, 1, 0xFFFFFFFFu } };
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZRHW | FVF_DIFFUSE), D3D_OK);
+    draw_up(dev, PT_TRIANGLELIST, 1, cw, 3, sizeof cw[0]);
+    draw_up(dev, PT_TRIANGLELIST, 1, ccw, 3, sizeof ccw[0]);
+    px = frame(dev, 64, 64);
+    CHECKEQ(px[2 * 64 + 2], 0xFFFFFFFFu);
+    CHECKEQ(px[34 * 64 + 34], 0xFF000000u);
+    rs(dev, RS_CULLMODE, 2);                                 /* CULL_CW */
+    clear(dev, 0xFF000000u);
+    draw_up(dev, PT_TRIANGLELIST, 1, cw, 3, sizeof cw[0]);
+    draw_up(dev, PT_TRIANGLELIST, 1, ccw, 3, sizeof ccw[0]);
+    px = frame(dev, 64, 64);
+    CHECKEQ(px[2 * 64 + 2], 0xFF000000u);
+    CHECKEQ(px[34 * 64 + 34], 0xFFFFFFFFu);
+}
+
+static void group_primitive_types(void) {
+    uint32_t dev = new_device(64, 64);
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZRHW | FVF_DIFFUSE), D3D_OK);
+    uint32_t W = 0xFFFFFFFFu, B = 0xFF000000u;
+    /* points */
+    clear(dev, B);
+    struct tlv pt[2] = { { 5, 5, 0.5f, 1, W }, { 40, 20, 0.5f, 1, W } };
+    draw_up(dev, PT_POINTLIST, 2, pt, 2, sizeof pt[0]);
+    uint32_t *px = frame(dev, 64, 64);
+    CHECKEQ(px[5 * 64 + 5], W);
+    CHECKEQ(px[20 * 64 + 40], W);
+    CHECKEQ(count_color(px, 64 * 64, W), 2);
+    /* lines: a list and a strip */
+    clear(dev, B);
+    struct tlv ln[2] = { { 2, 10, 0.5f, 1, W }, { 20, 10, 0.5f, 1, W } };
+    draw_up(dev, PT_LINELIST, 1, ln, 2, sizeof ln[0]);
+    struct tlv ls[3] = { { 2, 30, 0.5f, 1, W }, { 20, 30, 0.5f, 1, W }, { 20, 50, 0.5f, 1, W } };
+    draw_up(dev, PT_LINESTRIP, 2, ls, 3, sizeof ls[0]);
+    px = frame(dev, 64, 64);
+    for (int x = 4; x < 18; x++) CHECKEQ(px[10 * 64 + x], W);
+    for (int x = 4; x < 18; x++) CHECKEQ(px[30 * 64 + x], W);
+    for (int y = 32; y < 48; y++) CHECKEQ(px[y * 64 + 20], W);
+    CHECKEQ(px[12 * 64 + 10], B);
+    /* a strip and a fan cover what the same triangles as a list cover */
+    struct tlv fan[6] = { { 32, 32, 0.5f, 1, W }, { 32, 4, 0.5f, 1, W }, { 56, 18, 0.5f, 1, W }, { 56, 46, 0.5f, 1, W },
+                          { 32, 60, 0.5f, 1, W }, { 8, 46, 0.5f, 1, W } };
+    struct tlv list[12];
+    for (int i = 0; i < 4; i++) list[3 * i] = fan[0], list[3 * i + 1] = fan[i + 1], list[3 * i + 2] = fan[i + 2];
+    static uint32_t a[64 * 64], b[64 * 64];
+    clear(dev, B);
+    draw_up(dev, PT_TRIANGLEFAN, 4, fan, 6, sizeof fan[0]);
+    memcpy(a, frame(dev, 64, 64), sizeof a);
+    clear(dev, B);
+    draw_up(dev, PT_TRIANGLELIST, 4, list, 12, sizeof list[0]);
+    memcpy(b, frame(dev, 64, 64), sizeof b);
+    CHECK(!memcmp(a, b, sizeof a));
+    CHECK(count_color(a, 64 * 64, W) > 1000);
+    struct tlv strip[4] = { { 0, 40, 0.5f, 1, W }, { 20, 40, 0.5f, 1, W }, { 0, 60, 0.5f, 1, W }, { 20, 60, 0.5f, 1, W } };
+    struct tlv slist[6] = { strip[0], strip[1], strip[2], strip[2], strip[1], strip[3] };
+    clear(dev, B);
+    draw_up(dev, PT_TRIANGLESTRIP, 2, strip, 4, sizeof strip[0]);
+    memcpy(a, frame(dev, 64, 64), sizeof a);
+    clear(dev, B);
+    draw_up(dev, PT_TRIANGLELIST, 2, slist, 6, sizeof slist[0]);
+    memcpy(b, frame(dev, 64, 64), sizeof b);
+    CHECK(!memcmp(a, b, sizeof a));
+    CHECKEQ(count_color(a, 64 * 64, W), 20 * 20);
+    /* an indexed fan from an index buffer, with a base vertex */
+    uint32_t out = gmem(4), ptr = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateVertexBuffer, 6, (uint32_t)sizeof(struct tlv) * 8, 0u, 0u, POOL_MANAGED, out, 0u), D3D_OK);
+    uint32_t vb = MEM32(out);
+    vcall(vb, VB_Lock, 4, 0u, 0u, ptr, 0u);
+    memcpy((uint8_t *)hle_ptr(MEM32(ptr)) + 2 * sizeof(struct tlv), fan, sizeof fan);
+    vcall(vb, VB_Unlock, 0);
+    CHECKEQ(vcall(dev, DV_CreateIndexBuffer, 6, 32u, 0u, FMT_INDEX16, POOL_MANAGED, out, 0u), D3D_OK);
+    uint32_t ib = MEM32(out);
+    vcall(ib, VB_Lock, 4, 0u, 0u, ptr, 0u);
+    uint16_t idx[8] = { 9, 0, 1, 2, 3, 4, 5, 9 };
+    memcpy(hle_ptr(MEM32(ptr)), idx, sizeof idx);
+    vcall(ib, VB_Unlock, 0);
+    CHECKEQ(vcall(dev, DV_SetStreamSource, 4, 0u, vb, 0u, (uint32_t)sizeof(struct tlv)), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetIndices, 1, ib), D3D_OK);
+    clear(dev, B);
+    CHECKEQ(vcall(dev, DV_DrawIndexedPrimitive, 6, PT_TRIANGLEFAN, 2u, 0u, 6u, 1u, 4u), D3D_OK);
+    memcpy(b, frame(dev, 64, 64), sizeof b);
+    clear(dev, B);
+    draw_up(dev, PT_TRIANGLEFAN, 4, fan, 6, sizeof fan[0]);
+    memcpy(a, frame(dev, 64, 64), sizeof a);
+    CHECK(!memcmp(a, b, sizeof a));
+    /* the UP draw unbound stream 0, as documented */
+    uint32_t off = gmem(4), stride = gmem(4);
+    CHECKEQ(vcall(dev, DV_GetStreamSource, 4, 0u, out, off, stride), D3D_OK);
+    CHECKEQ(MEM32(out), 0);
+    vcall(vb, 2, 0), vcall(ib, 2, 0);
+}
+
+static void group_dynamic_discard(void) {
+    uint32_t dev = new_device(256, 8), out = gmem(4), ptr = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateVertexBuffer, 6, (uint32_t)sizeof(struct tlv) * 4, USAGE_DYNAMIC | USAGE_WRITEONLY,
+                  FVF_XYZRHW | FVF_DIFFUSE, POOL_DEFAULT, out, 0u), D3D_OK);
+    uint32_t vb = MEM32(out);
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZRHW | FVF_DIFFUSE), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetStreamSource, 4, 0u, vb, 0u, (uint32_t)sizeof(struct tlv)), D3D_OK);
+    clear(dev, 0xFF000000u);
+    for (int i = 0; i < 50; i++) {
+        CHECKEQ(vcall(vb, VB_Lock, 4, 0u, 0u, ptr, 0x2000u), D3D_OK);      /* DISCARD */
+        float x0 = (float)(5 * i), x1 = x0 + 3;
+        struct tlv q[4] = { { x0, 2, 0.5f, 1, 0xFFFFFFFFu }, { x1, 2, 0.5f, 1, 0xFFFFFFFFu },
+                            { x0, 6, 0.5f, 1, 0xFFFFFFFFu }, { x1, 6, 0.5f, 1, 0xFFFFFFFFu } };
+        memcpy(hle_ptr(MEM32(ptr)), q, sizeof q);
+        CHECKEQ(vcall(vb, VB_Unlock, 0), D3D_OK);
+        CHECKEQ(vcall(dev, DV_DrawPrimitive, 3, PT_TRIANGLESTRIP, 0u, 2u), D3D_OK);
+    }
+    uint32_t *px = frame(dev, 256, 8);
+    int missing = 0;
+    for (int i = 0; i < 50; i++) missing += px[4 * 256 + 5 * i + 1] != 0xFFFFFFFFu;
+    CHECKEQ(missing, 0);
+    CHECKEQ(count_color(px, 256 * 8, 0xFFFFFFFFu), 50 * 3 * 4);
+    /* a plain lock while a draw still has to read the buffer keeps the old bytes for that draw too */
+    clear(dev, 0xFF000000u);
+    CHECKEQ(vcall(vb, VB_Lock, 4, 0u, 0u, ptr, 0u), D3D_OK);
+    struct tlv q[4] = { { 0, 0, 0.5f, 1, 0xFF00FF00u }, { 4, 0, 0.5f, 1, 0xFF00FF00u }, { 0, 4, 0.5f, 1, 0xFF00FF00u },
+                        { 4, 4, 0.5f, 1, 0xFF00FF00u } };
+    memcpy(hle_ptr(MEM32(ptr)), q, sizeof q);
+    vcall(vb, VB_Unlock, 0);
+    vcall(dev, DV_DrawPrimitive, 3, PT_TRIANGLESTRIP, 0u, 2u);
+    CHECKEQ(vcall(vb, VB_Lock, 4, 0u, 0u, ptr, 0u), D3D_OK);
+    struct tlv *qq = hle_ptr(MEM32(ptr));
+    CHECKEQ(qq[0].c, 0xFF00FF00u);                           /* the copy keeps what was there */
+    for (int i = 0; i < 4; i++) qq[i].x += 100, qq[i].c = 0xFFFF0000u;
+    vcall(vb, VB_Unlock, 0);
+    vcall(dev, DV_DrawPrimitive, 3, PT_TRIANGLESTRIP, 0u, 2u);
+    px = frame(dev, 256, 8);
+    CHECKEQ(px[2 * 256 + 2], 0xFF00FF00u);
+    CHECKEQ(px[2 * 256 + 102], 0xFFFF0000u);
+    vcall(dev, DV_SetStreamSource, 4, 0u, 0u, 0u, 0u);
+    vcall(vb, 2, 0);
+}
+
+static void group_depth_objects_draw(void) {
+    uint32_t dev = new_device(32, 32), out = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateDepthStencilSurface, 8, 32u, 32u, FMT_D24S8, 0u, 0u, 0u, out, 0u), D3D_OK);
+    uint32_t a = MEM32(out);
+    CHECKEQ(vcall(dev, DV_CreateDepthStencilSurface, 8, 32u, 32u, FMT_D24S8, 0u, 0u, 0u, out, 0u), D3D_OK);
+    uint32_t b = MEM32(out);
+    CHECKEQ(vcall(dev, DV_SetDepthStencilSurface, 1, a), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET | CLEAR_ZBUFFER, 0xFF000000u, f32(0.25f), 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetDepthStencilSurface, 1, b), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_ZBUFFER, 0u, f32(1.0f), 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetDepthStencilSurface, 1, a), D3D_OK);
+    quad_tlv(dev, 0, 0, 16, 32, 0.5f, 0xFFFFFFFFu);          /* behind a's 0.25: hidden */
+    CHECKEQ(vcall(dev, DV_SetDepthStencilSurface, 1, b), D3D_OK);
+    quad_tlv(dev, 16, 0, 32, 32, 0.5f, 0xFFFFFFFFu);         /* in front of b's 1.0: drawn */
+    uint32_t *px = frame(dev, 32, 32);
+    CHECKEQ(px[10 * 32 + 5], 0xFF000000u);
+    CHECKEQ(px[10 * 32 + 20], 0xFFFFFFFFu);
+    vcall(dev, DV_SetDepthStencilSurface, 1, 0u);
+    vcall(a, 2, 0), vcall(b, 2, 0);
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "tri_colour", group_tri_colour }, { "half_pixel", group_half_pixel }, { "transforms", group_transforms },
+    { "primitive_types", group_primitive_types }, { "dynamic_discard", group_dynamic_discard },
+    { "depth_objects_draw", group_depth_objects_draw },
     { "lock_roundtrip", group_lock_roundtrip }, { "pitches", group_pitches }, { "dxt_small_mips", group_dxt_small_mips },
     { "zeroed", group_zeroed }, { "release_while_bound", group_release_while_bound }, { "child_refs", group_child_refs },
     { "formats_check", group_formats_check },

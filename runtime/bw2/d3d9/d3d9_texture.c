@@ -66,6 +66,7 @@ static void destroy_texture(struct d3d_obj *o) {
     uint32_t n = t->faces * t->levels;
     for (uint32_t i = 0; i < n; i++) if (t->mem[i]) hle_free(hle_ptr(t->mem[i]));
     mtl_release(t->view);
+    mtl_release(t->srgb_view);
     mtl_release(t->tex);
     if (d3d_alive(t->device)) {
         struct d3d_device *d = d3d_host(t->device, D3DK_DEVICE);
@@ -146,6 +147,11 @@ static void dv_CreateCubeTexture(void) {   /* (this, edge, levels, usage, fmt, p
                        : create(A32(0), D3DK_CUBETEXTURE, A32(1), A32(1), 1, A32(2), A32(3), A32(4), A32(5), &o);
     if (A32(6)) MEM32(A32(6)) = o;
     RET(hr, 8);
+}
+
+mtl_obj d3d_tex_srgb_view(struct d3d_texture *t) {
+    if (!t->srgb_view && t->tex) t->srgb_view = mtl_tex_view(t->tex, t->f->swizzle, (t->f->use & FU_SRGB) != 0);
+    return t->srgb_view ? t->srgb_view : t->view;
 }
 
 /* ---- shared methods ---- */

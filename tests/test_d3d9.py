@@ -66,3 +66,11 @@ def test_device(selftest, tmp_path, group):
                                    "child_refs", "formats_check"])
 def test_resources(selftest, tmp_path, group):
     check(selftest, group, tmp_path)
+
+
+# ---- Task 6: draws and the fixed-function pipeline ----
+
+@pytest.mark.parametrize("group", ["tri_colour", "half_pixel", "transforms", "primitive_types", "dynamic_discard",
+                                   "depth_objects_draw"])
+def test_draws(selftest, tmp_path, group):
+    check(selftest, group, tmp_path)

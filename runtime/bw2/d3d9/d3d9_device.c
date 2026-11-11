@@ -3,12 +3,14 @@
  * methods and the implicit swap chain (plan 4 Task 4).
  */
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "bw2.h"
 #include "d3d9_adapter.h"
 #include "d3d9_device.h"
+#include "ff.h"
 
 #define D3DCREATE_FPU_PRESERVE 0x2u
 #define D3DPRESENT_INTERVAL_IMMEDIATE 0x80000000u
@@ -103,6 +105,8 @@ static void destroy_device(struct d3d_obj *o) {
     drop_targets(d);
     if (d->swapchain) d3d_release(d->swapchain);
     mtl_flush(d->mtl);
+    mtl_heap_forget_ctx(d->mtl);
+    mtl_archive_save();
     mtl_ctx_free(d->mtl);
     d3d_state_free(&d->st);
     if (g_d3d_cur == d) g_d3d_cur = NULL;
@@ -119,6 +123,16 @@ uint32_t d3d9_create_device(uint32_t d3d9, uint32_t adapter, uint32_t type, uint
     uint32_t hr = check_pp(focus, ppva, pp);
     if (hr) return hr;
     if (!(flags & D3DCREATE_FPU_PRESERVE)) g_fpu_cw &= (uint16_t)~0x0F00u;   /* 24-bit, round to nearest */
+    static int archive;
+    if (!archive) {                                  /* <support>/ShaderCache/ff.metalar (my call) */
+        const char *sup = getenv("BW2_SUPPORT"), *home = getenv("HOME");
+        char path[1024];
+        if (sup && *sup) snprintf(path, sizeof path, "%s/ShaderCache/ff.metalar", sup);
+        else snprintf(path, sizeof path, "%s/Library/Application Support/Black & White 2/ShaderCache/ff.metalar",
+                      home ? home : ".");
+        mtl_archive_open(path);
+        archive = 1;
+    }
     struct d3d_device *d = calloc(1, sizeof *d);
     d->base.destroy = destroy_device;
     d->d3d9 = d3d9, d->adapter = adapter, d->devtype = type, d->focus = focus, d->flags = flags;
