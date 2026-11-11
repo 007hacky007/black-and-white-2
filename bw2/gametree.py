@@ -6,9 +6,10 @@ committed manifest, so an interrupted build is never mistaken for a finished one
     python -m bw2.gametree [--write-manifest]
 """
 import argparse
+import ctypes
+import errno
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -84,13 +85,23 @@ def _tree_bytes(root: Path) -> int:
     return sum(p.stat().st_size for p in Path(root).rglob("*") if p.is_file())
 
 
+def _sys_clonefile(src: Path, dst: Path) -> int:
+    """clonefile(2) on a whole tree: 0 or an errno. Unlike `cp -c` it never falls back to copying."""
+    fn = getattr(ctypes.CDLL(None, use_errno=True), "clonefile", None)
+    if fn is None:
+        return errno.ENOTSUP
+    fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+    return 0 if fn(os.fsencode(src), os.fsencode(dst), 0) == 0 else ctypes.get_errno()
+
+
 def _clonefile(src: Path, dst: Path) -> bool:
-    """APFS copy-on-write clone of a directory tree; False if the volume cannot."""
-    r = subprocess.run(["/bin/cp", "-cR", str(src), str(dst)], capture_output=True)
-    if r.returncode != 0:
-        shutil.rmtree(dst, ignore_errors=True)
+    """APFS copy-on-write clone of a directory tree; False if this volume cannot clone."""
+    err = _sys_clonefile(src, dst)
+    if err == 0:
+        return True
+    if err in (errno.ENOTSUP, errno.EXDEV):
         return False
-    return True
+    raise OSError(err, os.strerror(err), str(dst))
 
 
 def clone_tree(src: Path, dst: Path) -> None:

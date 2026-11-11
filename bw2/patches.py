@@ -66,13 +66,17 @@ def patch_inputs(patch_exe: Path, kind: str, out: Path) -> PatchInputs:
     """patchw32.dll, the USA/ALL RTPatch diff and the file groups of one official patch."""
     if kind not in RTP_NAMES:
         raise ValueError(f"unknown patch kind {kind}")
-    groups = Path(out) / "groups"
-    found = _inputs_ok(groups, kind) if groups.is_dir() else None
+    out = Path(out)
+    groups, marker = out / "groups", out / ".complete"
+    # Reuse only an extraction that finished: unshield writes in place, and a
+    # Ctrl-C can leave the support group whole and another group truncated.
+    found = _inputs_ok(groups, kind) if marker.is_file() and groups.is_dir() else None
     if found:
         return found
-    groups = extract_patch_groups(patch_exe, kind, out)
+    groups = extract_patch_groups(patch_exe, kind, out)    # clears `out`, marker included
     found = _inputs_ok(groups, kind)
     if not found:
         raise FingerprintMismatch(f"{Path(patch_exe).name}: patchw32.dll or {RTP_NAMES[kind]} "
                                   f"missing or not the known file")
+    marker.write_text(kind + "\n")
     return found

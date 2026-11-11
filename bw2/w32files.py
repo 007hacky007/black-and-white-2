@@ -6,6 +6,7 @@ write to a root that is not writable, fails with a Win32 error and is logged in
 `FileSystem.refused`; nothing outside the roots is ever touched.
 """
 import fnmatch
+import hashlib
 import os
 import shutil
 import struct
@@ -54,6 +55,7 @@ class _View:
     offset: int
     size: int
     writable: bool
+    flushed: bytes = b""              # digest of the bytes last written back
 
 
 @dataclass
@@ -99,6 +101,8 @@ class FileSystem:
                 match = next((n for n in sorted(os.listdir(cur)) if n.lower() == low), None)
                 if match:
                     cand = cur / match
+            if cand.is_symlink():                       # could lead out of the root
+                return self._refuse(path, ERROR_ACCESS_DENIED)
             cur = cand
         return cur
 
@@ -120,13 +124,24 @@ class FileSystem:
         return o if isinstance(o, _File) and not o.closed else None
 
     def _flush_view(self, va: int) -> None:
+        """Write a view back, unless its bytes are unchanged since the last write-back.
+
+        patchw32 closes mappings without unmapping, then truncates and writes the
+        file through its handle; re-writing an unchanged view would undo that.
+        """
         v = self.views[va]
         fo = self.host.handles.get(v.file)
-        if v.writable and isinstance(fo, _File):
-            pos = fo.f.tell()
-            fo.f.seek(v.offset)
-            fo.f.write(self.host.read(va, v.size))
-            fo.f.seek(pos)
+        if not (v.writable and isinstance(fo, _File)):
+            return
+        data = self.host.read(va, v.size)
+        digest = hashlib.sha256(data).digest()
+        if digest == v.flushed:
+            return
+        pos = fo.f.tell()
+        fo.f.seek(v.offset)
+        fo.f.write(data)
+        fo.f.seek(pos)
+        v.flushed = digest
 
     def _release_file(self, h: int) -> None:
         fo = self.host.handles.get(h)
@@ -135,6 +150,19 @@ class FileSystem:
         if isinstance(fo, _File) and fo.closed and not in_use:
             fo.f.close()
             del self.host.handles[h]
+
+    def shutdown(self) -> None:
+        """What process exit does: write back changed views, close every file."""
+        for va in list(self.views):
+            self._flush_view(va)
+        self.views.clear()
+        for h, o in list(self.host.handles.items()):
+            if isinstance(o, _File):
+                o.f.close()
+            del self.host.handles[h]
+
+    def open_files(self) -> int:
+        return sum(1 for o in self.host.handles.values() if isinstance(o, _File) and not o.f.closed)
 
     def close_handle(self, h: int) -> int:
         o = self.host.handles.get(h)

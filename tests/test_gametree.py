@@ -80,3 +80,28 @@ def test_build_game_tree_real(tmp_path):
                                    p / "BW2Patch1_2.exe", p / "B&W2 Fan Patch v1.42 Installer.exe",
                                    out=tmp_path / "game")
     assert identify(out / "white.exe", kind="white-exe") is not None
+
+
+def test_clone_without_clone_support_checks_space_before_copying(tmp_path, monkeypatch):
+    # Review: `cp -c` silently falls back to a full copy, so the space check never ran.
+    import errno
+    src = tmp_path / "install"
+    src.mkdir()
+    (src / "big.bin").write_bytes(b"\0" * 4096)
+    dst = tmp_path / "game.part"
+    monkeypatch.setattr(gametree, "_sys_clonefile", lambda a, b: errno.ENOTSUP)
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: Usage(10**9, 10**9 - 100, 100))
+    copied = []
+    monkeypatch.setattr(shutil, "copytree", lambda *a, **k: copied.append(a))
+    with pytest.raises(NotEnoughSpace):
+        gametree.clone_tree(src, dst)
+    assert copied == [] and not dst.exists()
+
+
+def test_clonefile_clones_a_tree(tmp_path):
+    src = tmp_path / "a"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "f.bin").write_bytes(b"xyz")
+    assert gametree._clonefile(src, tmp_path / "b") is True     # tmp is on APFS here
+    assert (tmp_path / "b" / "sub" / "f.bin").read_bytes() == b"xyz"

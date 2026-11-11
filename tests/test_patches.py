@@ -34,3 +34,22 @@ def test_patch_inputs_real(v, tmp_path):
     assert identify(pi.dll, kind="patchw32") is not None
     assert identify(pi.rtp, kind=f"rtp-{v}") is not None
     assert pi.groups.is_dir()
+
+
+def test_patch_inputs_reextracts_without_completion_marker(tmp_path, monkeypatch):
+    # Review: a Ctrl-C during unshield left a half-written group set that was reused.
+    import bw2.patches as pm
+    out = tmp_path / "inputs"
+    (out / "groups").mkdir(parents=True)
+    calls = []
+
+    def fake_extract(exe, kind, o):
+        calls.append(kind)
+        (o / "groups").mkdir(parents=True, exist_ok=True)
+        return o / "groups"
+    monkeypatch.setattr(pm, "extract_patch_groups", fake_extract)
+    monkeypatch.setattr(pm, "_inputs_ok", lambda g, k: pm.PatchInputs(g / "d", g / "r", g))
+    pm.patch_inputs(tmp_path / "p.exe", "patch-1.1", out)
+    assert calls == ["patch-1.1"]                       # no marker: extracted again
+    pm.patch_inputs(tmp_path / "p.exe", "patch-1.1", out)
+    assert calls == ["patch-1.1"]                       # marker written: reused

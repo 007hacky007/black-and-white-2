@@ -18,6 +18,8 @@ from .w32files import install_files
 _COUNT = re.compile(r"(Modified|Renamed|Added|Deleted|Up-To-Date|Missing|Invalid)\b[^(\n]*\(\s*(\d+)\s*\)")
 _FIELDS = {"Modified": "modified", "Renamed": "renamed", "Added": "added", "Deleted": "deleted",
            "Up-To-Date": "skipped", "Missing": "missing", "Invalid": "invalid"}
+_SUMMARY_LINE = re.compile(r"\(\s*\d+\s*\)")
+_VERIFIED = re.compile(r"verif", re.I)
 _TROUBLE = re.compile(r"invalid|missing|not found|skipp|ignor", re.I)
 CB_ERROR_PREFIX, CB_ERROR_TEXT, CB_FILE, CB_MESSAGE = 3, 4, 7, 9
 
@@ -57,12 +59,20 @@ def check_run(events: list[tuple[int, str]], ret: int) -> RtpResult:
     if ret != 0:
         raise RtpError(f"RTPatchApply32 returned {ret}")
     if r.missing or r.invalid:
-        bad, current = [], None
+        # A file the DLL skips gets its "Applying" line and no verification line (seen on
+        # a clone with one corrupted 1.0 file); every file it patches is verified.
+        blocks: dict[str, list[str]] = {}
+        current = None
         for i, t in events:
+            if i == CB_MESSAGE and _SUMMARY_LINE.search(t):
+                break                                  # the summary's own lines name no file
             if i == CB_FILE:
                 current = t
-            elif i == CB_MESSAGE and current and _TROUBLE.search(t) and current not in bad:
-                bad.append(current)
+                blocks.setdefault(t, [])
+            elif i == CB_MESSAGE and current:
+                blocks[current].append(t)
+        bad = [f for f, msgs in blocks.items()
+               if not any(_VERIFIED.search(m) for m in msgs) or any(_TROUBLE.search(m) for m in msgs)]
         raise RtpError(f"{r.missing} old file(s) missing and {r.invalid} invalid; "
                        f"the 1.0 tree does not match the patch: {', '.join(bad) or 'see the log'}")
     return r
@@ -95,6 +105,7 @@ def apply_rtp(dll: Path, rtp: Path, tree: Path, log: Path | None = None) -> RtpR
         last = next((t for i, t in reversed(events) if i == CB_FILE), "before the first file")
         raise RtpError(f"{rtp.name}: {e} (while on {last})") from e
     finally:
+        fs.shutdown()                                  # as process exit: write back, close files
         if log is not None:
             Path(log).write_text("".join(f"{i}\t{t}\n" if not t.endswith("\n") else f"{i}\t{t}"
                                          for i, t in events))

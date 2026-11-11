@@ -89,8 +89,8 @@ Applied in this order. We never ship them.
 
 | Patch | Source | What we know |
 |---|---|---|
-| Official 1.1 | fan mirrors (PCGamingWiki files, GamePressure) | ~106.5 MB, `Black & White(R) 2 Patch 1-1.exe`. Format not yet identified. Requires full install. |
-| Official 1.2 | fan mirrors (PCGamingWiki files, GamePressure) | ~31.8 MB. Requires 1.1. Format not yet identified. |
+| Official 1.1 | fan mirrors (PCGamingWiki files, GamePressure) | `BW2Patch1_1.exe`, 111,641,849 bytes, SHA-256 `dd90b3aa303f8dd7fff24e6d6afd77252a05f643f3a880770d37c62f628d3863`. InstallShield 11 setup: whole-file groups plus an RTPatch diff, applied by running its `patchw32.dll` under Unicorn (section 8). Requires full install. |
+| Official 1.2 | fan mirrors (PCGamingWiki files, GamePressure) | `BW2Patch1_2.exe`, 33,336,733 bytes, SHA-256 `d2d907cd742289b722e4920563a7e37b2c1f3fefdf719b1c07c48a19dd6cd9fe`. Same format as 1.1. Requires 1.1. |
 | Unofficial (fan) patch 1.42 | https://www.bwgame.net/downloads/black-white-2-unofficial-patch-v1-42.1421/ (direct `/download`, no login) | `B&W2 Fan Patch v1.42 Installer.exe`, 20,266,576 bytes, SHA-256 `2bb875a10b8e10eaca2fcaee8be0e91bf037cda3af161e2700834e023a237bec`. Inno Setup 6.0.0. Contains only `white.exe` and a readme. Page says 1.1 and 1.2 must be installed first. |
 
 The fan patch's `white.exe`: 20,828,160 bytes (19.9 MiB), SHA-256

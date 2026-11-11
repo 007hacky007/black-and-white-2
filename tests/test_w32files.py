@@ -143,3 +143,55 @@ def test_drive_type_and_short_names(env):
     assert env.api("GetShortPathNameW", env.s("T:\\Data\\x.txt"), out, 260) == len("T:\\Data\\x.txt")
     assert env.h.cstr(out, wide=True) == "T:\\Data\\x.txt"
     assert env.api("GetShortPathNameA", env.s("T:\\a", wide=False), out, 2) == len("T:\\a") + 1
+
+
+def _mapped_file(env, name, map_size):
+    f = env.api("CreateFileW", env.s("T:\\" + name), 0xC0000000, 0, 0, 4, 0, 0)
+    m = env.api("CreateFileMappingA", f, 0, 4, 0, map_size, 0)
+    view = env.api("MapViewOfFile", m, 2, 0, 0, 0)
+    env.h.write(view, b"\x11" * map_size)
+    assert env.api("CloseHandle", m) == 1                       # flushed; never unmapped
+    return f, view
+
+
+def test_unchanged_view_not_reflushed_after_truncate(env):
+    # Review: CloseHandle(file) re-wrote the whole view after the DLL's SetEndOfFile.
+    f, _ = _mapped_file(env, "t.bin", 0x200)
+    assert env.api("SetFilePointer", f, 0x100, 0, 0) == 0x100
+    assert env.api("SetEndOfFile", f) == 1
+    assert env.api("CloseHandle", f) == 1
+    env.fs.shutdown()
+    assert (env.tree / "t.bin").stat().st_size == 0x100
+
+
+def test_write_after_view_flush_survives(env):
+    f, _ = _mapped_file(env, "w.bin", 0x10)
+    data = env.buf()
+    env.h.write(data, b"ABCD")
+    assert env.api("SetFilePointer", f, 0, 0, 0) == 0
+    assert env.api("WriteFile", f, data, 4, 0, 0) == 1
+    assert env.api("CloseHandle", f) == 1
+    env.fs.shutdown()
+    assert (env.tree / "w.bin").read_bytes()[:4] == b"ABCD"
+
+
+def test_shutdown_closes_every_file(env):
+    f, view = _mapped_file(env, "s.bin", 0x20)
+    env.h.write(view, b"\x22" * 0x20)                          # changed after the last flush
+    env.api("CloseHandle", f)
+    g = env.api("CreateFileW", env.s("T:\\open.bin"), 0xC0000000, 0, 0, 2, 0, 0)
+    assert g != INVALID
+    env.fs.shutdown()
+    assert env.fs.open_files() == 0
+    assert (env.tree / "s.bin").read_bytes() == b"\x22" * 0x20
+
+
+def test_symlink_out_of_root_refused(env):
+    # Review: resolve() followed a symlinked folder out of the tree.
+    outside = env.tmp / "outside"
+    outside.mkdir()
+    (env.tree / "Data").symlink_to(outside, target_is_directory=True)
+    assert env.api("CreateFileW", env.s("T:\\Data\\x.txt"), 0x40000000, 0, 0, 2, 0, 0) == INVALID
+    assert env.api("GetFileAttributesW", env.s("T:\\Data")) == INVALID
+    assert not (outside / "x.txt").exists()
+    assert len(env.fs.refused) == 2
