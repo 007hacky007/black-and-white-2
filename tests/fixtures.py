@@ -81,8 +81,49 @@ def _idata(imports: dict[str, list[str]], rva: int) -> bytes:
     return bytes(desc + ilt + ilt + strings)
 
 
+def _rsrc(resources: dict[tuple[int, int], bytes], rva: int) -> bytes:
+    """A resource directory (type id -> name id -> language 0x409 -> data) laid out at `rva`."""
+    types = sorted({t for t, _ in resources})
+    root = _st.pack("<IIHHHH", 0, 0, 0, 0, 0, len(types))
+    blobs = bytearray()
+    size_root = 16 + 8 * len(types)
+    type_dirs = {t: sorted(n for t2, n in resources if t2 == t) for t in types}
+    off = size_root
+    type_off = {}
+    for t in types:
+        type_off[t] = off
+        off += 16 + 8 * len(type_dirs[t])
+    name_off = {}
+    for t in types:
+        for n in type_dirs[t]:
+            name_off[(t, n)] = off
+            off += 16 + 8
+    data_entry_off = {}
+    for key in sorted(resources):
+        data_entry_off[key] = off
+        off += 16
+    data_off = {}
+    for key in sorted(resources):
+        data_off[key] = off + len(blobs)
+        blobs += resources[key]
+        blobs += b"\0" * (-len(blobs) % 4)
+    out = bytearray(root)
+    for t in types:
+        out += _st.pack("<II", t, 0x80000000 | type_off[t])
+    for t in types:
+        out += _st.pack("<IIHHHH", 0, 0, 0, 0, 0, len(type_dirs[t]))
+        for n in type_dirs[t]:
+            out += _st.pack("<II", n, 0x80000000 | name_off[(t, n)])
+    for t in types:
+        for n in type_dirs[t]:
+            out += _st.pack("<IIHHHH", 0, 0, 0, 0, 0, 1) + _st.pack("<II", 0x409, data_entry_off[(t, n)])
+    for key in sorted(resources):
+        out += _st.pack("<IIII", rva + data_off[key], len(resources[key]), 0, 0)
+    return bytes(out + blobs)
+
+
 def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]],
-            entry_rva: int) -> bytes:
+            entry_rva: int, resources: dict[tuple[int, int], bytes] | None = None) -> bytes:
     secs = list(sections)
     rva = SECT_ALIGN
     layout = []
@@ -95,6 +136,13 @@ def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]
         data = _idata(imports, rva)
         imp_size = 20 * (len(imports) + 1)
         layout.append([".idata", data, DATA, rva])
+        rva += _align(len(data), SECT_ALIGN)
+    rsrc_rva = rsrc_size = 0
+    if resources:
+        rsrc_rva = rva
+        data = _rsrc(resources, rva)
+        rsrc_size = len(data)
+        layout.append([".rsrc", data, DATA, rva])
         rva += _align(len(data), SECT_ALIGN)
     size_of_image = rva
     headers = 0x400
@@ -110,6 +158,7 @@ def make_pe(sections: list[tuple[str, bytes, int]], imports: dict[str, list[str]
     opt = 0x58
     dirs = [(0, 0)] * 16
     dirs[1] = (imp_rva, imp_size)
+    dirs[2] = (rsrc_rva, rsrc_size)
     _st.pack_into("<HBBIIIIIIIIIHHHHHHIIIIHHIIIIII", out, opt,
                   0x10B, 7, 10, 0, 0, 0, entry_rva, SECT_ALIGN, 0, IMAGE_BASE,
                   SECT_ALIGN, FILE_ALIGN, 4, 0, 0, 0, 4, 0, 0, size_of_image, headers,
