@@ -5,6 +5,9 @@
  *                                                its writes land in <support>/Game/
  *   C:\ (everything else)                        <support>/C/
  *
+ * Nothing else on the Mac is reachable: no Z: (win32hle's host root), and a
+ * path that resolves outside these two folders does not exist for the game.
+ *
  * The game tree is never written: later it lives inside the signed app bundle.
  * win32hle's overlay sends writes through CreateFile and CreateDirectory to
  * <support>/Game; the calls that would change a game file in place (delete,
@@ -41,6 +44,10 @@ int bw2_mount(const char *game_dir, const char *support_dir) {
     snprintf(ov, sizeof ov, "%s/Game", support_dir);
     mkdirs(c);
     mkdirs(ov);
+    char support_real[PATH_MAX];
+    if (!realpath(support_dir, support_real)) snprintf(support_real, sizeof support_real, "%s", support_dir);
+    const char *roots[] = { g_game, support_real, NULL };   /* nothing else on the Mac */
+    hle_set_roots(roots);
     hle_set_drive('C', c);
     hle_set_mount(BW2_INSTALL_DIR, g_game);
     hle_set_overlay(g_game, ov);

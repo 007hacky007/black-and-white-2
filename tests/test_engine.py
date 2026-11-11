@@ -1184,3 +1184,41 @@ name: .asciz "\\??\\CdRom0"
     b = _engine(tmp_path, asm, {K32: ["CreateFileA", "ExitProcess"]})
     r = _run(tmp_path, b)
     assert r.returncode == 3 and "TRIPWIRE: CreateFileA" in r.stderr, r.stderr[-2000:]
+
+
+def _write_attempt(name):
+    return r"""
+    push 0
+    push 0x80
+    push 2
+    push 0
+    push 0
+    push 0x40000000
+    push offset name
+    call dword ptr [{IAT_CreateFileA}]
+    cmp eax, -1
+    jne opened
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+opened:
+    push 1
+    call dword ptr [{IAT_ExitProcess}]
+name: .asciz "%s"
+""" % name
+
+
+def test_no_drive_z(tmp_path):
+    # pcrecomp's Z: is the Mac's whole disk; the game must not reach it
+    target = tmp_path / "outside.txt"
+    guest = "Z:" + str(target).replace("/", "\\\\")
+    b = _engine(tmp_path, _write_attempt(guest), {K32: ["CreateFileA", "ExitProcess"]})
+    r = _run(tmp_path, b)
+    assert r.returncode == 0 and not target.exists(), r.stderr[-2000:]
+
+
+def test_relative_path_cannot_climb_out(tmp_path):
+    # from the install folder (the host cwd is the game tree), ..\..\ must not leave the allowed roots
+    b = _engine(tmp_path, _write_attempt(r"..\\..\\escaped.txt"), {K32: ["CreateFileA", "ExitProcess"]})
+    r = _run(tmp_path, b)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert not list(tmp_path.parent.glob("escaped.txt")) and not (tmp_path / "escaped.txt").exists()
