@@ -1,4 +1,5 @@
-"""Plan 4's end point: the lifted game boots on the patched tree through Direct3D's adapter questions to its input setup."""
+"""Where the boot stops today: the lifted game boots on the patched tree through Direct3D and its DirectInput
+mouse setup to its first effect (plan 5 Task 1; Task 7 replaces this)."""
 import os
 import subprocess
 
@@ -12,13 +13,14 @@ LOUD = ("TRIPWIRE", "trap:", "unresolved indirect call", "unresolved direct call
         "uncaught C++", "FATAL")
 
 
-# Where plan 4's boot stops (docs/research/graphics.md): the game sets up DirectInput, the input
-# plan's layer, before it creates its Direct3D device, so nothing of plan 5's is reached yet.
-FIRST_LATER = "DirectInput8Create"
+# Where the boot stops with plan 5's minimal mouse: the game sets up DirectInput, creates its
+# full-screen device, two state blocks and two textures, then calls D3DXCreateEffect with the
+# compiled DownScaleFilter effect (plan 5 "Measured"). Plan 5's effects are not answered yet.
+FIRST_LATER = "D3DXCreateEffect"
 
 
 @pytest.mark.gamefiles
-def test_boot_reaches_input(tmp_path):
+def test_boot_reaches_effects(tmp_path):
     assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
     env = dict(os.environ, BW2_SUPPORT=str(tmp_path / "support"), BW2_HEADLESS="1")
     r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,

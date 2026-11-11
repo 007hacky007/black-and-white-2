@@ -1,7 +1,7 @@
 /*
  * later.c - where plan 3's boot ends: the first call into a layer a later
- * plan owns (DirectInput, DirectSound/OpenAL, Bink, and plan 5's D3DX
- * shaders and effects). Each such import, and each LoadLibraryA of such a DLL, prints
+ * plan owns (DirectInput before version 8, DirectSound/OpenAL, Bink, and
+ * plan 5's D3DX shaders and effects). Each such import, and each LoadLibraryA of such a DLL, prints
  * "[bw2] reached <name>: owned by a later plan" and exits 4.
  *
  * The imports come from the images' own import tables (every name the game
@@ -18,10 +18,10 @@
 /* Plan 4 answers d3d9, ddraw and D3DX's math and textures; plan 5 owns D3DX's
  * shaders, effects, sprite, font and mesh (named below). */
 static const char *const g_later_dlls[] = {
-    "dinput8.dll", "dinput.dll", "dsound.dll", "binkw32.dll", "openal32.dll", "wrap_oal.dll", NULL,
+    "dinput.dll", "dsound.dll", "binkw32.dll", "openal32.dll", "wrap_oal.dll", NULL,
 };
 static const char *const g_later_names[] = {
-    "DirectInput8Create", "DirectDrawCreate", "DirectDrawEnumerateExA", "DirectSoundCreate", "DirectSoundCreate8",
+    "DirectDrawCreate", "DirectDrawEnumerateExA", "DirectSoundCreate", "DirectSoundCreate8",
     "DirectSoundEnumerateA",
     "D3DXCompileShader", "D3DXCompileShaderFromFileA", "D3DXAssembleShader", "D3DXCreateEffect",
     "D3DXCreateEffectPool", "D3DXCreateFragmentLinker", "D3DXCreateSprite", "D3DXCreateFontA", "D3DXCreateSphere",

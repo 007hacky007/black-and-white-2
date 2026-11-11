@@ -1,7 +1,7 @@
 /*
  * d3d9_methods.c - every COM interface this layer serves, with its methods in
- * vtable order (the declaration order of the D3D9, DirectDraw 7 and D3DX
- * headers) and its IID. d3d_vtable() builds a guest vtable from one of these;
+ * vtable order (the declaration order of the D3D9, DirectDraw 7, D3DX and
+ * DirectInput 8 headers) and its IID. d3d_vtable() builds a guest vtable from one of these;
  * a method nobody implemented stops loudly, naming itself.
  */
 #include "d3d_com.h"
@@ -66,6 +66,14 @@ static const char *const m_ddraw7[] = { UNK, "Compact", "CreateClipper", "Create
     "GetAvailableVidMem", "GetSurfaceFromDC", "RestoreAllSurfaces", "TestCooperativeLevel",
     "GetDeviceIdentifier", "StartModeTest", "EvaluateMode", 0 };
 static const char *const m_d3dxbuffer[] = { UNK, "GetBufferPointer", "GetBufferSize", 0 };
+static const char *const m_dinput8[] = { UNK, "CreateDevice", "EnumDevices", "GetDeviceStatus", "RunControlPanel",
+    "Initialize", "FindDevice", "EnumDevicesBySemantics", "ConfigureDevices", 0 };
+static const char *const m_didevice8[] = { UNK, "GetCapabilities", "EnumObjects", "GetProperty", "SetProperty",
+    "Acquire", "Unacquire", "GetDeviceState", "GetDeviceData", "SetDataFormat", "SetEventNotification",
+    "SetCooperativeLevel", "GetObjectInfo", "GetDeviceInfo", "RunControlPanel", "Initialize", "CreateEffect",
+    "EnumEffects", "GetEffectInfo", "GetForceFeedbackState", "SendForceFeedbackCommand",
+    "EnumCreatedEffectObjects", "Escape", "Poll", "SendDeviceData", "EnumEffectsInFile", "WriteEffectToFile",
+    "BuildActionMap", "SetActionMap", "GetImageInfo", 0 };
 
 #define G(a, b, c, d0, d1, d2, d3, d4, d5, d6, d7) \
     { (a) & 0xFF, ((a) >> 8) & 0xFF, ((a) >> 16) & 0xFF, ((a) >> 24) & 0xFF, (b) & 0xFF, ((b) >> 8) & 0xFF, \
@@ -99,5 +107,7 @@ const struct d3d_iface d3d_ifaces[] = {
     { "IDirect3DQuery9", m_query, { G(0xD9771460, 0xA695, 0x4F26, 0xBB, 0xD3, 0x27, 0xB8, 0x40, 0xB5, 0x41, 0xCC) } },
     { "IDirectDraw7", m_ddraw7, { G(0x15E65EC0, 0x3B9C, 0x11D2, 0xB9, 0x2F, 0x00, 0x60, 0x97, 0x97, 0xEA, 0x5B) } },
     { "ID3DXBuffer", m_d3dxbuffer, { G(0x8BA5FB08, 0x5195, 0x40E2, 0xAC, 0x58, 0x0D, 0x98, 0x9C, 0x3A, 0x01, 0x02) } },
+    { "IDirectInput8A", m_dinput8, { G(0xBF798030, 0x483A, 0x4DA2, 0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00) } },
+    { "IDirectInputDevice8A", m_didevice8, { G(0x54D41080, 0xDC15, 0x4833, 0xA4, 0x1B, 0x74, 0x8F, 0x73, 0xA3, 0x81, 0x79) } },
     { 0, 0, { { 0 } } },
 };

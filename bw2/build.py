@@ -25,8 +25,8 @@ WIN32HLE_CORE = ("host.c", "host_lite.c", "guest_mem.c", "pe_loader.c", "module.
                  "ole32.c", "advapi32.c", "wsock32.c", "lz32.c", "storage.c")
 
 
-# Plan 4: the graphics layers, C and Objective-C (ARC).
-BW2_SUBDIRS = ("d3d9", "d3dx")
+# Plan 4: the graphics layers, C and Objective-C (ARC); plan 5: the DirectInput mouse.
+BW2_SUBDIRS = ("d3d9", "d3dx", "input")
 FRAMEWORKS = ("Metal", "QuartzCore", "AppKit", "Foundation", "ImageIO", "CoreGraphics")
 
 
