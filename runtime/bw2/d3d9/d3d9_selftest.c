@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "win32hle.h"
 #include "bw2.h"
 #include "d3d_com.h"
@@ -1667,7 +1668,203 @@ static void group_cache(void) {
     mtl_archive_require_hits(0);
 }
 
+/* ---- Task 7: state blocks, queries, the rest ---- */
+
+enum { SB_GetDevice = 3, SB_Capture, SB_Apply };
+enum { Q_GetDevice = 3, Q_GetType, Q_GetDataSize, Q_Issue, Q_GetData };
+enum { SC_Present = 3, SC_GetFrontBufferData, SC_GetBackBuffer, SC_GetRasterStatus, SC_GetDisplayMode, SC_GetDevice,
+       SC_GetPresentParameters };
+
+static uint32_t get_rs(uint32_t dev, uint32_t s) {
+    uint32_t v = gmem(4);
+    CHECKEQ(vcall(dev, DV_GetRenderState, 2, s, v), D3D_OK);
+    return MEM32(v);
+}
+
+static void group_stateblock(void) {
+    uint32_t dev = new_device(16, 16), out = gmem(4), v = gmem(4);
+    /* ALL: capture, change, apply */
+    rs(dev, RS_TEXTUREFACTOR, 0x11111111u), rs(dev, RS_CULLMODE, 1);
+    CHECKEQ(vcall(dev, DV_CreateStateBlock, 2, 1u, out), D3D_OK);
+    uint32_t all = MEM32(out);
+    rs(dev, RS_TEXTUREFACTOR, 0x22222222u), rs(dev, RS_CULLMODE, 2);
+    float m[16];
+    mat_identity(m), m[12] = 7;
+    set_xform(dev, 256, m);
+    CHECKEQ(vcall(all, SB_Apply, 0), D3D_OK);
+    CHECKEQ(get_rs(dev, RS_TEXTUREFACTOR), 0x11111111u);
+    CHECKEQ(get_rs(dev, RS_CULLMODE), 1);
+    uint32_t mp = gmem(64);
+    vcall(dev, DV_GetTransform, 2, 256u, mp);
+    CHECK(((float *)hle_ptr(mp))[12] == 0);                  /* the world matrix went back too */
+    /* Capture refreshes what it holds */
+    rs(dev, RS_TEXTUREFACTOR, 0x33333333u);
+    CHECKEQ(vcall(all, SB_Capture, 0), D3D_OK);
+    rs(dev, RS_TEXTUREFACTOR, 0x44444444u);
+    vcall(all, SB_Apply, 0);
+    CHECKEQ(get_rs(dev, RS_TEXTUREFACTOR), 0x33333333u);
+    /* PIXELSTATE holds pixel states, not vertex ones */
+    CHECKEQ(vcall(dev, DV_CreateStateBlock, 2, 2u, out), D3D_OK);
+    uint32_t pix = MEM32(out);
+    rs(dev, RS_TEXTUREFACTOR, 0x55555555u), rs(dev, RS_CULLMODE, 3);
+    vcall(pix, SB_Apply, 0);
+    CHECKEQ(get_rs(dev, RS_TEXTUREFACTOR), 0x33333333u);
+    CHECKEQ(get_rs(dev, RS_CULLMODE), 3);
+    /* VERTEXSTATE: the other way round */
+    CHECKEQ(vcall(dev, DV_CreateStateBlock, 2, 3u, out), D3D_OK);
+    uint32_t vtx = MEM32(out);
+    rs(dev, RS_TEXTUREFACTOR, 0x66666666u), rs(dev, RS_CULLMODE, 1);
+    vcall(vtx, SB_Apply, 0);
+    CHECKEQ(get_rs(dev, RS_TEXTUREFACTOR), 0x66666666u);
+    CHECKEQ(get_rs(dev, RS_CULLMODE), 3);
+    /* recording: only what was set, and the device is not changed while recording */
+    CHECKEQ(vcall(dev, DV_BeginStateBlock, 0), D3D_OK);
+    CHECKEQ(vcall(dev, DV_BeginStateBlock, 0), D3DERR_INVALIDCALL);
+    rs(dev, RS_ALPHAREF, 0x42);
+    tss(dev, 0, TSS_COLOROP, 7);
+    CHECKEQ(get_rs(dev, RS_ALPHAREF), 0);
+    CHECKEQ(vcall(dev, DV_EndStateBlock, 1, out), D3D_OK);
+    uint32_t rec = MEM32(out);
+    rs(dev, RS_TEXTUREFACTOR, 0x77777777u);
+    vcall(rec, SB_Apply, 0);
+    CHECKEQ(get_rs(dev, RS_ALPHAREF), 0x42);
+    CHECKEQ(get_rs(dev, RS_TEXTUREFACTOR), 0x77777777u);
+    CHECKEQ(vcall(dev, DV_GetTextureStageState, 3, 0u, TSS_COLOROP, v), D3D_OK);
+    CHECKEQ(MEM32(v), 7);
+    CHECKEQ(vcall(dev, DV_EndStateBlock, 1, out), D3DERR_INVALIDCALL);
+    /* a block holds its textures */
+    uint32_t t = texture(dev, 4, 4, 1, FMT_A8R8G8B8);
+    vcall(dev, DV_SetTexture, 2, 0u, t);
+    CHECKEQ(vcall(dev, DV_CreateStateBlock, 2, 1u, out), D3D_OK);
+    uint32_t withtex = MEM32(out);
+    vcall(dev, DV_SetTexture, 2, 0u, 0u);
+    CHECKEQ(vcall(t, 2, 0), 1);                              /* the state block's reference */
+    vcall(withtex, SB_Apply, 0);
+    CHECKEQ(vcall(dev, DV_GetTexture, 2, 0u, out), D3D_OK);
+    CHECKEQ(MEM32(out), t);
+    vcall(t, 2, 0);
+    CHECKEQ(vcall(withtex, 2, 0), 0);
+    vcall(dev, DV_SetTexture, 2, 0u, 0u);
+    CHECK(!d3d_alive(t));
+    CHECKEQ(vcall(all, SB_GetDevice, 1, out), D3D_OK);
+    CHECKEQ(MEM32(out), dev);
+    vcall(dev, 2, 0);
+    vcall(all, 2, 0), vcall(pix, 2, 0), vcall(vtx, 2, 0), vcall(rec, 2, 0);
+}
+
+static void group_query_event(void) {
+    uint32_t dev = new_device(16, 16), out = gmem(4), data = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateQuery, 2, 8u, 0u), D3D_OK);           /* support check */
+    CHECKEQ(vcall(dev, DV_CreateQuery, 2, 4u, 0u), D3DERR_NOTAVAILABLE);   /* VCACHE */
+    CHECKEQ(vcall(dev, DV_CreateQuery, 2, 8u, out), D3D_OK);
+    uint32_t q = MEM32(out);
+    CHECKEQ(vcall(q, Q_GetType, 0), 8);
+    CHECKEQ(vcall(q, Q_GetDataSize, 0), 4);
+    clear(dev, 0xFF000000u);
+    CHECKEQ(vcall(q, Q_Issue, 1, 1u), D3D_OK);                         /* END */
+    int ok = 0;
+    for (int i = 0; i < 1000 && !ok; i++) {
+        uint32_t hr = vcall(q, Q_GetData, 3, data, 4u, 1u);             /* FLUSH */
+        if (hr == D3D_OK) ok = 1;
+        else { CHECKEQ(hr, 1); usleep(1000); }
+    }
+    CHECK(ok);
+    CHECKEQ(MEM32(data), 1);
+    vcall(q, 2, 0);
+}
+
+static void group_query_occlusion(void) {
+    uint32_t dev = new_device(32, 32), out = gmem(4), data = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateQuery, 2, 9u, out), D3D_OK);
+    uint32_t q = MEM32(out);
+    clear(dev, 0xFF000000u);
+    quad_tlv(dev, -0.5f, -0.5f, 31.5f, 31.5f, 0.2f, 0xFFFFFFFFu);     /* writes Z 0.2 everywhere */
+    CHECKEQ(vcall(q, Q_Issue, 1, 2u), D3D_OK);                         /* BEGIN */
+    quad_tlv(dev, -0.5f, -0.5f, 7.5f, 7.5f, 0.6f, 0xFFFF0000u);       /* hidden */
+    CHECKEQ(vcall(q, Q_Issue, 1, 1u), D3D_OK);
+    uint32_t hr;
+    while ((hr = vcall(q, Q_GetData, 3, data, 4u, 1u)) == 1) usleep(1000);
+    CHECKEQ(hr, D3D_OK);
+    CHECKEQ(MEM32(data), 0);
+    CHECKEQ(vcall(q, Q_Issue, 1, 2u), D3D_OK);
+    quad_tlv(dev, -0.5f, -0.5f, 7.5f, 7.5f, 0.1f, 0xFF00FF00u);       /* in front: 8x8 pixels */
+    vcall(dev, DV_Clear, 6, 1u, rect(20, 20, 24, 24), CLEAR_TARGET, 0xFF0000FFu, f32(1), 0u);   /* a pass break */
+    quad_tlv(dev, 15.5f, -0.5f, 19.5f, 3.5f, 0.1f, 0xFF00FF00u);      /* and 4x4 more */
+    CHECKEQ(vcall(q, Q_Issue, 1, 1u), D3D_OK);
+    while ((hr = vcall(q, Q_GetData, 3, data, 4u, 1u)) == 1) usleep(1000);
+    CHECKEQ(hr, D3D_OK);
+    CHECKEQ(MEM32(data), 64 + 16);
+    vcall(q, 2, 0);
+}
+
+static void group_lights_grow(void) {
+    uint32_t dev = new_device(16, 16), out = gmem(sizeof(struct d3dlight));
+    struct d3dlight l = { 1, { 0.5f, 0.25f, 1, 1 }, { 0 }, { 0 }, { 1, 2, 3 }, { 0 }, 10, 0, 1, 0, 0, 0, 0 };
+    set_light(dev, 100, &l);
+    CHECKEQ(vcall(dev, DV_GetLight, 2, 100u, out), D3D_OK);
+    CHECK(!memcmp(hle_ptr(out), &l, sizeof l));
+    CHECKEQ(vcall(dev, DV_GetLight, 2, 99u, out), D3DERR_INVALIDCALL);
+    /* the rest of the device's simple state */
+    CHECKEQ(vcall(dev, DV_SetSoftwareVertexProcessing, 1, 1u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_GetSoftwareVertexProcessing, 0), 1);
+    CHECKEQ(vcall(dev, DV_SetNPatchMode, 1, f32(0)), D3D_OK);
+    uint32_t cs = gmem(8);
+    MEM32(cs) = 3, MEM32(cs + 4) = 5;
+    CHECKEQ(vcall(dev, DV_SetClipStatus, 1, cs), D3D_OK);
+    MEM32(cs) = MEM32(cs + 4) = 0;
+    CHECKEQ(vcall(dev, DV_GetClipStatus, 1, cs), D3D_OK);
+    CHECK(MEM32(cs) == 3 && MEM32(cs + 4) == 5);
+    uint32_t pal = gmem(1024), num = gmem(4);
+    for (int i = 0; i < 256; i++) MEM32(pal + 4 * i) = 0xFF000000u | (uint32_t)i;
+    CHECKEQ(vcall(dev, DV_SetPaletteEntries, 2, 3u, pal), D3D_OK);
+    memset(hle_ptr(pal), 0, 1024);
+    CHECKEQ(vcall(dev, DV_GetPaletteEntries, 2, 3u, pal), D3D_OK);
+    CHECKEQ(MEM32(pal + 4 * 77), 0xFF00004Du);
+    CHECKEQ(vcall(dev, DV_SetCurrentTexturePalette, 1, 3u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_GetCurrentTexturePalette, 1, num), D3D_OK);
+    CHECKEQ(MEM32(num), 3);
+}
+
+static void group_swapchain2(void) {
+    uint32_t dev = new_device(32, 32), out = gmem(4);
+    uint32_t pp = pp_new(16, 8, FMT_X8R8G8B8, 0);
+    CHECKEQ(vcall(dev, DV_CreateAdditionalSwapChain, 2, pp, out), D3D_OK);
+    uint32_t sc = MEM32(out);
+    CHECKEQ(vcall(sc, SC_GetBackBuffer, 3, 0u, 0u, out), D3D_OK);
+    uint32_t bb = MEM32(out), desc = gmem(32);
+    CHECKEQ(vcall(bb, SF_GetDesc, 1, desc), D3D_OK);
+    CHECK(MEM32(desc + 24) == 16 && MEM32(desc + 28) == 8);
+    CHECKEQ(vcall(dev, DV_SetRenderTarget, 2, 0u, bb), D3D_OK);
+    vcall(dev, DV_SetDepthStencilSurface, 1, 0u);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFF123456u, f32(1), 0u), D3D_OK);
+    CHECKEQ(vcall(sc, SC_Present, 5, 0u, 0u, 0u, 0u, 0u), D3D_OK);
+    static uint32_t px[16 * 8];
+    read_rt(dev, bb, 16, 8, px);
+    CHECKEQ(px[0], 0xFF123456u);
+    CHECKEQ(vcall(sc, SC_GetPresentParameters, 1, pp), D3D_OK);
+    CHECKEQ(MEM32(pp), 16);
+    /* a swap chain blocks Reset until released */
+    uint32_t bb0 = back_buffer(dev);
+    vcall(dev, DV_SetRenderTarget, 2, 0u, bb0);
+    vcall(bb0, 2, 0);
+    vcall(bb, 2, 0);
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp_new(32, 32, FMT_X8R8G8B8, 1)), D3DERR_INVALIDCALL);
+    CHECKEQ(vcall(sc, 2, 0), 0);
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp_new(32, 32, FMT_X8R8G8B8, 1)), D3D_OK);
+    /* the front buffer: the last back buffer presented */
+    clear(dev, 0xFF00FF00u);
+    CHECKEQ(vcall(dev, DV_Present, 4, 0u, 0u, 0u, 0u), D3D_OK);
+    uint32_t fs = sysmem_surface(dev, 32, 32, FMT_A8R8G8B8), lr = gmem(8);
+    CHECKEQ(vcall(dev, DV_GetFrontBufferData, 2, 0u, fs), D3D_OK);
+    vcall(fs, SF_LockRect, 3, lr, 0u, 0x10u);
+    CHECKEQ(MEM32(MEM32(lr + 4)), 0xFF00FF00u);
+    vcall(fs, SF_UnlockRect, 0);
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "stateblock", group_stateblock }, { "query_event", group_query_event },
+    { "query_occlusion", group_query_occlusion }, { "lights_grow", group_lights_grow },
+    { "swapchain2", group_swapchain2 },
     { "lighting", group_lighting }, { "fog_alpha", group_fog_alpha }, { "cache", group_cache },
     { "stages", group_stages }, { "blend_depth_stencil", group_blend_depth_stencil }, { "samplers", group_samplers },
     { "tri_colour", group_tri_colour }, { "half_pixel", group_half_pixel }, { "transforms", group_transforms },

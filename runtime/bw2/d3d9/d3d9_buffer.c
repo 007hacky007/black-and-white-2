@@ -126,9 +126,10 @@ static void dv_SetStreamSource(void) {     /* (this, stream, vb, offset, stride)
     uint32_t i = A32(1);
     if (i >= 16) RET(D3DERR_INVALIDCALL, 5);
     if (A32(2) && d3d_buf(A32(2))->base.kind != D3DK_VB) RET(D3DERR_INVALIDCALL, 5);
-    d3d_bind(&d->st.stream[i], A32(2));
-    d->st.stream_off[i] = A32(3), d->st.stream_stride[i] = A32(4);
-    d->st.dirty |= DIRTY_INPUT;
+    struct d3d_state *w = d3d_ws(d, SBW_STREAM, i, 0);
+    d3d_bind(&w->stream[i], A32(2));
+    w->stream_off[i] = A32(3), w->stream_stride[i] = A32(4);
+    w->dirty |= DIRTY_INPUT;
     RET(D3D_OK, 5);
 }
 static void dv_GetStreamSource(void) {     /* (this, stream, vb*, offset*, stride*) */
@@ -144,7 +145,7 @@ static void dv_SetStreamSourceFreq(void) { /* (this, stream, divider) */
     struct d3d_device *d = d3d_dev(A32(0));
     if (A32(1) >= 16) RET(D3DERR_INVALIDCALL, 3);
     if (A32(2) != 1) d3d_fail("SetStreamSourceFreq(%u, 0x%X): instancing is not supported", A32(1), A32(2));
-    d->st.stream_freq[A32(1)] = 1;
+    d3d_ws(d, SBW_FREQ, A32(1), 0)->stream_freq[A32(1)] = 1;
     RET(D3D_OK, 3);
 }
 static void dv_GetStreamSourceFreq(void) {
@@ -156,7 +157,7 @@ static void dv_GetStreamSourceFreq(void) {
 static void dv_SetIndices(void) {          /* (this, ib) */
     struct d3d_device *d = d3d_dev(A32(0));
     if (A32(1) && d3d_buf(A32(1))->base.kind != D3DK_IB) RET(D3DERR_INVALIDCALL, 2);
-    d3d_bind(&d->st.indices, A32(1));
+    d3d_bind(&d3d_ws(d, SBW_INDICES, 0, 0)->indices, A32(1));
     RET(D3D_OK, 2);
 }
 static void dv_GetIndices(void) {          /* (this, ib*) */

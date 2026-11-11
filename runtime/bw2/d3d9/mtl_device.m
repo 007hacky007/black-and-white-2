@@ -14,6 +14,8 @@
 #include "mtl.h"
 #include "mtl_internal.h"
 
+#define VIS_SLOTS 16384u                 /* occlusion counting slots */
+
 static NSString *const kUtilSource = @
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
@@ -183,6 +185,7 @@ struct mtl_ctx *mtl_ctx_new(uint32_t width, uint32_t height, int vsync) {
     c.inflight = dispatch_semaphore_create(3);
     c.vsync = vsync;
     c.psos = [NSMutableDictionary dictionary];
+    c.vis = [c.dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared];
     c.dss = [NSMutableDictionary dictionary];
     NSError *err = nil;
     c.util = [c.dev newLibraryWithSource:kUtilSource options:nil error:&err];
@@ -370,6 +373,45 @@ void mtl_set_targets(struct mtl_ctx *cc, const struct mtl_target rt[4], struct m
     c->_ds = ds;
 }
 
+static void occl_count(MtlCtx *c) {
+    struct mtl_occlusion *q = c.occl;
+    if (q->n == sizeof q->slot / sizeof q->slot[0]) {
+        fprintf(stderr, "[bw2] FATAL: d3d9: an occlusion query spans more than 256 passes\n");
+        abort();
+    }
+    uint32_t slot = c.visNext++ % VIS_SLOTS;
+    ((uint64_t *)c.vis.contents)[slot] = 0;
+    q->slot[q->n++] = slot;
+    [c.enc setVisibilityResultMode:MTLVisibilityResultModeCounting offset:slot * 8];
+}
+void mtl_occlusion_begin(struct mtl_ctx *cc, struct mtl_occlusion *q) {
+    MtlCtx *c = ctx(cc);
+    q->n = 0, q->serial = 0;
+    c.occl = q;
+    if (c.enc) occl_count(c);
+}
+void mtl_occlusion_end(struct mtl_ctx *cc, struct mtl_occlusion *q) {
+    MtlCtx *c = ctx(cc);
+    if (c.occl == q) {
+        if (c.enc) [c.enc setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+        c.occl = NULL;
+    }
+    q->serial = c.submitted + 1;
+}
+int mtl_occlusion_result(struct mtl_ctx *cc, const struct mtl_occlusion *q, uint64_t *samples) {
+    MtlCtx *c = ctx(cc);
+    if (c.completed < q->serial) return 0;
+    uint64_t n = 0;
+    for (uint32_t i = 0; i < q->n; i++) n += ((uint64_t *)c.vis.contents)[q->slot[i]];
+    *samples = n;
+    return 1;
+}
+void mtl_commit_nowait(struct mtl_ctx *cc) {
+    MtlCtx *c = ctx(cc);
+    cmdbuf(c);                                     /* even with nothing recorded, so the serial advances */
+    mtl_commit(c, 0);
+}
+
 void mtl_begin_pass_if_needed(struct mtl_ctx *cc) {
     MtlCtx *c = ctx(cc);
     if (c.enc) return;
@@ -403,9 +445,11 @@ void mtl_begin_pass_if_needed(struct mtl_ctx *cc) {
         }
     }
     rp.renderTargetWidth = w, rp.renderTargetHeight = h;
+    rp.visibilityResultBuffer = c.vis;
     c.passW = w, c.passH = h;
     c.enc = [cmdbuf(c) renderCommandEncoderWithDescriptor:rp];
     c.encGen++;
+    if (c.occl) occl_count(c);                     /* a query spans passes: each pass counts into its own slot */
 }
 void *mtl_encoder(struct mtl_ctx *cc) { return (__bridge void *)ctx(cc).enc; }
 
@@ -499,6 +543,7 @@ void mtl_clear(struct mtl_ctx *cc, uint32_t flags, uint32_t color, float z, uint
                      ((color >> 24) & 0xFF) / 255.0f };
     [e setVertexBytes:&zz length:4 atIndex:0];
     [e setFragmentBytes:col length:16 atIndex:0];
+    if (c.occl) [e setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
     for (uint32_t i = 0; i < n; i++) {
         uint32_t x = MIN(rects[i].x, c.passW), y = MIN(rects[i].y, c.passH);
         uint32_t w = MIN(rects[i].w, c.passW - x), h = MIN(rects[i].h, c.passH - y);
@@ -506,6 +551,7 @@ void mtl_clear(struct mtl_ctx *cc, uint32_t flags, uint32_t color, float z, uint
         [e setScissorRect:(MTLScissorRect){ x, y, w, h }];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     }
+    if (c.occl) occl_count(c);                    /* counting goes on, in a fresh slot */
     c.encGen++;                                   /* draws must set their state again */
 }
 

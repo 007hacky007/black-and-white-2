@@ -65,6 +65,13 @@ int mtl_serial_done(struct mtl_ctx *c, uint64_t serial);
 void mtl_stretch(struct mtl_ctx *c, mtl_obj src, const char *swizzle, uint32_t sslice, uint32_t slevel,
                  const struct mtl_rect *sr, struct mtl_target dst, const struct mtl_rect *dr, int linear);
 
+/* Occlusion queries: the samples passing between begin and end, over however many passes. */
+struct mtl_occlusion { uint32_t slot[256]; uint32_t n; uint64_t serial; };
+void mtl_occlusion_begin(struct mtl_ctx *c, struct mtl_occlusion *q);
+void mtl_occlusion_end(struct mtl_ctx *c, struct mtl_occlusion *q);
+int mtl_occlusion_result(struct mtl_ctx *c, const struct mtl_occlusion *q, uint64_t *samples);   /* 1 when done */
+void mtl_commit_nowait(struct mtl_ctx *c);    /* send what is recorded (a query's FLUSH) */
+
 /* Headless tests: Present draws into an offscreen drawable of this size. */
 void mtl_set_test_drawable(uint32_t w, uint32_t h);
 void mtl_read_test_drawable(uint32_t *argb);

@@ -75,3 +75,10 @@ def test_resources(selftest, tmp_path, group):
                                    "lighting", "fog_alpha", "cache"])
 def test_draws(selftest, tmp_path, group):
     check(selftest, group, tmp_path)
+
+
+# ---- Task 7: state blocks, queries, the rest ----
+
+@pytest.mark.parametrize("group", ["stateblock", "query_event", "query_occlusion", "lights_grow", "swapchain2"])
+def test_device_rest(selftest, tmp_path, group):
+    check(selftest, group, tmp_path)

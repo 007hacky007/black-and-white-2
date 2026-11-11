@@ -33,9 +33,20 @@ void d3d_bind(uint32_t *slot, uint32_t obj) {
     if (old) d3d_release(old);
 }
 
-/* ---- the implicit swap chain ---- */
-struct d3d_swapchain { struct d3d_obj base; uint32_t device; };
-static void destroy_swapchain(struct d3d_obj *o) { free(o); }
+/* ---- swap chains: the implicit one (backbuffer 0: the device's) and additional ones ---- */
+struct d3d_swapchain { struct d3d_obj base; uint32_t device, backbuffer, pp[14]; };
+static void destroy_swapchain(struct d3d_obj *o) {
+    struct d3d_swapchain *sc = (struct d3d_swapchain *)o;
+    uint32_t dev = sc->backbuffer ? sc->device : 0;
+    if (sc->backbuffer) d3d_release(sc->backbuffer);
+    if (dev && d3d_alive(dev)) {
+        ((struct d3d_device *)d3d_host(dev, D3DK_DEVICE))->default_pool_live--;
+        free(sc);
+        d3d_release(dev);
+        return;
+    }
+    free(sc);
+}
 
 /* ---- creation and Reset ---- */
 static void window_client(uint32_t hwnd, uint32_t *w, uint32_t *h) {
@@ -102,6 +113,8 @@ static void unbind_all(struct d3d_device *d) {
 static void destroy_device(struct d3d_obj *o) {
     struct d3d_device *d = (struct d3d_device *)o;
     unbind_all(d);
+    d3d_bind(&d->last_presented, 0);
+    free(d->palettes);
     drop_targets(d);
     if (d->swapchain) d3d_release(d->swapchain);
     mtl_flush(d->mtl);
@@ -210,10 +223,12 @@ static void dv_Clear(void) {               /* (this, count, D3DRECT*, flags, col
     RET(D3D_OK, 7);
 }
 
-static void present(struct d3d_device *d) {
-    struct d3d_surface *bb = d3d_surf(d->backbuffer);
+static void present_bb(struct d3d_device *d, uint32_t bbobj) {
+    struct d3d_surface *bb = d3d_surf(bbobj);
     mtl_present(d->mtl, bb->tex);
+    d3d_bind(&d->last_presented, bbobj);
 }
+static void present(struct d3d_device *d) { present_bb(d, d->backbuffer); }
 static void dv_Present(void) {             /* (this, src, dst, hwnd, dirty) */
     present(d3d_dev(A32(0)));
     RET(D3D_OK, 5);
@@ -318,6 +333,7 @@ static void dv_Reset(void) {               /* (this, D3DPRESENT_PARAMETERS*) */
     if (hr) RET(hr, 2);
     mtl_flush(d->mtl);
     unbind_all(d);
+    d3d_bind(&d->last_presented, 0);
     drop_targets(d);
     memcpy(d->pp, pp, sizeof pp);
     make_targets(d);
@@ -426,15 +442,116 @@ static void dv_EndScene(void) {
 /* ---- IDirect3DSwapChain9 ---- */
 static struct d3d_swapchain *swc(uint32_t o) { return d3d_host(o, D3DK_SWAPCHAIN); }
 static void sc_Present(void) {             /* (this, src, dst, hwnd, dirty, flags) */
-    present(d3d_dev(swc(A32(0))->device));
+    struct d3d_swapchain *sc = swc(A32(0));
+    struct d3d_device *d = d3d_dev(sc->device);
+    present_bb(d, sc->backbuffer ? sc->backbuffer : d->backbuffer);
     RET(D3D_OK, 6);
 }
 static void sc_GetBackBuffer(void) {       /* (this, index, type, IDirect3DSurface9**) */
-    struct d3d_device *d = d3d_dev(swc(A32(0))->device);
-    if (A32(1) >= d->pp[3] || !A32(3)) RET(D3DERR_INVALIDCALL, 4);
-    d3d_addref(d->backbuffer);
-    MEM32(A32(3)) = d->backbuffer;
+    struct d3d_swapchain *sc = swc(A32(0));
+    struct d3d_device *d = d3d_dev(sc->device);
+    uint32_t bb = sc->backbuffer ? sc->backbuffer : d->backbuffer;
+    if (A32(1) >= (sc->backbuffer ? sc->pp[3] : d->pp[3]) || !A32(3)) RET(D3DERR_INVALIDCALL, 4);
+    d3d_addref(bb);
+    MEM32(A32(3)) = bb;
     RET(D3D_OK, 4);
+}
+/* The front buffer: the back buffer Present showed last, into an A8R8G8B8 system-memory surface. */
+static uint32_t front_buffer(struct d3d_device *d, uint32_t dst) {
+    struct d3d_surface *t = d3d_surf(dst);
+    if (t->pool != D3DPOOL_SYSTEMMEM || t->fmt != D3DFMT_A8R8G8B8 || !d->last_presented) return D3DERR_INVALIDCALL;
+    struct d3d_surface *s = d3d_surf(d->last_presented);
+    if (t->w < s->w || t->h < s->h || s->f->conv != CV_NONE || s->f->bytes != 4) return D3DERR_INVALIDCALL;
+    uint32_t sp = s->w * 4;
+    uint8_t *tmp = malloc((size_t)sp * s->h), *out = hle_ptr(d3d_surface_mem(t));
+    mtl_tex_download(d->mtl, s->tex, s->slice, s->level, 0, 0, s->w, s->h, tmp, sp);
+    for (uint32_t y = 0; y < s->h; y++) {
+        memcpy(out + y * t->pitch, tmp + y * sp, sp);
+        for (uint32_t x = 0; x < s->w; x++) out[y * t->pitch + 4 * x + 3] = 0xFF;
+    }
+    free(tmp);
+    return D3D_OK;
+}
+static void sc_GetFrontBufferData(void) {  /* (this, surface) */
+    struct d3d_swapchain *sc = swc(A32(0));
+    RET(front_buffer(d3d_dev(sc->device), A32(1)), 2);
+}
+static void dv_GetFrontBufferData(void) {  /* (this, swapchain, surface) */
+    struct d3d_device *d = d3d_dev(A32(0));
+    if (A32(1) != 0) RET(D3DERR_INVALIDCALL, 3);
+    RET(front_buffer(d, A32(2)), 3);
+}
+static void dv_CreateAdditionalSwapChain(void) {   /* (this, D3DPRESENT_PARAMETERS*, IDirect3DSwapChain9**) */
+    struct d3d_device *d = d3d_dev(A32(0));
+    uint32_t pp[14];
+    if (!A32(1) || !A32(2)) RET(D3DERR_INVALIDCALL, 3);
+    uint32_t hr = check_pp(d->focus, A32(1), pp);
+    if (hr) RET(hr, 3);
+    struct d3d_swapchain *sc = calloc(1, sizeof *sc);
+    sc->base.destroy = destroy_swapchain, sc->device = d->base.guest;
+    memcpy(sc->pp, pp, sizeof pp);
+    sc->backbuffer = d3d_surface_new(d->base.guest, 0, pp[2], D3DUSAGE_RENDERTARGET, D3DPOOL_DEFAULT, pp[0], pp[1],
+                                     NULL, 0, 0, 0);
+    d->default_pool_live++;                              /* released before Reset, like a DEFAULT resource */
+    d3d_addref(d->base.guest);
+    MEM32(A32(2)) = d3d_new(D3DK_SWAPCHAIN, "IDirect3DSwapChain9", &sc->base);
+    RET(D3D_OK, 3);
+}
+static void dv_SetSoftwareVertexProcessing(void) {
+    struct d3d_device *d = d3d_dev(A32(0));
+    d->st.sw_vp = A32(1) != 0;
+    RET(D3D_OK, 2);
+}
+static void dv_GetSoftwareVertexProcessing(void) { RET(d3d_dev(A32(0))->st.sw_vp, 1); }
+static void dv_SetNPatchMode(void) {       /* (this, float segments) */
+    struct d3d_device *d = d3d_dev(A32(0));
+    if (A32(1) != 0) d3d_fail("N-patches (SetNPatchMode 0x%08X) are not supported", A32(1));
+    d3d_ws(d, SBW_NPATCH, 0, 0)->npatch_mode = 0;
+    RET(D3D_OK, 2);
+}
+static void dv_GetNPatchMode(void) { RET(d3d_dev(A32(0))->st.npatch_mode, 1); }
+static void dv_SetClipStatus(void) {
+    struct d3d_device *d = d3d_dev(A32(0));
+    if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
+    memcpy(d->clip_status, APTR(1), 8);
+    RET(D3D_OK, 2);
+}
+static void dv_GetClipStatus(void) {
+    struct d3d_device *d = d3d_dev(A32(0));
+    if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
+    memcpy(APTR(1), d->clip_status, 8);
+    RET(D3D_OK, 2);
+}
+static void dv_SetPaletteEntries(void) {   /* (this, number, PALETTEENTRY[256]) */
+    struct d3d_device *d = d3d_dev(A32(0));
+    uint32_t n = A32(1);
+    if (!A32(2) || n > 0xFFFF) RET(D3DERR_INVALIDCALL, 3);
+    if (n >= d->npalettes) {
+        uint32_t k = n + 1;
+        d->palettes = realloc(d->palettes, sizeof *d->palettes * k);
+        memset(d->palettes + d->npalettes, 0, sizeof *d->palettes * (k - d->npalettes));
+        d->npalettes = k;
+    }
+    memcpy(d->palettes[n], APTR(2), 1024);
+    RET(D3D_OK, 3);
+}
+static void dv_GetPaletteEntries(void) {
+    struct d3d_device *d = d3d_dev(A32(0));
+    if (!A32(2) || A32(1) >= d->npalettes) RET(D3DERR_INVALIDCALL, 3);
+    memcpy(APTR(2), d->palettes[A32(1)], 1024);
+    RET(D3D_OK, 3);
+}
+static void dv_SetCurrentTexturePalette(void) {
+    struct d3d_device *d = d3d_dev(A32(0));
+    if (A32(1) >= d->npalettes) RET(D3DERR_INVALIDCALL, 2);
+    d->st.palette_cur = A32(1);
+    RET(D3D_OK, 2);
+}
+static void dv_GetCurrentTexturePalette(void) {
+    struct d3d_device *d = d3d_dev(A32(0));
+    if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
+    MEM32(A32(1)) = d->st.palette_cur;
+    RET(D3D_OK, 2);
 }
 static void sc_GetRasterStatus(void) {
     (void)swc(A32(0));
@@ -456,9 +573,10 @@ static void sc_GetDevice(void) {
     RET(D3D_OK, 2);
 }
 static void sc_GetPresentParameters(void) {
-    struct d3d_device *d = d3d_dev(swc(A32(0))->device);
+    struct d3d_swapchain *sc = swc(A32(0));
+    struct d3d_device *d = d3d_dev(sc->device);
     if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
-    memcpy(APTR(1), d->pp, 56);
+    memcpy(APTR(1), sc->backbuffer ? sc->pp : d->pp, 56);
     RET(D3D_OK, 2);
 }
 
@@ -500,5 +618,18 @@ static const win32hle_shim g_impls[] = {
     { "IDirect3DSwapChain9::GetDisplayMode", sc_GetDisplayMode },
     { "IDirect3DSwapChain9::GetDevice", sc_GetDevice },
     { "IDirect3DSwapChain9::GetPresentParameters", sc_GetPresentParameters },
+    { "IDirect3DSwapChain9::GetFrontBufferData", sc_GetFrontBufferData },
+    { "IDirect3DDevice9::GetFrontBufferData", dv_GetFrontBufferData },
+    { "IDirect3DDevice9::CreateAdditionalSwapChain", dv_CreateAdditionalSwapChain },
+    { "IDirect3DDevice9::SetSoftwareVertexProcessing", dv_SetSoftwareVertexProcessing },
+    { "IDirect3DDevice9::GetSoftwareVertexProcessing", dv_GetSoftwareVertexProcessing },
+    { "IDirect3DDevice9::SetNPatchMode", dv_SetNPatchMode },
+    { "IDirect3DDevice9::GetNPatchMode", dv_GetNPatchMode },
+    { "IDirect3DDevice9::SetClipStatus", dv_SetClipStatus },
+    { "IDirect3DDevice9::GetClipStatus", dv_GetClipStatus },
+    { "IDirect3DDevice9::SetPaletteEntries", dv_SetPaletteEntries },
+    { "IDirect3DDevice9::GetPaletteEntries", dv_GetPaletteEntries },
+    { "IDirect3DDevice9::SetCurrentTexturePalette", dv_SetCurrentTexturePalette },
+    { "IDirect3DDevice9::GetCurrentTexturePalette", dv_GetCurrentTexturePalette },
     { 0, 0 } };
 void d3d9_device_register(void) { d3d_impls(g_impls); }

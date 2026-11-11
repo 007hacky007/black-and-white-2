@@ -98,7 +98,8 @@ static void s_SetRenderState(void) {                   /* (this, state, value) *
     struct d3d_device *d = d3d_dev(A32(0));
     uint32_t s = A32(1), v = A32(2);
     if (s >= NRS) RET(D3DERR_INVALIDCALL, 3);
-    if (d->st.rs[s] != v) d->st.rs[s] = v, d->st.dirty |= rs_group(s);
+    struct d3d_state *w = d3d_ws(d, SBW_RS, s, 0);
+    if (w->rs[s] != v) w->rs[s] = v, w->dirty |= rs_group(s);
     RET(D3D_OK, 3);
 }
 static void s_GetRenderState(void) {                   /* (this, state, DWORD*) */
@@ -113,7 +114,8 @@ static void s_SetSamplerState(void) {                  /* (this, sampler, type, 
     int i = smp_index(A32(1));
     uint32_t t = A32(2), v = A32(3);
     if (i < 0 || t == 0 || t >= NSS) RET(D3DERR_INVALIDCALL, 4);
-    if (d->st.ss[i][t] != v) d->st.ss[i][t] = v, d->st.dirty |= DIRTY_SAMPLER | DIRTY_STAGE;
+    struct d3d_state *w = d3d_ws(d, SBW_SS, (uint32_t)i, t);
+    if (w->ss[i][t] != v) w->ss[i][t] = v, w->dirty |= DIRTY_SAMPLER | DIRTY_STAGE;
     RET(D3D_OK, 4);
 }
 static void s_GetSamplerState(void) {
@@ -128,7 +130,8 @@ static void s_SetTextureStageState(void) {             /* (this, stage, type, va
     struct d3d_device *d = d3d_dev(A32(0));
     uint32_t i = A32(1), t = A32(2), v = A32(3);
     if (i >= NTS || t == 0 || t >= NTSS) RET(D3DERR_INVALIDCALL, 4);
-    if (d->st.tss[i][t] != v) d->st.tss[i][t] = v, d->st.dirty |= DIRTY_STAGE;
+    struct d3d_state *w = d3d_ws(d, SBW_TSS, i, t);
+    if (w->tss[i][t] != v) w->tss[i][t] = v, w->dirty |= DIRTY_STAGE;
     RET(D3D_OK, 4);
 }
 static void s_GetTextureStageState(void) {
@@ -143,7 +146,8 @@ static void s_SetViewport(void) {                      /* (this, D3DVIEWPORT9*) 
     if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
     struct d3d_viewport v;
     memcpy(&v, APTR(1), sizeof v);
-    if (memcmp(&v, &d->st.vp, sizeof v)) d->st.vp = v, d->st.dirty |= DIRTY_VIEW;
+    struct d3d_state *w = d3d_ws(d, SBW_VP, 0, 0);
+    if (memcmp(&v, &w->vp, sizeof v)) w->vp = v, w->dirty |= DIRTY_VIEW;
     RET(D3D_OK, 2);
 }
 static void s_GetViewport(void) {
@@ -155,8 +159,9 @@ static void s_GetViewport(void) {
 static void s_SetScissorRect(void) {                   /* (this, RECT*) */
     struct d3d_device *d = d3d_dev(A32(0));
     if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
-    memcpy(&d->st.scissor, APTR(1), sizeof d->st.scissor);
-    d->st.dirty |= DIRTY_VIEW;
+    struct d3d_state *w = d3d_ws(d, SBW_SCISSOR, 0, 0);
+    memcpy(&w->scissor, APTR(1), sizeof w->scissor);
+    w->dirty |= DIRTY_VIEW;
     RET(D3D_OK, 2);
 }
 static void s_GetScissorRect(void) {

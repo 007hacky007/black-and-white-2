@@ -378,9 +378,10 @@ static void dv_SetTexture(void) {          /* (this, stage, IDirect3DBaseTexture
         struct d3d_texture *t = d3d_tex(A32(2));
         if (t->pool == D3DPOOL_SYSTEMMEM || t->pool == D3DPOOL_SCRATCH) RET(D3DERR_INVALIDCALL, 3);
     }
-    if (d->st.tex[i] != A32(2)) {
-        d3d_bind(&d->st.tex[i], A32(2));
-        d->st.dirty |= DIRTY_SAMPLER | DIRTY_STAGE;
+    struct d3d_state *w = d3d_ws(d, SBW_TEX, (uint32_t)i, 0);
+    if (w->tex[i] != A32(2)) {
+        d3d_bind(&w->tex[i], A32(2));
+        w->dirty |= DIRTY_SAMPLER | DIRTY_STAGE;
     }
     RET(D3D_OK, 3);
 }

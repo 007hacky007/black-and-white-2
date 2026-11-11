@@ -106,9 +106,10 @@ static void vd_GetDeclaration(void) {      /* (this, D3DVERTEXELEMENT9*, UINT* c
 static void dv_SetVertexDeclaration(void) {
     struct d3d_device *d = d3d_dev(A32(0));
     if (A32(1)) (void)vdecl(A32(1));
-    d3d_bind(&d->st.vdecl, A32(1));
-    d->st.fvf = A32(1) ? vdecl(A32(1))->fvf : 0;
-    d->st.dirty |= DIRTY_INPUT;
+    struct d3d_state *w = d3d_ws(d, SBW_VDECL, 0, 0);
+    d3d_bind(&w->vdecl, A32(1));
+    w->fvf = A32(1) ? vdecl(A32(1))->fvf : 0;
+    w->dirty |= DIRTY_INPUT;
     RET(D3D_OK, 2);
 }
 static void dv_GetVertexDeclaration(void) {
@@ -121,17 +122,18 @@ static void dv_GetVertexDeclaration(void) {
 static void dv_SetFVF(void) {              /* (this, fvf): the FVF's own declaration */
     struct d3d_device *d = d3d_dev(A32(0));
     uint32_t fvf = A32(1);
-    if (!fvf) { d->st.fvf = 0; RET(D3D_OK, 2); }
+    struct d3d_state *w = d3d_ws(d, SBW_VDECL, 0, 0);
+    if (!fvf) { w->fvf = 0; RET(D3D_OK, 2); }
     uint8_t el[32][8];
     uint32_t n = fvf_elements(fvf, el);
     if (!n) RET(D3DERR_INVALIDCALL, 2);
-    if (!d->st.vdecl || vdecl(d->st.vdecl)->fvf != fvf) {
+    if (!w->vdecl || vdecl(w->vdecl)->fvf != fvf) {
         uint32_t v = vdecl_new(0, (const uint8_t (*)[8])el, n, fvf);
-        d3d_bind(&d->st.vdecl, v);
+        d3d_bind(&w->vdecl, v);
         d3d_release(v);
     }
-    d->st.fvf = fvf;
-    d->st.dirty |= DIRTY_INPUT;
+    w->fvf = fvf;
+    w->dirty |= DIRTY_INPUT;
     RET(D3D_OK, 2);
 }
 static void dv_GetFVF(void) {
@@ -281,8 +283,9 @@ static void dv_SetTransform(void) {        /* (this, D3DTRANSFORMSTATETYPE, D3DM
     struct d3d_device *d = d3d_dev(A32(0));
     int i = xform_index(A32(1));
     if (i < 0 || !A32(2)) RET(D3DERR_INVALIDCALL, 3);
-    memcpy(d->st.xform[i], APTR(2), 64);
-    d->st.dirty |= DIRTY_XFORM;
+    struct d3d_state *w = d3d_ws(d, SBW_XFORM, (uint32_t)i, 0);
+    memcpy(w->xform[i], APTR(2), 64);
+    w->dirty |= DIRTY_XFORM;
     RET(D3D_OK, 3);
 }
 static void dv_GetTransform(void) {
@@ -301,8 +304,9 @@ static void dv_MultiplyTransform(void) {   /* M = M * given */
     for (int r = 0; r < 4; r++)
         for (int c = 0; c < 4; c++)
             o[r * 4 + c] = a[r * 4] * b[c] + a[r * 4 + 1] * b[4 + c] + a[r * 4 + 2] * b[8 + c] + a[r * 4 + 3] * b[12 + c];
-    memcpy(d->st.xform[i], o, 64);
-    d->st.dirty |= DIRTY_XFORM;
+    struct d3d_state *w = d3d_ws(d, SBW_XFORM, (uint32_t)i, 0);
+    memcpy(w->xform[i], o, 64);
+    w->dirty |= DIRTY_XFORM;
     RET(D3D_OK, 3);
 }
 static struct d3d_light *light(struct d3d_state *st, uint32_t i, int grow) {
@@ -320,10 +324,11 @@ static void dv_SetLight(void) {            /* (this, index, D3DLIGHT9*) */
     if (!A32(2)) RET(D3DERR_INVALIDCALL, 3);
     uint32_t type = MEM32(A32(2));
     if (type < 1 || type > 3) RET(D3DERR_INVALIDCALL, 3);
-    struct d3d_light *l = light(&d->st, A32(1), 1);
+    struct d3d_state *w = d3d_ws(d, SBW_LIGHT, A32(1), 0);
+    struct d3d_light *l = light(w, A32(1), 1);
     memcpy(l->data, APTR(2), 104);
     l->set = 1;
-    d->st.dirty |= DIRTY_LIGHT;
+    w->dirty |= DIRTY_LIGHT;
     RET(D3D_OK, 3);
 }
 static void dv_GetLight(void) {
@@ -335,7 +340,8 @@ static void dv_GetLight(void) {
 }
 static void dv_LightEnable(void) {         /* (this, index, enable): an unset light becomes the default one */
     struct d3d_device *d = d3d_dev(A32(0));
-    struct d3d_light *l = light(&d->st, A32(1), 1);
+    struct d3d_state *w = d3d_ws(d, SBW_LIGHT, A32(1), 0);
+    struct d3d_light *l = light(w, A32(1), 1);
     if (!l->set) {
         memset(l->data, 0, sizeof l->data);
         l->data[0] = 3;                                 /* directional, white diffuse, direction (0, 0, 1) */
@@ -345,7 +351,7 @@ static void dv_LightEnable(void) {         /* (this, index, enable): an unset li
         l->set = 1;
     }
     l->enabled = A32(2) != 0;
-    d->st.dirty |= DIRTY_LIGHT;
+    w->dirty |= DIRTY_LIGHT;
     RET(D3D_OK, 3);
 }
 static void dv_GetLightEnable(void) {      /* (this, index, BOOL*): TRUE is 128 for an enabled light, as D3D */
@@ -358,8 +364,9 @@ static void dv_GetLightEnable(void) {      /* (this, index, BOOL*): TRUE is 128 
 static void dv_SetMaterial(void) {
     struct d3d_device *d = d3d_dev(A32(0));
     if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
-    memcpy(d->st.material, APTR(1), 68);
-    d->st.dirty |= DIRTY_LIGHT;
+    struct d3d_state *w = d3d_ws(d, SBW_MATERIAL, 0, 0);
+    memcpy(w->material, APTR(1), 68);
+    w->dirty |= DIRTY_LIGHT;
     RET(D3D_OK, 2);
 }
 static void dv_GetMaterial(void) {
@@ -371,7 +378,7 @@ static void dv_GetMaterial(void) {
 static void dv_SetClipPlane(void) {        /* (this, index, float[4]) */
     struct d3d_device *d = d3d_dev(A32(0));
     if (A32(1) >= 6 || !A32(2)) RET(D3DERR_INVALIDCALL, 3);
-    memcpy(d->st.clip[A32(1)], APTR(2), 16);
+    memcpy(d3d_ws(d, SBW_CLIP, A32(1), 0)->clip[A32(1)], APTR(2), 16);
     RET(D3D_OK, 3);
 }
 static void dv_GetClipPlane(void) {
@@ -387,13 +394,13 @@ static void dv_CreatePixelShader(void) { d3d_later("IDirect3DDevice9::CreatePixe
 static void dv_SetVertexShader(void) {
     struct d3d_device *d = d3d_dev(A32(0));
     if (A32(1)) d3d_fail("SetVertexShader of a shader this plan cannot have made");
-    d3d_bind(&d->st.vs, 0);
+    d3d_bind(&d3d_ws(d, SBW_VS, 0, 0)->vs, 0);
     RET(D3D_OK, 2);
 }
 static void dv_SetPixelShader(void) {
     struct d3d_device *d = d3d_dev(A32(0));
     if (A32(1)) d3d_fail("SetPixelShader of a shader this plan cannot have made");
-    d3d_bind(&d->st.ps, 0);
+    d3d_bind(&d3d_ws(d, SBW_PS, 0, 0)->ps, 0);
     RET(D3D_OK, 2);
 }
 static void dv_GetVertexShader(void) {
@@ -416,21 +423,22 @@ static uint32_t consts(void *base, uint32_t nregs, uint32_t elem, uint32_t start
     else memcpy(hle_ptr(data), p, (size_t)n * elem);
     return D3D_OK;
 }
-#define CONSTS(NAME, FIELD, NREGS, ELEM, SET) \
+#define CONSTS(NAME, FIELD, NREGS, ELEM, SET, W) \
     static void NAME(void) { struct d3d_device *d = d3d_dev(A32(0)); \
-        RET(consts(d->st.FIELD, NREGS, ELEM, A32(1), A32(2), A32(3), SET), 4); }
-CONSTS(dv_SetVSF, vsf, 256, 16, 1)
-CONSTS(dv_GetVSF, vsf, 256, 16, 0)
-CONSTS(dv_SetVSI, vsi, 16, 16, 1)
-CONSTS(dv_GetVSI, vsi, 16, 16, 0)
-CONSTS(dv_SetVSB, vsb, 16, 4, 1)
-CONSTS(dv_GetVSB, vsb, 16, 4, 0)
-CONSTS(dv_SetPSF, psf, 224, 16, 1)
-CONSTS(dv_GetPSF, psf, 224, 16, 0)
-CONSTS(dv_SetPSI, psi, 16, 16, 1)
-CONSTS(dv_GetPSI, psi, 16, 16, 0)
-CONSTS(dv_SetPSB, psb, 16, 4, 1)
-CONSTS(dv_GetPSB, psb, 16, 4, 0)
+        struct d3d_state *w = SET && A32(1) <= NREGS && A32(3) <= NREGS - A32(1) ? d3d_ws(d, W, A32(1), A32(3)) : &d->st; \
+        RET(consts(w->FIELD, NREGS, ELEM, A32(1), A32(2), A32(3), SET), 4); }
+CONSTS(dv_SetVSF, vsf, 256, 16, 1, SBW_VSF)
+CONSTS(dv_GetVSF, vsf, 256, 16, 0, SBW_VSF)
+CONSTS(dv_SetVSI, vsi, 16, 16, 1, SBW_VSI)
+CONSTS(dv_GetVSI, vsi, 16, 16, 0, SBW_VSI)
+CONSTS(dv_SetVSB, vsb, 16, 4, 1, SBW_VSB)
+CONSTS(dv_GetVSB, vsb, 16, 4, 0, SBW_VSB)
+CONSTS(dv_SetPSF, psf, 224, 16, 1, SBW_PSF)
+CONSTS(dv_GetPSF, psf, 224, 16, 0, SBW_PSF)
+CONSTS(dv_SetPSI, psi, 16, 16, 1, SBW_PSI)
+CONSTS(dv_GetPSI, psi, 16, 16, 0, SBW_PSI)
+CONSTS(dv_SetPSB, psb, 16, 4, 1, SBW_PSB)
+CONSTS(dv_GetPSB, psb, 16, 4, 0, SBW_PSB)
 
 static void dv_ValidateDevice(void) {      /* (this, DWORD* passes) */
     (void)d3d_dev(A32(0));

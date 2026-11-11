@@ -66,6 +66,18 @@ struct d3d_state {
     uint32_t dirty;
 };
 
+/* What a state block holds (plan 4 Task 7). */
+struct d3d_sbmask {
+    uint8_t rs[NRS], ss[NSMP][NSS], tss[NTS][NTSS], xform[512], clip[6], tex[NSMP], stream[16], freq[16];
+    uint8_t material, vp, scissor, indices, vdecl, vs, ps, npatch, all_lights;
+    uint8_t vsf[256], psf[224], vsi[16], psi[16], vsb[16], psb[16];
+    uint8_t *light;                      /* per light index */
+    uint32_t nlight;
+};
+enum sbw { SBW_RS, SBW_SS, SBW_TSS, SBW_XFORM, SBW_CLIP, SBW_TEX, SBW_STREAM, SBW_FREQ, SBW_MATERIAL, SBW_VP,
+           SBW_SCISSOR, SBW_INDICES, SBW_VDECL, SBW_VS, SBW_PS, SBW_NPATCH, SBW_VSF, SBW_PSF, SBW_VSI, SBW_PSI,
+           SBW_VSB, SBW_PSB, SBW_LIGHT };
+
 struct d3d_device {
     struct d3d_obj base;
     uint32_t d3d9;                       /* the IDirect3D9 it came from (referenced) */
@@ -80,6 +92,10 @@ struct d3d_device {
     uint16_t gamma[768];
     uint32_t cursor_x, cursor_y, cursor_shown, dialog_mode;
     uint32_t recording;                  /* the state block being recorded, or 0 (Task 7) */
+    uint32_t last_presented;             /* the back buffer Present showed last (GetFrontBufferData) */
+    uint32_t clip_status[2];
+    uint32_t (*palettes)[256];
+    uint32_t npalettes;
     struct mtl_ctx *mtl;
 };
 
@@ -139,6 +155,12 @@ uint32_t d3d9_create_device(uint32_t d3d9, uint32_t adapter, uint32_t type, uint
                             uint32_t pp, uint32_t *out);
 void d3d_bind(uint32_t *slot, uint32_t obj);           /* replace a referenced binding */
 void d3d_apply_targets(struct d3d_device *d);          /* the bound targets to the Metal pass */
+
+/* d3d9_stateblock.c: where a Set writes. While a state block is being recorded,
+ * that is the block (marked as set) and the device is unchanged; otherwise the device. */
+struct d3d_state *d3d_ws(struct d3d_device *d, enum sbw what, uint32_t i, uint32_t j);
+void d3d9_stateblock_register(void);
+void d3d9_query_register(void);
 
 /* d3d9_state.c */
 void d3d_state_defaults(struct d3d_state *st, int auto_ds, uint32_t rt_w, uint32_t rt_h);

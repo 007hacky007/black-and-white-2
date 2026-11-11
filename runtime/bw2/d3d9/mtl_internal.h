@@ -30,6 +30,9 @@
 @property(atomic) uint64_t completed;         /* serial of the last finished one */
 @property uint64_t frames, encGen;
 @property int vsync;
+@property(strong) id<MTLBuffer> vis;             /* occlusion counts, 8 bytes per slot */
+@property uint32_t visNext;
+@property struct mtl_occlusion *occl;            /* the query counting now, or NULL */
 @end
 
 MTLPixelFormat mtl_pixfmt(enum mtl_store st, int srgb);
