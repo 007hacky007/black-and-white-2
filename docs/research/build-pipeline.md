@@ -132,8 +132,8 @@ NFSU2's roughly 2 minutes for 2.3x less code.
   immediates (`white-1.42.extra-starts.json`), and 138 of the protection VM's
   native entries, exits and thunks (`white-1.42.vm-extra-starts.json`). The
   link set is 49,423 functions, and the VM module is 330 functions.
-- The VM module is lifted with computed returns and run-time `push` operands
-  (`docs/research/boot.md`).
+- Every module is lifted with computed returns, and the VM module also with
+  run-time `push` operands (`docs/research/boot.md`). The engine is 114 MB.
 - EH landing pads: 9 white functions (9 continuations) and 1 in ScriptLibraryR.
 - Lifted back-edges hand the machine to other guest threads (`RECOMP_BACKEDGE`).
 - `python -m bw2.pipeline --only vm` relifts one module and reuses the others.

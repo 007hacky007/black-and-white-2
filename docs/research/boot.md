@@ -119,9 +119,10 @@ lift did not do, both checked against the original x86 under Unicorn:
 
 1. **Computed returns.** The interpreter leaves through `pop eax; popal;
    popfd; ret` to an address its bytecode put on the stack: one of the exits
-   above, a re-entry stub, or the caller. The VM module is lifted with
+   above, a re-entry stub, or the caller. Every module is lifted with
    pcrecomp's `computed_ret`: a `ret` that does not find the lift's dummy
-   return address jumps to what it finds.
+   return address jumps to what it finds. That covers game code the VM calls
+   that returns into the VM. It grows the engine from 95 MB to 114 MB.
 2. **Self-modifying entry stubs.** The VM rewrites the `push` operand of its
    re-entry stubs while it runs: the handler at `0x242A7D4` writes `0x24507E2`
    with the bytecode address to resume at. Lifted with the operand from the
@@ -129,11 +130,16 @@ lift did not do, both checked against the original x86 under Unicorn:
    `push` now reads its operand from guest memory when it runs (`bw2/lift.py`
    `runtime_push`).
 
-**Oracle check:** `tests/test_boot.py::test_vm_call_matches_unicorn` calls the
-game's first VM function, `0x242917C`, with the arguments the game passes,
-both lifted (`out/bw2 --call`) and natively under Unicorn (`bw2/pe32emu.py`).
-Both return 1. Natively the call leaves the interpreter three times, through
+**Oracle check:** `tests/test_boot.py::test_vm_calls_match_unicorn` calls each
+of the 18 VM functions the game calls, with two sets of arguments, both lifted
+(`out/bw2 --call`) and natively under Unicorn (`bw2/pe32emu.py`), from the same
+fresh state. All 36 results match. For example, the game's first VM call,
+`0x242917C`, returns 1; natively it leaves the interpreter three times, through
 `0x24293A4`, `0x24507E1` and `0x2428000`.
+
+**Tripwire:** a drive or volume question stops the run whoever asks it. So does
+any device or CD-audio call, and any import the VM's own code calls other than
+`GetCurrentThreadId`, the one call the boot shows it making.
 
 ### Exceptions
 

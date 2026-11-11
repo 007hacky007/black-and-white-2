@@ -267,8 +267,9 @@ pushed) and run-time `push` operands for its re-entry stubs, which it rewrites
 as it runs. Both were checked against the original x86 under Unicorn
 (`docs/research/boot.md`). A tripwire (`runtime/bw2/guard.c`) stops the run
 with exit code 3 on any `DeviceIoControl`, `Netbios`, raw device open or CD
-audio command, and on drive or volume queries made by the VM; the boot to the
-graphics layer trips none of them.
+audio command, on any drive or volume question whoever asks it, and on any
+import the VM's own code calls other than `GetCurrentThreadId`. The boot to
+the graphics layer trips none of them.
 
 ### 6.3 Size
 
