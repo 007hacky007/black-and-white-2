@@ -324,15 +324,49 @@ static uint32_t capacity(const uint32_t *h) {
     return h[2] == LARGE ? ((h[0] + HDR + GRAN - 1) & ~(GRAN - 1)) - HDR : class_size((int)h[2]) - HDR;
 }
 
+/* ---- quarantine ----
+ * A freed block is not reused (or, if large, released) at once: it waits in a
+ * FIFO until hle_heap_quarantine_bytes of later frees have pushed it out, its
+ * contents as they were. Games read memory they have just freed; with reuse at
+ * once that read sees another object's bytes. 0 turns it off. */
+uint32_t hle_heap_quarantine_bytes = 64u << 20;
+static struct { uint32_t va, cls, bytes; } *g_q;
+static uint32_t g_q_cap, g_q_head, g_q_n;
+static uint64_t g_q_bytes;
+
+static void really_free(uint32_t va, uint32_t cls) {     /* under g_mem_lock */
+    if (cls == LARGE) vm_release_locked(va);
+    else { *(uint32_t *)host(va + HDR) = g_free[cls]; g_free[cls] = va; }
+}
+
+static void quarantine(uint32_t va, uint32_t cls, uint32_t bytes) {   /* under g_mem_lock */
+    if (g_q_n == g_q_cap) {                                /* grow the ring, oldest first */
+        uint32_t cap = g_q_cap ? g_q_cap * 2 : 4096;
+        void *q = malloc(sizeof *g_q * cap);
+        if (!q) { really_free(va, cls); return; }
+        for (uint32_t i = 0; i < g_q_n; i++) memcpy((char *)q + sizeof *g_q * i, &g_q[(g_q_head + i) % g_q_cap], sizeof *g_q);
+        free(g_q);
+        g_q = q, g_q_cap = cap, g_q_head = 0;
+    }
+    uint32_t tail = (g_q_head + g_q_n++) % g_q_cap;
+    g_q[tail].va = va, g_q[tail].cls = cls, g_q[tail].bytes = bytes;
+    g_q_bytes += bytes;
+    while (g_q_n && g_q_bytes > hle_heap_quarantine_bytes) {
+        really_free(g_q[g_q_head].va, g_q[g_q_head].cls);
+        g_q_bytes -= g_q[g_q_head].bytes;
+        g_q_head = (g_q_head + 1) % g_q_cap, g_q_n--;
+    }
+}
+
 void hle_heap_free(void *u) {
     if (!u) return;
     if (!hle_heap_ok(u)) { fprintf(stderr, "[win32hle] free of a block this heap did not hand out: %p\n", u); return; }
     uint32_t *h = (uint32_t *)u - 4;
-    uint32_t va = hle_va(h);
+    uint32_t va = hle_va(h), cls = h[2];
+    uint32_t bytes = cls == LARGE ? ((h[0] + HDR + GRAN - 1) & ~(GRAN - 1)) : class_size((int)cls);
     h[1] = 0;
     pthread_mutex_lock(&g_mem_lock);
-    if (h[2] == LARGE) vm_release_locked(va);
-    else { *(uint32_t *)u = g_free[h[2]]; g_free[h[2]] = va; }
+    quarantine(va, cls, bytes);
     pthread_mutex_unlock(&g_mem_lock);
 }
 
