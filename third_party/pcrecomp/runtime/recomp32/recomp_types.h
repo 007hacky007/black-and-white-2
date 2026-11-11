@@ -25,11 +25,19 @@
 /* Not an x86 host (arm64): rdtsc reads a monotonic nanosecond count, a
  * counter that rises steadily, which is all a game times with it. */
 #include <time.h>
-static inline uint64_t __rdtsc(void) {
+/* A host may define its own (a counter at a fixed clock rate: a game that times
+ * the CPU with rdtsc reads its speed from it); weak, so this one is the default.
+ * The file that defines a host's own defines RECOMP_HOST_CPU first. */
+#ifdef RECOMP_HOST_CPU
+uint64_t recomp_rdtsc(void);
+#else
+__attribute__((weak)) uint64_t recomp_rdtsc(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+#endif
+static inline uint64_t __rdtsc(void) { return recomp_rdtsc(); }
 #endif
 
 /* ============================================================
@@ -1078,6 +1086,13 @@ RECOMP_WEAK uint32_t g_cpuid_edx_ext = 0xFFFFFFFFu;
  * SIMD paths by family alone (Crypto++ on family 0xF), past the feature bits. */
 RECOMP_WEAK uint32_t g_cpuid_signature = 0;
 
+/* On a host that is not x86, CPUID's answer: weak, so a host can describe the
+ * CPU its guest should see; the default leaves the registers as they were. */
+#ifdef RECOMP_HOST_CPU
+void recomp_cpuid(uint32_t leaf, uint32_t subleaf);
+#else
+__attribute__((weak)) void recomp_cpuid(uint32_t leaf, uint32_t subleaf) { (void)leaf; (void)subleaf; }
+#endif
 static inline void CPUID_impl(uint32_t eax_val, uint32_t ebx_val, uint32_t ecx_val, uint32_t edx_val) {
 #ifdef _MSC_VER
     int info[4];
@@ -1087,8 +1102,12 @@ static inline void CPUID_impl(uint32_t eax_val, uint32_t ebx_val, uint32_t ecx_v
                         if (g_cpuid_signature) g_eax = g_cpuid_signature; }
     if (eax_val == 0x80000001u) g_edx &= g_cpuid_edx_ext;
     (void)ebx_val; (void)edx_val;
-#else
+#elif defined(__i386__) || defined(__x86_64__)
     (void)eax_val; (void)ebx_val; (void)ecx_val; (void)edx_val;
+#else
+    /* Not an x86 host: the host answers (recomp_cpuid sets g_eax..g_edx). */
+    (void)ebx_val; (void)edx_val;
+    recomp_cpuid(eax_val, ecx_val);
 #endif
 }
 
