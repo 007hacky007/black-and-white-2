@@ -1,4 +1,6 @@
-# Plan 5: Input and the game window Implementation Plan
+# Plan 6: Input and the game window Implementation Plan
+
+**Status (user, 2026-11-11): deferred.** The game reads no input before the shader stage, so shaders and effects come first (plan 5). Plan 5 starts with a minimal DirectInput mouse that answers the game's setup and reports no input. Before this plan runs, update it from what the game does once it reads input, and rebase its Task 2 on plan 5's stub. Below, "plan 6's layer" means the shader layer, which is plan 5's.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
