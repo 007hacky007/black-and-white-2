@@ -4,10 +4,14 @@
  *
  *   bw2 --game DIR [--exe white.exe] [--strict]
  *
+ * The support folder (saves, settings, registry, everything the game writes)
+ * is $BW2_SUPPORT, or ~/Library/Application Support/Black & White 2.
+ *
  * The bind is permissive: an import nothing answers is bound to a stub that
  * stops the run, naming itself, when it is first called (most of the game's
  * unanswered imports never run). --strict lists them all and exits 2 instead.
  */
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +19,23 @@
 #include "host.h"
 #include "bw2.h"
 
+static const win32hle_shim *const g_hle_tables[] = {
+    win32hle_kernel32, win32hle_kernel32_ext, win32hle_kernel32_crt, win32hle_module, win32hle_gdi32,
+    win32hle_user32, win32hle_winmm, win32hle_lz32, win32hle_wsock32, win32hle_ole32, win32hle_storage,
+    win32hle_advapi32,
+};
+
+recomp_func_t bw2_hle_shim(const char *name) {
+    for (size_t t = 0; t < sizeof g_hle_tables / sizeof *g_hle_tables; t++)
+        for (const win32hle_shim *s = g_hle_tables[t]; s->name; s++)
+            if (!strcmp(s->name, name)) return s->fn;
+    hle_fatal("bw2_hle_shim: win32hle has no %s", name);
+    return NULL;
+}
+
 void bw2_register_shims(void) {
+    win32hle_register(bw2_mount_shims);         /* BW2's own first: hle_resolve takes the first */
+    win32hle_register(bw2_shell_shims);
     win32hle_register(win32hle_kernel32);
     win32hle_register(win32hle_kernel32_ext);
     win32hle_register(win32hle_kernel32_crt);
@@ -54,6 +74,14 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (!game) return usage();
+    char support[PATH_MAX];
+    const char *env = getenv("BW2_SUPPORT"), *home = getenv("HOME");
+    if (env && *env) snprintf(support, sizeof support, "%s", env);
+    else snprintf(support, sizeof support, "%s/Library/Application Support/Black & White 2", home ? home : ".");
+    char game_abs[PATH_MAX];
+    if (!realpath(game, game_abs)) { fprintf(stderr, "bw2: no game folder %s\n", game); return BW2_EXIT_BOOT; }
+    if (bw2_mount(game_abs, support)) return BW2_EXIT_BOOT;
+    game = game_abs;
     bw2_register_shims();
     char path[4096];
     snprintf(path, sizeof path, "%s/%s", game, exe);

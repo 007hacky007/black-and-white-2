@@ -20,5 +20,15 @@ int  bw2_dispatch_selftest(void);       /* prints "dispatch ok <n>"; 0 on succes
 
 /* main.c: register the shim modules, BW2's own first so they take precedence. */
 void bw2_register_shims(void);
+/* win32hle's own answer to an import, for a BW2 shim that adds to it (main.c). */
+recomp_func_t bw2_hle_shim(const char *name);
+
+/* mount.c: the guest's disk (plan 3 Global Constraints). */
+#define BW2_INSTALL_DIR "C:\\Program Files\\EA GAMES\\Black & White 2"
+int  bw2_mount(const char *game_dir, const char *support_dir);
+int  bw2_in_game_tree(const char *host_path);
+extern const win32hle_shim bw2_mount_shims[];
+/* shell.c: the user's folders and name. */
+extern const win32hle_shim bw2_shell_shims[];
 
 #endif

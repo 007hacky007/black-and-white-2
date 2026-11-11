@@ -62,3 +62,266 @@ def test_guest_memory_is_based(tmp_path):
     b = _engine(tmp_path, "ret", {K32: ["ExitProcess"]})
     r = _run(tmp_path, b, "--selftest-mem")
     assert r.returncode == 0 and "mem base 0x100000000000" in r.stdout, r.stdout + r.stderr[-2000:]
+
+
+# ---- Task 2: mounts, support folder, registry ------------------------------
+
+INSTALL = r"C:\Program Files\EA GAMES\Black & White 2"
+# puts: write the C string at esi and a newline to stdout. Lives at BASE + 0x400.
+PUTS = r"""
+.org 0x400
+puts:
+    mov ecx, esi
+1:  cmp byte ptr [ecx], 0
+    je 2f
+    inc ecx
+    jmp 1b
+2:  sub ecx, esi
+    push 0
+    push offset scratch
+    push ecx
+    push esi
+    push -11
+    call dword ptr [{IAT_GetStdHandle}]
+    push eax
+    call dword ptr [{IAT_WriteFile}]
+    push 0
+    push offset scratch
+    push 1
+    push offset newline
+    push -11
+    call dword ptr [{IAT_GetStdHandle}]
+    push eax
+    call dword ptr [{IAT_WriteFile}]
+    ret
+newline: .byte 10
+scratch: .long 0
+"""
+IO = ["GetStdHandle", "WriteFile", "ReadFile", "CreateFileA", "CloseHandle", "ExitProcess"]
+
+
+def _tree(root):
+    import hashlib
+    return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_writes_land_in_support_dir(tmp_path):
+    asm = r"""
+    push 0
+    push 0x80
+    push 2
+    push 0
+    push 0
+    push 0x40000000
+    push offset name
+    call dword ptr [{IAT_CreateFileA}]
+    mov esi, eax
+    push 0
+    push offset count
+    push 3
+    push offset xyz
+    push esi
+    call dword ptr [{IAT_WriteFile}]
+    push esi
+    call dword ptr [{IAT_CloseHandle}]
+    push 0
+    push 0x80
+    push 3
+    push 0
+    push 1
+    push 0x80000000
+    push offset name
+    call dword ptr [{IAT_CreateFileA}]
+    mov esi, eax
+    push 0
+    push offset count
+    push 3
+    push offset buf
+    push esi
+    call dword ptr [{IAT_ReadFile}]
+    push esi
+    call dword ptr [{IAT_CloseHandle}]
+    movzx eax, byte ptr [buf + 2]
+    push eax
+    call dword ptr [{IAT_ExitProcess}]
+name: .asciz "C:\\Program Files\\EA GAMES\\Black & White 2\\data.txt"
+xyz: .ascii "xyz"
+count: .long 0
+buf: .long 0
+"""
+    b = _engine(tmp_path, asm, {K32: IO})
+    before = _tree(tmp_path / "game")
+    r = _run(tmp_path, b)
+    assert r.returncode == ord("z"), r.stderr[-2000:]
+    assert (tmp_path / "support" / "Game" / "data.txt").read_bytes() == b"xyz"
+    assert _tree(tmp_path / "game") == before
+
+
+def test_game_files_read_case_insensitively(tmp_path):
+    asm = r"""
+    push 0
+    push 0x80
+    push 3
+    push 0
+    push 1
+    push 0x80000000
+    push offset name
+    call dword ptr [{IAT_CreateFileA}]
+    mov esi, eax
+    push 0
+    push offset count
+    push 1
+    push offset buf
+    push esi
+    call dword ptr [{IAT_ReadFile}]
+    movzx eax, byte ptr [buf]
+    push eax
+    call dword ptr [{IAT_ExitProcess}]
+name: .asciz "DATA\\A.TXT"
+count: .long 0
+buf: .long 0
+"""
+    b = _engine(tmp_path, asm, {K32: IO})
+    (tmp_path / "game" / "Data").mkdir()
+    (tmp_path / "game" / "Data" / "a.txt").write_bytes(b"Q")
+    r = _run(tmp_path, b)
+    assert r.returncode == ord("Q"), r.stderr[-2000:]
+
+
+def test_module_path_and_cwd(tmp_path):
+    asm = r"""
+    push 260
+    push offset path
+    push 0
+    call dword ptr [{IAT_GetModuleFileNameA}]
+    mov esi, offset path
+    call puts
+    push offset path
+    push 260
+    call dword ptr [{IAT_GetCurrentDirectoryA}]
+    mov esi, offset path
+    call puts
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+path: .fill 264, 1, 0
+""" + PUTS
+    b = _engine(tmp_path, asm, {K32: IO + ["GetModuleFileNameA", "GetCurrentDirectoryA"]},
+                functions=(BASE, BASE + 0x400), exe_name="white.exe")
+    r = _run(tmp_path, b, exe="white.exe")
+    assert r.returncode == 0, r.stderr[-2000:]
+    lines = r.stdout.splitlines()
+    assert lines[:2] == [INSTALL + r"\white.exe", INSTALL], r.stdout
+
+
+def test_my_documents_path(tmp_path):
+    asm = r"""
+    push offset path
+    push 0
+    push 0
+    push 5
+    push 0
+    call dword ptr [{IAT_SHGetFolderPathA}]
+    mov esi, offset path
+    call puts
+    push offset path
+    call dword ptr [{IAT_SetCurrentDirectoryA}]
+    push 0
+    push 0x80
+    push 2
+    push 0
+    push 0
+    push 0x40000000
+    push offset name
+    call dword ptr [{IAT_CreateFileA}]
+    push eax
+    call dword ptr [{IAT_CloseHandle}]
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+name: .asciz "note.txt"
+path: .fill 264, 1, 0
+""" + PUTS
+    b = _engine(tmp_path, asm, {K32: IO + ["SetCurrentDirectoryA"], "SHELL32.dll": ["SHGetFolderPathA"]},
+                functions=(BASE, BASE + 0x400))
+    r = _run(tmp_path, b)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert r.stdout.splitlines()[0] == r"C:\Documents and Settings\Player\My Documents", r.stdout
+    assert (tmp_path / "support" / "C" / "Documents and Settings" / "Player" / "My Documents" / "note.txt").exists()
+
+
+def test_registry_persists(tmp_path):
+    common = r"""
+key: .asciz "Software\\BW2Test"
+vname: .asciz "v"
+hk: .long 0
+disp: .long 0
+val: .long 42
+size: .long 4
+kind: .long 0
+"""
+    write = r"""
+    push offset disp
+    push offset hk
+    push 0
+    push 0xF003F
+    push 0
+    push 0
+    push 0
+    push offset key
+    push 0x80000001
+    call dword ptr [{IAT_RegCreateKeyExA}]
+    push 4
+    push offset val
+    push 4
+    push 0
+    push offset vname
+    push dword ptr [hk]
+    call dword ptr [{IAT_RegSetValueExA}]
+    push dword ptr [hk]
+    call dword ptr [{IAT_RegCloseKey}]
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+""" + common
+    read = r"""
+    mov dword ptr [val], 0
+    push offset hk
+    push 0x20019
+    push 0
+    push offset key
+    push 0x80000001
+    call dword ptr [{IAT_RegOpenKeyExA}]
+    push offset size
+    push offset val
+    push offset kind
+    push 0
+    push offset vname
+    push dword ptr [hk]
+    call dword ptr [{IAT_RegQueryValueExA}]
+    push dword ptr [val]
+    call dword ptr [{IAT_ExitProcess}]
+""" + common
+    adv = ["RegCreateKeyExA", "RegSetValueExA", "RegCloseKey", "RegOpenKeyExA", "RegQueryValueExA"]
+    support = tmp_path / "support"
+    for name, asm in (("w", write), ("r", read)):
+        d = tmp_path / name
+        d.mkdir()
+        b = _engine(d, asm, {K32: ["ExitProcess"], "ADVAPI32.dll": adv})
+        r = run_engine(b, d / "game", support)
+        assert r.returncode == (0 if name == "w" else 42), r.stderr[-2000:]
+    assert (support / "registry.txt").exists()
+
+
+def test_game_files_cannot_be_deleted(tmp_path):
+    asm = r"""
+    push offset name
+    call dword ptr [{IAT_DeleteFileA}]
+    push eax
+    call dword ptr [{IAT_ExitProcess}]
+name: .asciz "Data\\a.txt"
+"""
+    b = _engine(tmp_path, asm, {K32: ["DeleteFileA", "ExitProcess"]})
+    (tmp_path / "game" / "Data").mkdir()
+    (tmp_path / "game" / "Data" / "a.txt").write_bytes(b"Q")
+    r = _run(tmp_path, b)
+    assert r.returncode == 0, r.stderr[-2000:]          # DeleteFileA fails
+    assert (tmp_path / "game" / "Data" / "a.txt").read_bytes() == b"Q"

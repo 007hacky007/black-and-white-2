@@ -1,4 +1,5 @@
 """Builders for synthetic test inputs. None of them touch game files."""
+import re
 import subprocess
 import zipfile
 from pathlib import Path
@@ -184,6 +185,8 @@ def asm32(src: str, base: int | None = None) -> bytes:
     clang = check_tools()
     with tempfile.TemporaryDirectory() as td:
         s, o = Path(td) / "a.s", Path(td) / "a.o"
+        # clang's Intel parser assembles `push offset sym` as a 16-bit pushw: spell it out.
+        src = re.sub(r"(?m)^(\s*)push\s+offset\s+(\S+)\s*$", r"\1.byte 0x68\n\1.long \2", src)
         s.write_text(".intel_syntax noprefix\n.text\n" + src + "\n")
         subprocess.run([str(clang), "-target", "i386-unknown-linux-elf", "-c", str(s), "-o", str(o)],
                        check=True, capture_output=True)
