@@ -324,3 +324,87 @@ def cases():
 def test_math(selftest, tmp_path):
     (tmp_path / "cases.txt").write_text("\n".join(cases()) + "\n")
     check(selftest, "math", tmp_path, tmp_path / "cases.txt")
+
+
+# ---- Task 9: textures. The test images are made here. ----
+
+import zlib
+
+# a 5x3 ARGB image, opaque (BMP has no alpha)
+IMG = [[0xFF000000 | (x * 50) << 16 | (y * 100) << 8 | (x * 20 + y * 30) for x in range(5)] for y in range(3)]
+
+
+def bgra(c):
+    return struct.pack("<I", c)
+
+
+def tga(img, rle=False, top_left=False):
+    h, w = len(img), len(img[0])
+    hdr = struct.pack("<BBBHHBHHHHBB", 0, 0, 10 if rle else 2, 0, 0, 0, 0, 0, w, h, 32, 8 | (0x20 if top_left else 0))
+    rows = img if top_left else img[::-1]
+    body = b""
+    for row in rows:
+        if rle:
+            for c in row:                      # raw packets of one pixel
+                body += bytes([0]) + bgra(c)
+        else:
+            body += b"".join(bgra(c) for c in row)
+    return hdr + body
+
+
+def bmp24(img):
+    h, w = len(img), len(img[0])
+    stride = (w * 3 + 3) & ~3
+    rows = b""
+    for row in img[::-1]:
+        r = b"".join(bgra(c)[:3] for c in row)
+        rows += r + b"\0" * (stride - len(r))
+    info = struct.pack("<IiiHHIIiiII", 40, w, h, 1, 24, 0, len(rows), 2835, 2835, 0, 0)
+    return b"BM" + struct.pack("<IHHI", 14 + 40 + len(rows), 0, 0, 54) + info + rows
+
+
+def png(img):
+    h, w = len(img), len(img[0])
+    raw = b"".join(b"\0" + b"".join(bytes([(c >> 16) & 255, (c >> 8) & 255, c & 255, c >> 24]) for c in row)
+                   for row in img)
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def dds(w, h, fourcc=None, bits=0, masks=(0, 0, 0, 0), mips=1, cube=False, data=b"", depth=0):
+    DDSD_CAPS, DDSD_HEIGHT, DDSD_WIDTH, DDSD_PIXELFORMAT, DDSD_MIPMAPCOUNT = 1, 2, 4, 0x1000, 0x20000
+    flags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT | (DDSD_MIPMAPCOUNT if mips > 1 else 0)
+    pf = struct.pack("<II4sIIIII", 32, 4 if fourcc else (0x40 | (1 if masks[3] else 0)),
+                     fourcc or b"\0\0\0\0", bits, *masks)
+    caps2 = (0x200 | 0xFC00) if cube else (0x200000 if depth else 0)
+    caps = 0x1000 | (0x400008 if mips > 1 else 0) | (8 if cube else 0)
+    hdr = struct.pack("<IIIIIII", 124, flags | (0x800000 if depth else 0), h, w, 0, depth, mips) + b"\0" * 44 + pf + \
+        struct.pack("<IIIII", caps, caps2, 0, 0, 0)
+    return b"DDS " + hdr + data
+
+
+def write_images(d):
+    d.mkdir(exist_ok=True)
+    (d / "raw_bl.tga").write_bytes(tga(IMG))
+    (d / "rle_tl.tga").write_bytes(tga(IMG, rle=True, top_left=True))
+    (d / "raw_tl.tga").write_bytes(tga(IMG, top_left=True))
+    (d / "img.bmp").write_bytes(bmp24(IMG))
+    (d / "img.png").write_bytes(png(IMG))
+    blocks = bytes(range(0x40, 0x40 + 32)) + bytes(range(0x80, 0x88)) + bytes(range(0x90, 0x98))
+    (d / "dxt1_mips.dds").write_bytes(dds(8, 8, b"DXT1", mips=3, data=blocks))
+    faces = b"".join(bgra(0xFF000000 | (f * 40) << 16 | 0x1020) * 16 for f in range(6))
+    (d / "cube.dds").write_bytes(dds(4, 4, bits=32, masks=(0xFF0000, 0xFF00, 0xFF, 0xFF000000), cube=True, data=faces))
+    key = [[0xFFFF00FF, 0xFF00FF00]]
+    (d / "key.tga").write_bytes(tga(key, top_left=True))
+    (d / "expected.txt").write_text(" ".join(f"{c:08X}" for row in IMG for c in row) + "\n")
+    return d
+
+
+@pytest.mark.parametrize("group", ["dds", "tga_bmp_png", "convert", "filter", "fill", "save", "colorkey"])
+def test_textures(selftest, tmp_path, group):
+    write_images(tmp_path / "img")
+    (tmp_path / "game").mkdir()
+    check(selftest, group, tmp_path, tmp_path / "img")

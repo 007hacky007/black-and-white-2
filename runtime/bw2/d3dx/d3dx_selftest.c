@@ -190,14 +190,324 @@ static void group_math(const char *path) {
     printf("math: %d cases\n", ncases);
 }
 
+/* ---- Task 9: textures ---- */
+#include "d3d_com.h"
+#include "d3d9_device.h"
+
+static uint32_t vcall(uint32_t obj, int slot, int n, ...) {
+    uint32_t va = MEM32(MEM32(obj) + 4u * (uint32_t)slot);
+    recomp_func_t f = recomp_lookup_import(va);
+    if (!f) { printf("FAIL slot %d of 0x%08X: no method\n", slot, obj); fails++; return 0xDEADBEEFu; }
+    uint32_t a[16] = { obj };
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) a[1 + i] = va_arg(ap, uint32_t);
+    va_end(ap);
+    uint32_t esp0 = g_esp;
+    for (int i = n; i >= 0; i--) { g_esp -= 4; MEM32(g_esp) = a[i]; }
+    g_esp -= 4;
+    MEM32(g_esp) = 0x12345678u;
+    f();
+    if (g_esp != esp0) { printf("FAIL %s: stack off by %d\n", g_cur_import, (int)(g_esp - esp0)); fails++; g_esp = esp0; }
+    return g_eax;
+}
+static uint32_t call(const char *name, int n, ...) {
+    uint32_t a[16];
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) a[i] = va_arg(ap, uint32_t);
+    va_end(ap);
+    return callv(name, n, a);
+}
+#define CHECKEQ(a, b) do { uint64_t _a = (uint64_t)(a), _b = (uint64_t)(b); if (_a != _b) { \
+    printf("FAIL %s:%d %s == %s: 0x%llX != 0x%llX\n", __FILE__, __LINE__, #a, #b, \
+           (unsigned long long)_a, (unsigned long long)_b); fails++; } } while (0)
+static int near_color(uint32_t a, uint32_t b, int tol) {
+    for (int i = 0; i < 32; i += 8) {
+        int x = (int)((a >> i) & 0xFF), y = (int)((b >> i) & 0xFF);
+        if (x - y > tol || y - x > tol) return 0;
+    }
+    return 1;
+}
+
+#define D3DX_DEFAULT 0xFFFFFFFFu
+#define D3DX_FILTER_NONE 1u
+#define D3DX_FILTER_POINT 2u
+#define D3DX_FILTER_BOX 5u
+#define FMT_A8R8G8B8 21u
+#define FMT_X8R8G8B8 22u
+#define FMT_R5G6B5 23u
+#define FMT_DXT1 0x31545844u
+#define POOL_MANAGED 1u
+#define POOL_SYSTEMMEM 2u
+enum { TX_GetLevelCount = 13, TX_GetLevelDesc = 17, TX_GetSurfaceLevel, TX_LockRect, TX_UnlockRect };
+enum { CT_GetCubeMapSurface = 18, CT_LockRect, CT_UnlockRect };
+enum { SF_GetDesc = 12, SF_LockRect, SF_UnlockRect };
+
+static const char *g_dir;
+static uint32_t g_dev;
+
+static uint32_t device(void) {
+    if (g_dev) return g_dev;
+    uint32_t d3d = call("Direct3DCreate9", 1, 32u), pp = gmem(56), out = gmem(4);
+    MEM32(pp) = 16, MEM32(pp + 4) = 16, MEM32(pp + 8) = FMT_X8R8G8B8, MEM32(pp + 12) = 1, MEM32(pp + 24) = 1;
+    MEM32(pp + 28) = 0x10001u, MEM32(pp + 32) = 1;
+    CHECKEQ(vcall(d3d, 16, 6, 0u, 1u, 0x10001u, 0x40u, pp, out), 0);
+    return g_dev = MEM32(out);
+}
+/* A file of the test's into guest memory; its size in *n. */
+static uint32_t file(const char *name, uint32_t *n) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s", g_dir, name);
+    FILE *f = fopen(path, "rb");
+    if (!f) { printf("FAIL no file %s\n", path); fails++; *n = 0; return 0; }
+    fseek(f, 0, SEEK_END);
+    *n = (uint32_t)ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint32_t p = gmem(*n);
+    if (fread(hle_ptr(p), 1, *n, f) != *n) fails++;
+    fclose(f);
+    return p;
+}
+/* D3DXCreateTextureFromFileInMemoryEx with the given format, sizes from the file. */
+static uint32_t load_ex(const char *name, uint32_t fmt, uint32_t mips, uint32_t key, uint32_t info) {
+    uint32_t n, p = file(name, &n), out = gmem(4);
+    uint32_t hr = call("D3DXCreateTextureFromFileInMemoryEx", 15, device(), p, n, D3DX_DEFAULT, D3DX_DEFAULT, mips,
+                       0u, fmt, POOL_MANAGED, D3DX_FILTER_NONE, D3DX_DEFAULT, key, info, 0u, out);
+    CHECKEQ(hr, 0);
+    return hr ? 0 : MEM32(out);
+}
+/* Texel (x, y) of a level, as stored (32-bit formats). */
+static uint32_t texel(uint32_t t, uint32_t level, uint32_t x, uint32_t y) {
+    uint32_t lr = gmem(8);
+    CHECKEQ(vcall(t, TX_LockRect, 4, level, lr, 0u, 0x10u), 0);
+    uint32_t v = MEM32(MEM32(lr + 4) + y * MEM32(lr) + 4 * x);
+    vcall(t, TX_UnlockRect, 1, level);
+    return v;
+}
+
+static void group_dds(void) {
+    uint32_t info = gmem(28), n, p = file("dxt1_mips.dds", &n);
+    CHECKEQ(call("D3DXGetImageInfoFromFileInMemory", 3, p, n, info), 0);
+    CHECKEQ(MEM32(info), 8);
+    CHECKEQ(MEM32(info + 4), 8);
+    CHECKEQ(MEM32(info + 12), 3);
+    CHECKEQ(MEM32(info + 16), FMT_DXT1);
+    CHECKEQ(MEM32(info + 20), 3);                            /* D3DRTYPE_TEXTURE */
+    CHECKEQ(MEM32(info + 24), 4);                            /* D3DXIFF_DDS */
+    uint32_t t = load_ex("dxt1_mips.dds", D3DX_DEFAULT, 0xFFFFFFFDu /* D3DX_FROM_FILE: the file's 3 levels */, 0, 0);
+    if (!t) return;
+    CHECKEQ(vcall(t, TX_GetLevelCount, 0), 3);
+    uint32_t desc = gmem(32), lr = gmem(8);
+    vcall(t, TX_GetLevelDesc, 2, 0u, desc);
+    CHECKEQ(MEM32(desc), FMT_DXT1);
+    const uint8_t *src = (const uint8_t *)hle_ptr(p) + 128;
+    uint32_t off = 0, sizes[3] = { 32, 8, 8 };
+    for (uint32_t l = 0; l < 3; l++) {
+        CHECKEQ(vcall(t, TX_LockRect, 4, l, lr, 0u, 0x10u), 0);
+        CHECK(!memcmp(hle_ptr(MEM32(lr + 4)), src + off, l == 0 ? 16 : 8));   /* row 0 of each level */
+        if (l == 0) CHECK(!memcmp((uint8_t *)hle_ptr(MEM32(lr + 4)) + MEM32(lr), src + 16, 16));
+        vcall(t, TX_UnlockRect, 1, l);
+        off += sizes[l];
+    }
+    vcall(t, 2, 0);
+    /* the cube: six faces */
+    p = file("cube.dds", &n);
+    CHECKEQ(call("D3DXGetImageInfoFromFileInMemory", 3, p, n, info), 0);
+    CHECKEQ(MEM32(info + 20), 5);                            /* D3DRTYPE_CUBETEXTURE */
+    uint32_t out = gmem(4);
+    CHECKEQ(call("D3DXCreateCubeTextureFromFileInMemoryEx", 14, device(), p, n, D3DX_DEFAULT, D3DX_DEFAULT, 0u,
+                 D3DX_DEFAULT, POOL_MANAGED, D3DX_FILTER_NONE, D3DX_DEFAULT, 0u, 0u, 0u, out), 0);
+    uint32_t c = MEM32(out);
+    for (uint32_t f = 0; f < 6; f++) {
+        CHECKEQ(vcall(c, CT_LockRect, 5, f, 0u, lr, 0u, 0x10u), 0);
+        CHECKEQ(MEM32(MEM32(lr + 4)), 0xFF000000u | (f * 40) << 16 | 0x1020);
+        vcall(c, CT_UnlockRect, 2, f, 0u);
+    }
+    vcall(c, 2, 0);
+}
+
+static void group_tga_bmp_png(void) {
+    uint32_t want[15], n;
+    char path[1024];
+    snprintf(path, sizeof path, "%s/expected.txt", g_dir);
+    FILE *f = fopen(path, "r");
+    for (int i = 0; i < 15 && f; i++) if (fscanf(f, "%x", &want[i]) != 1) fails++;
+    if (f) fclose(f);
+    static const struct { const char *name; uint32_t iff; } imgs[] = {
+        { "raw_bl.tga", 2 }, { "rle_tl.tga", 2 }, { "raw_tl.tga", 2 }, { "img.bmp", 0 }, { "img.png", 3 } };
+    for (unsigned i = 0; i < sizeof imgs / sizeof *imgs; i++) {
+        uint32_t info = gmem(28), p = file(imgs[i].name, &n);
+        CHECKEQ(call("D3DXGetImageInfoFromFileInMemory", 3, p, n, info), 0);
+        if (MEM32(info) != 5 || MEM32(info + 4) != 3 || MEM32(info + 24) != imgs[i].iff || MEM32(info + 12) != 1)
+            printf("FAIL %s: info %ux%u iff %u levels %u\n", imgs[i].name, MEM32(info), MEM32(info + 4),
+                   MEM32(info + 24), MEM32(info + 12)), fails++;
+        uint32_t t = load_ex(imgs[i].name, FMT_A8R8G8B8, 1, 0, 0);
+        if (!t) continue;
+        uint32_t desc = gmem(32);
+        vcall(t, TX_GetLevelDesc, 2, 0u, desc);
+        CHECK(MEM32(desc + 24) == 5 && MEM32(desc + 28) == 3);
+        for (uint32_t y = 0; y < 3; y++)
+            for (uint32_t x = 0; x < 5; x++) {
+                uint32_t got = texel(t, 0, x, y);
+                if (got != want[y * 5 + x]) printf("FAIL %s (%u,%u): 0x%08X want 0x%08X\n", imgs[i].name, x, y, got, want[y * 5 + x]), fails++;
+            }
+        vcall(t, 2, 0);
+    }
+}
+
+static uint32_t sys_surface(uint32_t w, uint32_t h, uint32_t fmt) {
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(device(), 36, 6, w, h, fmt, POOL_SYSTEMMEM, out, 0u), 0);   /* CreateOffscreenPlainSurface */
+    return MEM32(out);
+}
+static void group_convert(void) {
+    /* A8R8G8B8 -> R5G6B5 -> A8R8G8B8: channels that are exact 5/6-bit expansions come back as they were */
+    uint32_t src = gmem(8), r565 = sys_surface(2, 1, FMT_R5G6B5), back = sys_surface(2, 1, FMT_A8R8G8B8), lr = gmem(8);
+    MEM32(src) = 0xFF8441C6u, MEM32(src + 4) = 0xFFFFFFFFu;
+    uint32_t r21 = gmem(16), r44 = gmem(16);                 /* the source rect may not be NULL */
+    MEM32(r21) = 0, MEM32(r21 + 4) = 0, MEM32(r21 + 8) = 2, MEM32(r21 + 12) = 1;
+    MEM32(r44) = 0, MEM32(r44 + 4) = 0, MEM32(r44 + 8) = 4, MEM32(r44 + 12) = 4;
+    CHECKEQ(call("D3DXLoadSurfaceFromMemory", 10, r565, 0u, 0u, src, FMT_A8R8G8B8, 8u, 0u, 0u, D3DX_FILTER_NONE, 0u), 0x8876086Cu);
+    CHECKEQ(call("D3DXLoadSurfaceFromMemory", 10, r565, 0u, 0u, src, FMT_A8R8G8B8, 8u, 0u, r21, D3DX_FILTER_NONE, 0u), 0);
+    vcall(r565, SF_LockRect, 3, lr, 0u, 0x10u);
+    CHECKEQ(MEM16(MEM32(lr + 4)), (16u << 11) | (16u << 5) | 24u);
+    CHECKEQ(MEM16(MEM32(lr + 4) + 2), 0xFFFFu);
+    vcall(r565, SF_UnlockRect, 0);
+    CHECKEQ(call("D3DXLoadSurfaceFromSurface", 8, back, 0u, 0u, r565, 0u, 0u, D3DX_FILTER_NONE, 0u), 0);
+    vcall(back, SF_LockRect, 3, lr, 0u, 0x10u);
+    CHECKEQ(MEM32(MEM32(lr + 4)), 0xFF8441C6u);
+    vcall(back, SF_UnlockRect, 0);
+    /* a DXT1 block decodes: colour 0 red, colour 1 blue, and the two thirds between */
+    uint32_t blk = gmem(8), dst = sys_surface(4, 4, FMT_A8R8G8B8);
+    MEM16(blk) = 0xF800, MEM16(blk + 2) = 0x001F;
+    MEM32(blk + 4) = 0x000000E4u;                            /* row 0: indices 0, 1, 2, 3 */
+    CHECKEQ(call("D3DXLoadSurfaceFromMemory", 10, dst, 0u, 0u, blk, FMT_DXT1, 8u, 0u, r44, D3DX_FILTER_NONE, 0u), 0);
+    vcall(dst, SF_LockRect, 3, lr, 0u, 0x10u);
+    uint32_t *px = hle_ptr(MEM32(lr + 4));
+    CHECK(near_color(px[0], 0xFFFF0000u, 1));
+    CHECK(near_color(px[1], 0xFF0000FFu, 1));
+    CHECK(near_color(px[2], 0xFFAA0055u, 2));
+    CHECK(near_color(px[3], 0xFF5500AAu, 2));
+    vcall(dst, SF_UnlockRect, 0);
+    /* a sub-rect with a point filter: a 2x1 rect of a 4x1 source scaled into 4x2 */
+    uint32_t s4 = gmem(16), d42 = sys_surface(4, 2, FMT_A8R8G8B8), r = gmem(16);
+    MEM32(s4) = 0xFF000001u, MEM32(s4 + 4) = 0xFF000002u, MEM32(s4 + 8) = 0xFF000003u, MEM32(s4 + 12) = 0xFF000004u;
+    MEM32(r) = 1, MEM32(r + 4) = 0, MEM32(r + 8) = 3, MEM32(r + 12) = 1;
+    CHECKEQ(call("D3DXLoadSurfaceFromMemory", 10, d42, 0u, 0u, s4, FMT_A8R8G8B8, 16u, 0u, r, D3DX_FILTER_POINT, 0u), 0);
+    vcall(d42, SF_LockRect, 3, lr, 0u, 0x10u);
+    px = hle_ptr(MEM32(lr + 4));
+    CHECK(px[0] == 0xFF000002u && px[1] == 0xFF000002u && px[2] == 0xFF000003u && px[3] == 0xFF000003u);
+    vcall(d42, SF_UnlockRect, 0);
+}
+
+static void group_filter(void) {
+    uint32_t out = gmem(4);
+    CHECKEQ(call("D3DXCreateTexture", 8, device(), 4u, 4u, 3u, 0u, FMT_A8R8G8B8, POOL_MANAGED, out), 0);
+    uint32_t t = MEM32(out), lr = gmem(8);
+    vcall(t, TX_LockRect, 4, 0u, lr, 0u, 0u);
+    for (uint32_t y = 0; y < 4; y++)
+        for (uint32_t x = 0; x < 4; x++) MEM32(MEM32(lr + 4) + y * MEM32(lr) + 4 * x) = (x + y) & 1 ? 0xFFFFFFFFu : 0xFF000000u;
+    vcall(t, TX_UnlockRect, 1, 0u);
+    CHECKEQ(call("D3DXFilterTexture", 4, t, 0u, 0u, D3DX_FILTER_BOX), 0);
+    CHECK(near_color(texel(t, 1, 0, 0), 0xFF808080u, 1));
+    CHECK(near_color(texel(t, 1, 1, 1), 0xFF808080u, 1));
+    CHECK(near_color(texel(t, 2, 0, 0), 0xFF808080u, 1));
+    /* D3DXCreateTexture's defaults: 256 square, A8R8G8B8, a full chain */
+    CHECKEQ(call("D3DXCreateTexture", 8, device(), D3DX_DEFAULT, D3DX_DEFAULT, D3DX_DEFAULT, 0u, 0u, POOL_MANAGED, out), 0);
+    uint32_t d = MEM32(out), desc = gmem(32);
+    vcall(d, TX_GetLevelDesc, 2, 0u, desc);
+    CHECK(MEM32(desc) == FMT_A8R8G8B8 && MEM32(desc + 24) == 256 && MEM32(desc + 28) == 256);
+    CHECKEQ(vcall(d, TX_GetLevelCount, 0), 9);
+    vcall(d, 2, 0), vcall(t, 2, 0);
+}
+
+/* LPD3DXFILL2D: (out vec4, texcoord vec2, texel size vec2, data) -> (u, v, 0, 1) */
+static int g_fill_calls;
+static void fill_cb(void) {
+    float *o = APTR(0), *tc = APTR(1);
+    o[0] = tc[0], o[1] = tc[1], o[2] = 0, o[3] = 1;
+    g_fill_calls++;
+    RET(0, 4);
+}
+static const win32hle_shim g_test_shims[] = { { "selftest_fill_cb", fill_cb }, { 0, 0 } };
+
+static void group_fill(void) {
+    win32hle_register(g_test_shims);
+    uint32_t out = gmem(4);
+    CHECKEQ(call("D3DXCreateTexture", 8, device(), 4u, 4u, 1u, 0u, FMT_A8R8G8B8, POOL_MANAGED, out), 0);
+    uint32_t t = MEM32(out);
+    CHECKEQ(call("D3DXFillTexture", 3, t, hle_resolve("selftest_fill_cb"), 0u), 0);
+    CHECKEQ(g_fill_calls, 16);
+    for (uint32_t y = 0; y < 4; y++)
+        for (uint32_t x = 0; x < 4; x++) {
+            uint32_t u8 = (uint32_t)(((x + 0.5) / 4) * 255 + 0.5), v8 = (uint32_t)(((y + 0.5) / 4) * 255 + 0.5);
+            uint32_t want = 0xFF000000u | u8 << 16 | v8 << 8, got = texel(t, 0, x, y);
+            if (!near_color(got, want, 1)) printf("FAIL fill (%u,%u): 0x%08X want 0x%08X\n", x, y, got, want), fails++;
+        }
+    vcall(t, 2, 0);
+}
+
+static void group_save(void) {
+    uint32_t t = load_ex("img.png", FMT_A8R8G8B8, 1, 0, 0);
+    if (!t) return;
+    char *g = "C:\\shot.bmp";
+    uint32_t name = gmem(32);
+    strcpy(hle_ptr(name), g);
+    CHECKEQ(call("D3DXSaveTextureToFileA", 4, name, 0u /* BMP */, t, 0u), 0);
+    char host[1024];
+    snprintf(host, sizeof host, "%s/C/shot.bmp", getenv("BW2_SUPPORT"));
+    FILE *f = fopen(host, "rb");
+    CHECK(f != NULL);
+    if (f) fclose(f);
+    uint32_t out = gmem(4);
+    CHECKEQ(call("D3DXCreateTextureFromFileA", 3, device(), name, out), 0);
+    uint32_t r = MEM32(out);
+    for (uint32_t y = 0; y < 3; y++)
+        for (uint32_t x = 0; x < 5; x++) CHECKEQ(texel(r, 0, x, y) | 0xFF000000u, texel(t, 0, x, y));
+    /* into memory: an ID3DXBuffer holding a DDS */
+    CHECKEQ(call("D3DXSaveTextureToFileInMemory", 4, out, 4u /* DDS */, t, 0u), 0);
+    uint32_t buf = MEM32(out), ptr = vcall(buf, 3, 0), size = vcall(buf, 4, 0);
+    CHECK(size == 128 + 5 * 3 * 4 && !memcmp(hle_ptr(ptr), "DDS ", 4));
+    uint32_t info = gmem(28);
+    CHECKEQ(call("D3DXGetImageInfoFromFileInMemory", 3, ptr, size, info), 0);
+    CHECK(MEM32(info) == 5 && MEM32(info + 4) == 3 && MEM32(info + 16) == FMT_A8R8G8B8);
+    CHECKEQ(vcall(buf, 2, 0), 0);
+    /* D3DXCreateBuffer */
+    CHECKEQ(call("D3DXCreateBuffer", 2, 100u, out), 0);
+    buf = MEM32(out);
+    CHECKEQ(vcall(buf, 4, 0), 100);
+    CHECK(vcall(buf, 3, 0) != 0);
+    vcall(buf, 2, 0);
+    vcall(r, 2, 0), vcall(t, 2, 0);
+}
+
+static void group_colorkey(void) {
+    uint32_t t = load_ex("key.tga", FMT_A8R8G8B8, 1, 0xFFFF00FFu, 0);
+    if (!t) return;
+    CHECKEQ(texel(t, 0, 0, 0), 0x00000000u);
+    CHECKEQ(texel(t, 0, 1, 0), 0xFF00FF00u);
+    vcall(t, 2, 0);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: d3dx_selftest <group> [args]\n"); return 2; }
     hle_mem_init();
     bw2_register_shims();
     mach_enter();
     g_esp = hle_va(hle_alloc(1u << 20)) + (1u << 20) - 64;
+    static const struct { const char *name; void (*fn)(void); } groups[] = {
+        { "dds", group_dds }, { "tga_bmp_png", group_tga_bmp_png }, { "convert", group_convert },
+        { "filter", group_filter }, { "fill", group_fill }, { "save", group_save }, { "colorkey", group_colorkey } };
     if (!strcmp(argv[1], "math") && argc > 2) group_math(argv[2]);
-    else { fprintf(stderr, "d3dx_selftest: no group %s\n", argv[1]); return 2; }
+    else {
+        unsigned i = 0;
+        while (i < sizeof groups / sizeof *groups && strcmp(groups[i].name, argv[1])) i++;
+        if (i == sizeof groups / sizeof *groups || argc < 3) { fprintf(stderr, "d3dx_selftest: no group %s\n", argv[1]); return 2; }
+        g_dir = argv[2];
+        if (bw2_mount("game", getenv("BW2_SUPPORT"))) { printf("FAIL mount\n"); return 1; }
+        groups[i].fn();
+    }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);
     return fails != 0;
