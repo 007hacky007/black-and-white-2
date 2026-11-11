@@ -409,10 +409,16 @@ Rows:
 setup launchers whose appended files are an ordinary InstallShield cabinet
 set (unshield reads it). Their changes are partly whole files and partly an
 **RTPatch** binary diff (Pocket Soft's proprietary format; no open macOS
-applier known). The Builder needs an RTPatch applier: first candidate
-RTPatchX (Apache-2.0, C source); otherwise our own decoder or lifting
-`patchw32.dll`. PCGamingWiki serves both patches through a three-step
-terms/confirm flow with no login.
+applier known). PCGamingWiki serves both patches through a three-step
+terms/confirm flow with no login. **Plan 2 (decided by the user,
+2026-11-11):** RTPatchX turned out to be a wrapper around Pocket Soft's
+`patchw32.dll`, and no open decoder exists, so the Builder runs the
+`patchw32.dll` that ships inside each patch, as is, in the Unicorn CPU
+emulator with a small Python stand-in for the Win32 calls it makes
+(`bw2/pe32emu.py`, `bw2/w32files.py`, `bw2/w32base.py`, `bw2/rtpatch.py`).
+Unicorn therefore joins the Builder's pinned Python. The built tree is
+checked against `bw2/manifests/game-usa-1.2-fan1.42.tsv`; see
+`docs/research/patch-application.md`.
 
 ## 9. Repo and identity
 

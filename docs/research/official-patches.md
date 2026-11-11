@@ -92,7 +92,9 @@ only the data changes matter.
 
 ## Open questions
 
-- Which RTPatch route works (decide in the Builder plan; try RTPatchX first).
+- Which RTPatch route works. **Answered in plan 2:** RTPatchX only wraps
+  `patchw32.dll`; the Builder runs that DLL under Unicorn instead. See
+  `patch-application.md`.
 - `Plugins/ScriptLibraryR.dll` is a 32-bit DLL the game loads (the installed
   1.0 copy is 679,936 bytes). It must be lifted too, as a second module.
   This is new scope for the lifter plan.
