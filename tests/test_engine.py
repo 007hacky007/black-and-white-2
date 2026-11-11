@@ -1140,3 +1140,47 @@ path: .asciz "C:\\Program Files\\EA GAMES\\Black & White 2\\NewDir\\Sub"
     assert r.returncode == 0, r.stderr[-2000:]
     assert sorted(p.relative_to(tmp_path / "game").as_posix() for p in (tmp_path / "game").rglob("*")) == before
     assert (tmp_path / "support" / "Game" / "NewDir" / "Sub").is_dir()
+
+
+def _vm_caller(tmp_path, vm_asm, imports):
+    # main calls a function in a section named stxt774 (the protection VM's)
+    pad = [(".text", b"\xcc" * 0x100, CODE), ("stxt774", b"\xcc" * 0x100, CODE)]
+    slots = {f"IAT_{fn}": iat_va(pad, imports, dll, fn) for dll, fns in imports.items() for fn in fns}
+    main = asm32("    mov eax, 0x402000\n    call eax\n    push 0\n    call dword ptr [{IAT_ExitProcess}]\n"
+                 .format(**slots), base=BASE)
+    vm = asm32(vm_asm.format(**slots), base=0x402000)
+    pe = make_pe([(".text", main.ljust(0x100, b"\xcc"), CODE), ("stxt774", vm.ljust(0x100, b"\xcc"), CODE)],
+                 imports, 0x1000)
+    return guest_engine(tmp_path, pe, [BASE, 0x402000], code_sections=(".text", "stxt774"))
+
+
+def test_vm_import_other_than_thread_id_trips(tmp_path):
+    b = _vm_caller(tmp_path, "    call dword ptr [{IAT_GetTickCount}]\n    ret\n", {K32: ["GetTickCount", "ExitProcess"]})
+    r = _run(tmp_path, b)
+    assert r.returncode == 3 and "TRIPWIRE: GetTickCount" in r.stderr and "VM: yes" in r.stderr, r.stderr[-2000:]
+
+
+def test_vm_thread_id_is_allowed(tmp_path):
+    b = _vm_caller(tmp_path, "    call dword ptr [{IAT_GetCurrentThreadId}]\n    ret\n",
+                   {K32: ["GetCurrentThreadId", "ExitProcess"]})
+    r = _run(tmp_path, b)
+    assert r.returncode == 0, r.stderr[-2000:]
+
+
+def test_nt_device_path_trips(tmp_path):
+    asm = r"""
+    push 0
+    push 0x80
+    push 3
+    push 0
+    push 1
+    push 0x80000000
+    push offset name
+    call dword ptr [{IAT_CreateFileA}]
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+name: .asciz "\\??\\CdRom0"
+"""
+    b = _engine(tmp_path, asm, {K32: ["CreateFileA", "ExitProcess"]})
+    r = _run(tmp_path, b)
+    assert r.returncode == 3 and "TRIPWIRE: CreateFileA" in r.stderr, r.stderr[-2000:]

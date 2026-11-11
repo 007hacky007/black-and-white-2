@@ -28,6 +28,8 @@
 static struct { uint32_t lo, hi; } g_vm[MAX_RANGES], g_code[8];
 static int g_nvm, g_ncode;
 
+static void vm_import_audit(const char *name);
+
 void bw2_guard_init(uint32_t base) {
     uint32_t nt = base + MEM32(base + 0x3C);
     uint32_t nsec = MEM16(nt + 6), sh = nt + 24 + MEM16(nt + 20);
@@ -39,6 +41,7 @@ void bw2_guard_init(uint32_t base) {
             g_vm[g_nvm].lo = lo, g_vm[g_nvm++].hi = hi;
         if ((flags & 0x20000020u) && g_ncode < 8) g_code[g_ncode].lo = lo, g_code[g_ncode++].hi = hi;
     }
+    hle_import_hook = vm_import_audit;
 }
 
 static int in_vm(uint32_t va) {
@@ -89,9 +92,13 @@ static void narrow(uint32_t va, char *out, size_t n) {
     out[k] = 0;
 }
 
+static int sep(char c) { return c == '\\' || c == '/'; }
+
+/* \\.\x and \\?\x (Win32 device and raw paths) and \??\x (an NT one). */
 static int device_path(const char *p) {
-    return p && (p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/') && (p[2] == '.' || p[2] == '?') &&
-           (p[3] == '\\' || p[3] == '/');
+    if (!p) return 0;
+    if (sep(p[0]) && sep(p[1]) && (p[2] == '.' || p[2] == '?') && sep(p[3])) return 1;
+    return sep(p[0]) && p[1] == '?' && p[2] == '?' && sep(p[3]);
 }
 
 static void unanswered(const char *name) {
@@ -174,6 +181,19 @@ static void k_CreateFileW(void) {
     if (A32(0)) MEM32(g_esp + 4) = hle_scratch_copy(p, (uint32_t)strlen(p) + 1);
     bw2_hle_shim("CreateFileA")();
     hle_scratch_release(mark);
+}
+
+/* Every import the protection VM's own code calls (its function or return
+ * address in stxt774/.name0): the boot shows it calls only GetCurrentThreadId,
+ * so anything else, a GetProcAddress or LoadLibrary included, stops for the
+ * user (a check made through a game function is caught by the calls above). */
+static const char *const g_vm_imports[] = { "GetCurrentThreadId", NULL };
+
+static void vm_import_audit(const char *name) {
+    if (!from_vm()) return;
+    for (int i = 0; g_vm_imports[i]; i++)
+        if (!strcmp(g_vm_imports[i], name)) return;
+    trip(name, "called by the protection VM");
 }
 
 const win32hle_shim bw2_guard_shims[] = {
