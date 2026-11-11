@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from .build import build
+from .extrastarts import load_extra_starts
 from .lift import ModuleLift, lift_module, link_tables
 from .paths import GAMEFILES, REPO
 from .patches import script_dll
@@ -29,7 +30,7 @@ def modules():
 def lift_all(gen: Path) -> list[ModuleLift]:
     out = []
     for name, exe, cat, secs in modules():
-        m = lift_module(name, exe, cat, gen, secs)
+        m = lift_module(name, exe, cat, gen, secs, extra_starts=load_extra_starts() if name == "white" else ())
         print(f"[lift] {name}: {m.functions} functions, {m.shards} shards, "
               f"{m.c_bytes / 1e6:.1f} MB, {sum(m.traps.values())} traps, {m.seconds} s", flush=True)
         out.append(m)

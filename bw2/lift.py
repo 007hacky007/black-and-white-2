@@ -134,7 +134,7 @@ def _write(path: Path, text: str) -> None:
 
 def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
                 code_sections: tuple = (".text",), shard_size: int = 500,
-                cold_lines: int = COLD_LINES) -> ModuleLift:
+                cold_lines: int = COLD_LINES, extra_starts=()) -> ModuleLift:
     t0 = time.time()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -144,7 +144,8 @@ def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
     dis, lifter, iat = _tools(view)
     from capstone import CS_ARCH_X86, CS_MODE_32, Cs
     md, read = Cs(CS_ARCH_X86, CS_MODE_32), _image_reader(exe)
-    starts = sorted({f["address"] for f in load_functions(catalog) if f.get("entry_kind") != "alias"})
+    starts = sorted({f["address"] for f in load_functions(catalog) if f.get("entry_kind") != "alias"}
+                    | set(extra_starts))
     defined, referenced, traps = [], set(), Counter()
     eh_funcs = eh_points = 0
     shards, c_bytes, chunk, cold = 0, 0, [], []
