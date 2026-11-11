@@ -190,7 +190,7 @@ void hle_yield(void) {
 /* ------------------------------------------------------------- dispatch
  * recomp_lookup searches the generated dispatch table (declared extern in
  * recomp_types.h; defined by the lifted program, or the selftest). */
-recomp_func_t recomp_lookup(uint32_t va) {
+RECOMP_WEAK recomp_func_t recomp_lookup(uint32_t va) {   /* a host may define a faster one */
     uint32_t lo = 0, hi = recomp_dispatch_count;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2, m = recomp_dispatch_table[mid].address;
