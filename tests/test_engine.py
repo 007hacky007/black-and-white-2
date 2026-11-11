@@ -510,3 +510,68 @@ val: .long 7
     r = _run(tmp_path, b, timeout=20)
     assert r.returncode == 9, r.stderr[-2000:]
     assert "flushed" in (tmp_path / "support" / "registry.txt").read_text()
+
+
+# ---- Task 4: CPUID and RDTSC -------------------------------------------------
+
+def _checks(pairs):
+    """asm: cmp reg, value / jne fail_<n> for each (reg, value); exit 0, or n at the first miss."""
+    body = "".join(f"    cmp {reg}, {val:#x}\n    jne fail_{i + 1}\n" for i, (reg, val) in enumerate(pairs))
+    fails = "".join(f"fail_{i + 1}:\n    push {i + 1}\n    call dword ptr [{{IAT_ExitProcess}}]\n"
+                    for i in range(len(pairs)))
+    return body, fails
+
+
+def test_cpuid_answers(tmp_path):
+    l0, f0 = _checks([("eax", 1), ("ebx", 0x756E6547), ("edx", 0x49656E69), ("ecx", 0x6C65746E)])
+    l1, f1 = _checks([("eax", 0x6F6), ("ebx", 0x00010800), ("ecx", 0), ("edx", 0x0789FBFF)])
+    lb, fb = _checks([("eax", 0x20325742)])          # "BW2 "
+    lx, fx = _checks([("eax", 0x80000004), ("edx", 0)])
+    le, fe = _checks([("edx", 0)])
+    # renumber each block's labels so they do not collide
+    def tag(code, t):
+        return code.replace("fail_", f"fail_{t}_")
+    asm = ("    xor eax, eax\n    xor ecx, ecx\n    cpuid\n" + tag(l0, "a") +
+           "    mov eax, 1\n    xor ecx, ecx\n    cpuid\n" + tag(l1, "b") +
+           "    mov eax, 0x80000002\n    cpuid\n" + tag(lb, "c") +
+           "    mov eax, 0x80000000\n    cpuid\n" + tag(lx, "d") +
+           "    mov eax, 0x80000001\n    cpuid\n" + tag(le, "e") +
+           "    push 0\n    call dword ptr [{IAT_ExitProcess}]\n" +
+           tag(f0, "a").replace("push ", "push 10+") + tag(f1, "b").replace("push ", "push 20+") +
+           tag(fb, "c").replace("push ", "push 30+") + tag(fx, "d").replace("push ", "push 40+") +
+           tag(fe, "e").replace("push ", "push 50+"))
+    b = _engine(tmp_path, asm, {K32: ["ExitProcess"]})
+    r = _run(tmp_path, b)
+    assert r.returncode == 0, f"check {r.returncode} failed\n" + r.stderr[-2000:]
+
+
+def test_rdtsc_tracks_time(tmp_path):
+    asm = r"""
+    rdtsc
+    mov dword ptr [lo], eax
+    mov dword ptr [hi], edx
+    push 200
+    call dword ptr [{IAT_Sleep}]
+    rdtsc
+    sub eax, dword ptr [lo]
+    sbb edx, dword ptr [hi]
+    cmp edx, 0
+    jne too_big
+    cmp eax, 450000000
+    jb too_small
+    cmp eax, 1200000000
+    ja too_big
+    push 0
+    call dword ptr [{IAT_ExitProcess}]
+too_small:
+    push 1
+    call dword ptr [{IAT_ExitProcess}]
+too_big:
+    push 2
+    call dword ptr [{IAT_ExitProcess}]
+lo: .long 0
+hi: .long 0
+"""
+    b = _engine(tmp_path, asm, {K32: ["Sleep", "ExitProcess"]})
+    r = _run(tmp_path, b)
+    assert r.returncode == 0, f"code {r.returncode} (1: below 3 GHz, 2: above)\n" + r.stderr[-2000:]
