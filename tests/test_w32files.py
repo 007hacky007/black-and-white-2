@@ -132,3 +132,14 @@ def test_create_new_and_open_existing_errors(env):
     assert env.h.last_error == 80
     assert env.api("CreateFileW", env.s("T:\\nope"), 0x80000000, 0, 0, 3, 0, 0) == INVALID
     assert env.h.last_error == 2
+
+
+def test_drive_type_and_short_names(env):
+    # Reached on the first real run: the DLL checks the drive of each P:/T: path.
+    assert env.api("GetDriveTypeW", env.s("T:\\")) == 3          # DRIVE_FIXED
+    assert env.api("GetDriveTypeW", env.s("Q:\\")) == 1          # DRIVE_NO_ROOT_DIR
+    assert env.api("GetDriveTypeA", env.s("p:\\", wide=False)) == 3
+    out = env.buf(520)
+    assert env.api("GetShortPathNameW", env.s("T:\\Data\\x.txt"), out, 260) == len("T:\\Data\\x.txt")
+    assert env.h.cstr(out, wide=True) == "T:\\Data\\x.txt"
+    assert env.api("GetShortPathNameA", env.s("T:\\a", wide=False), out, 2) == len("T:\\a") + 1

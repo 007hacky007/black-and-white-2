@@ -391,6 +391,14 @@ class FileSystem:
             self.host.w32(pfile, buf + (full.rfind("\\") + 1) * (2 if wide else 1))
         return len(full)
 
+    def short_path(self, src, dst, n, wide) -> int:
+        """BW2's names are all short already; the long name is the short one."""
+        path = self._str(src, wide)
+        if len(path) + 1 > n:
+            return len(path) + 1
+        self.host.put_str(dst, path, wide)
+        return len(path)
+
     def get_cwd(self, n, buf, wide) -> int:
         if len(self.cwd) + 1 > n:
             return len(self.cwd) + 1
@@ -469,6 +477,9 @@ def install_files(host: Pe32Host, roots: dict, writable: set) -> FileSystem:
         "GetDiskFreeSpaceA": (5, fs.disk_free),
         "GetVolumeInformationA": (8, fs.volume_info),
         "GetLogicalDrives": (0, lambda: sum(1 << (ord(k) - 65) for k in fs.roots)),
-        "GetDriveTypeA": (1, lambda p: 3 if p and (S(p, False) or " ")[0].upper() in fs.roots else 1),
     })
+    for w, sfx in ((False, "A"), (True, "W")):
+        host.api["GetDriveType" + sfx] = (1, lambda p, w=w: 3 if p and (S(p, w) or " ")[0].upper() in fs.roots
+                                          else 1)
+        host.api["GetShortPathName" + sfx] = (3, lambda s, d, n, w=w: fs.short_path(s, d, n, w))
     return fs

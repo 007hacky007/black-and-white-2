@@ -80,5 +80,14 @@ def test_process_basics():
     assert api(h, "GetModuleHandleA", 0) == h.base
     m = api(h, "CreateMutexA", 0, 0, 0)
     assert api(h, "WaitForSingleObject", m, 0xFFFFFFFF) == 0
+    assert api(h, "ReleaseMutex", m) == 1
     h.last_error = 5
     assert api(h, "GetLastError") == 5
+
+
+def test_time_zone_is_utc():
+    # Not hit by the spike; the DLL's C runtime asked for it on the first real run.
+    h, mem = _host()
+    h.write(mem, b"\xff" * 172)
+    assert api(h, "GetTimeZoneInformation", mem) == 0          # TIME_ZONE_ID_UNKNOWN
+    assert h.read(mem, 172) == b"\0" * 172                     # bias 0, no names, no DST
