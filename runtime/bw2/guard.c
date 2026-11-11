@@ -4,12 +4,14 @@
  * driver check, the run stops and the user decides how to answer.
  *
  * Always a trip: DeviceIoControl, Netbios, a CreateFile of a device path
- * (\\.\ or \\?\), an MCI command naming cdaudio. A trip when the caller is the
- * VM (its return address or the running function inside the main image's
- * stxt774 or .name0 section): GetDriveType, GetVolumeInformation,
- * GetLogicalDrives, GetLogicalDriveStrings, QueryDosDevice. Otherwise those
- * go to win32hle's answer; the few it lacks stop the run by name, as any
- * unanswered import does.
+ * (\\.\ or \\?\), an MCI command naming cdaudio. Also a trip, whoever asks:
+ * GetDriveType, GetVolumeInformation, GetLogicalDrives, GetLogicalDriveStrings,
+ * QueryDosDevice. The VM could ask through an ordinary game function, so the
+ * caller's address cannot tell a disc check from a harmless question. A call
+ * site the user has approved goes on g_allowed (call, calling function);
+ * those go to win32hle's answer, and the few it lacks stop by name, as any
+ * unanswered import does. "VM: yes" in a trip report means the call came
+ * straight from the VM's sections.
  *
  * A trip prints the call, its arguments and where it came from, plus the
  * return addresses on the guest stack, and exits 3. GetProcAddress of any of
@@ -49,6 +51,18 @@ static int in_code(uint32_t va) {
 }
 
 static int from_vm(void) { return in_vm(MEM32(g_esp)) || in_vm(g_cur_func); }
+
+/* Drive and volume questions the user has approved, by call and calling
+ * function (sub_<va>). Empty: nothing has been approved yet. */
+static const struct { const char *call; uint32_t func; } g_allowed[] = {
+    { NULL, 0 }
+};
+
+static int allowed(const char *call) {
+    for (int i = 0; g_allowed[i].call; i++)
+        if (!strcmp(g_allowed[i].call, call) && g_allowed[i].func == g_cur_func) return 1;
+    return 0;
+}
 
 /* Stop for the user: the call, where from, and the guest stack's return addresses. */
 static void trip(const char *call, const char *args) {
@@ -97,35 +111,35 @@ static void k_Netbios(void) {
 }
 
 static void k_GetDriveTypeA(void) {
-    if (from_vm()) trip("GetDriveTypeA", str_or(A32(0), "NULL"));
+    if (!allowed("GetDriveTypeA")) trip("GetDriveTypeA", str_or(A32(0), "NULL"));
     bw2_hle_shim("GetDriveTypeA")();
 }
 static void k_GetDriveTypeW(void) {
     char p[260];
     narrow(A32(0), p, sizeof p);
-    if (from_vm()) trip("GetDriveTypeW", A32(0) ? p : "NULL");
+    if (!allowed("GetDriveTypeW")) trip("GetDriveTypeW", A32(0) ? p : "NULL");
     RET(!A32(0) || (p[0] | 0x20) == 'c' ? 3u /* DRIVE_FIXED */ : 1u /* DRIVE_NO_ROOT_DIR */, 1);
 }
 static void k_GetVolumeInformationA(void) {
-    if (from_vm()) trip("GetVolumeInformationA", str_or(A32(0), "NULL"));
+    if (!allowed("GetVolumeInformationA")) trip("GetVolumeInformationA", str_or(A32(0), "NULL"));
     bw2_hle_shim("GetVolumeInformationA")();
 }
 static void k_GetVolumeInformationW(void) {
     char p[260];
     narrow(A32(0), p, sizeof p);
-    if (from_vm()) trip("GetVolumeInformationW", A32(0) ? p : "NULL");
+    if (!allowed("GetVolumeInformationW")) trip("GetVolumeInformationW", A32(0) ? p : "NULL");
     unanswered("GetVolumeInformationW");
 }
 static void k_GetLogicalDrives(void) {
-    if (from_vm()) trip("GetLogicalDrives", "");
+    if (!allowed("GetLogicalDrives")) trip("GetLogicalDrives", "");
     bw2_hle_shim("GetLogicalDrives")();
 }
 static void k_GetLogicalDriveStringsA(void) {
-    if (from_vm()) trip("GetLogicalDriveStringsA", "");
+    if (!allowed("GetLogicalDriveStringsA")) trip("GetLogicalDriveStringsA", "");
     bw2_hle_shim("GetLogicalDriveStringsA")();
 }
 static void k_QueryDosDeviceA(void) {
-    if (from_vm()) trip("QueryDosDeviceA", str_or(A32(0), "NULL"));
+    if (!allowed("QueryDosDeviceA")) trip("QueryDosDeviceA", str_or(A32(0), "NULL"));
     unanswered("QueryDosDeviceA");
 }
 static void k_mciSendStringA(void) {

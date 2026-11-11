@@ -1025,7 +1025,9 @@ def test_deviceiocontrol_trips(tmp_path):
     assert "VM: no" in r.stderr
 
 
-def test_drive_type_from_game_answers(tmp_path):
+def test_drive_type_from_game_trips_too(tmp_path):
+    # The VM could ask through an ordinary game function, so every drive question stops,
+    # whoever asks; the user decides (a call site they approve goes on an allow list).
     asm = r"""
     push offset root
     call dword ptr [{IAT_GetDriveTypeA}]
@@ -1040,7 +1042,7 @@ root: .asciz "C:\\"
 """
     b = _engine(tmp_path, asm, {K32: ["GetDriveTypeA", "ExitProcess"]})
     r = _run(tmp_path, b)
-    assert r.returncode == 0, r.stderr[-2000:]
+    assert r.returncode == 3 and "TRIPWIRE: GetDriveTypeA" in r.stderr and "VM: no" in r.stderr, r.stderr[-2000:]
 
 
 def test_drive_type_from_vm_range_trips(tmp_path):
