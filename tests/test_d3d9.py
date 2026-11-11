@@ -58,3 +58,11 @@ def test_unimplemented_method_is_loud(selftest, tmp_path):
                                    "depth_objects"])
 def test_device(selftest, tmp_path, group):
     check(selftest, group, tmp_path)
+
+
+# ---- Task 5: textures, surfaces, buffers ----
+
+@pytest.mark.parametrize("group", ["lock_roundtrip", "pitches", "dxt_small_mips", "zeroed", "release_while_bound",
+                                   "child_refs", "formats_check"])
+def test_resources(selftest, tmp_path, group):
+    check(selftest, group, tmp_path)

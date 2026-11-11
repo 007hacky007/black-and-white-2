@@ -13,6 +13,7 @@
 #include "win32hle.h"
 #include "bw2.h"
 #include "d3d_com.h"
+#include "d3d9_device.h"
 
 const recomp_dispatch_entry_t recomp_dispatch_table[1] = { { 0, 0 } };
 const uint32_t recomp_dispatch_count = 0;
@@ -550,7 +551,310 @@ static void group_depth_objects(void) {
     CHECKEQ(vcall(b, 2, 0), 0);
 }
 
+/* ---- Task 5: textures, surfaces, buffers ---- */
+
+/* IDirect3DTexture9 slots (resource 3-10, base texture 11-16) */
+enum { TX_GetDevice = 3, TX_SetPrivateData, TX_GetPrivateData, TX_FreePrivateData, TX_SetPriority, TX_GetPriority,
+       TX_PreLoad, TX_GetType, TX_SetLOD, TX_GetLOD, TX_GetLevelCount, TX_SetAutoGenFilterType,
+       TX_GetAutoGenFilterType, TX_GenerateMipSubLevels, TX_GetLevelDesc, TX_GetSurfaceLevel, TX_LockRect,
+       TX_UnlockRect, TX_AddDirtyRect };
+/* IDirect3DVertexBuffer9 / IndexBuffer9 slots */
+enum { VB_Lock = 11, VB_Unlock, VB_GetDesc };
+
+#define FMT_X1R5G5B5 24u
+#define FMT_A1R5G5B5 25u
+#define FMT_A4R4G4B4 26u
+#define FMT_L8 50u
+#define FMT_A8 28u
+#define FMT_R16F 111u
+#define FMT_G16R16F 112u
+#define FMT_A16B16G16R16F 113u
+#define FMT_R32F 114u
+#define FMT_A32B32G32R32F 116u
+#define FMT_DXT5 0x35545844u
+#define FMT_P8 41u
+#define FMT_R8G8B8 20u
+#define USAGE_RENDERTARGET 1u
+#define USAGE_DYNAMIC 0x200u
+#define USAGE_WRITEONLY 8u
+#define FMT_INDEX16 101u
+
+static uint32_t new_texture(uint32_t dev, uint32_t w, uint32_t h, uint32_t levels, uint32_t usage, uint32_t fmt,
+                            uint32_t pool, uint32_t *hr) {
+    uint32_t out = gmem(4);
+    *hr = vcall(dev, DV_CreateTexture, 8, w, h, levels, usage, fmt, pool, out, 0u);
+    return *hr ? 0 : MEM32(out);
+}
+static uint32_t texture(uint32_t dev, uint32_t w, uint32_t h, uint32_t levels, uint32_t fmt) {
+    uint32_t hr, t = new_texture(dev, w, h, levels, 0, fmt, POOL_MANAGED, &hr);
+    CHECKEQ(hr, D3D_OK);
+    return t;
+}
+static uint32_t level_surface(uint32_t tex, uint32_t level) {
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(tex, TX_GetSurfaceLevel, 2, level, out), D3D_OK);
+    return MEM32(out);
+}
+static uint32_t render_target(uint32_t dev, uint32_t w, uint32_t h) {
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateRenderTarget, 8, w, h, FMT_A8R8G8B8, 0u, 0u, 0u, out, 0u), D3D_OK);
+    return MEM32(out);
+}
+static uint16_t half(float f) {                              /* float to IEEE half, round to nearest */
+    uint32_t u; memcpy(&u, &f, 4);
+    uint32_t s = (u >> 16) & 0x8000, e = (u >> 23) & 0xFF, m = u & 0x7FFFFF;
+    if (e < 113) return (uint16_t)s;                         /* the test values are 0 or >= 1/15 */
+    uint32_t h = s | ((e - 112) << 10) | (m >> 13);
+    if (m & 0x1000) h++;
+    return (uint16_t)h;
+}
+
+/* Write a 16x1 gradient in fmt: pixel x has every channel at level x of 15. Returns the expected D3DCOLOR. */
+static uint32_t gradient_texel(uint32_t fmt, uint32_t x, uint8_t *p) {
+    uint32_t v8 = x * 17;                                    /* 0..255 */
+    float vf = (float)x / 15.0f;
+    switch (fmt) {
+    case FMT_A8R8G8B8: p[0] = p[1] = p[2] = p[3] = (uint8_t)v8; return v8 * 0x01010101u;
+    case FMT_X8R8G8B8: p[0] = p[1] = p[2] = (uint8_t)v8; p[3] = 0x12; return 0xFF000000u | v8 * 0x010101u;
+    case FMT_R5G6B5: {
+        uint32_t r = x * 2, g = x * 4, b = x * 2;
+        uint16_t v = (uint16_t)((r << 11) | (g << 5) | b);
+        memcpy(p, &v, 2);
+        uint32_t r8 = (r << 3) | (r >> 2), g8 = (g << 2) | (g >> 4), b8 = (b << 3) | (b >> 2);
+        return 0xFF000000u | r8 << 16 | g8 << 8 | b8;
+    }
+    case FMT_R16F: { uint16_t h = half(vf); memcpy(p, &h, 2); return 0xFF0000FFu | 0xFF00u | ((uint32_t)lroundf(vf * 255) << 16); }
+    case FMT_G16R16F: { uint16_t h[2] = { half(vf), half(vf) }; memcpy(p, h, 4);
+                        return 0xFF0000FFu | ((uint32_t)lroundf(vf * 255) * 0x10100u); }
+    case FMT_A16B16G16R16F: { uint16_t h[4] = { half(vf), half(vf), half(vf), half(vf) }; memcpy(p, h, 8);
+                              return (uint32_t)lroundf(vf * 255) * 0x01010101u; }
+    case FMT_R32F: memcpy(p, &vf, 4); return 0xFF0000FFu | 0xFF00u | ((uint32_t)lroundf(vf * 255) << 16);
+    case FMT_A32B32G32R32F: memcpy(p, &vf, 4); memcpy(p + 4, &vf, 4); memcpy(p + 8, &vf, 4); memcpy(p + 12, &vf, 4);
+                            return (uint32_t)lroundf(vf * 255) * 0x01010101u;
+    }
+    return 0;
+}
+static int near_color(uint32_t a, uint32_t b, int tol) {
+    for (int i = 0; i < 32; i += 8) {
+        int x = (int)((a >> i) & 0xFF), y = (int)((b >> i) & 0xFF);
+        if (x - y > tol || y - x > tol) return 0;
+    }
+    return 1;
+}
+
+static void group_lock_roundtrip(void) {
+    uint32_t dev = new_device(16, 16), rt = render_target(dev, 16, 1);
+    static const uint32_t fmts[] = { FMT_A8R8G8B8, FMT_X8R8G8B8, FMT_R5G6B5, FMT_A16B16G16R16F, FMT_R16F,
+                                     FMT_G16R16F, FMT_R32F, FMT_A32B32G32R32F };
+    for (unsigned i = 0; i < sizeof fmts / sizeof *fmts; i++) {
+        uint32_t t = texture(dev, 16, 1, 1, fmts[i]), lr = gmem(8), want[16], px[16];
+        CHECKEQ(vcall(t, TX_LockRect, 4, 0u, lr, 0u, 0u), D3D_OK);
+        uint8_t *bits = hle_ptr(MEM32(lr + 4));
+        uint32_t bpp = MEM32(lr) / 16;
+        for (uint32_t x = 0; x < 16; x++) want[x] = gradient_texel(fmts[i], x, bits + x * bpp);
+        CHECKEQ(vcall(t, TX_UnlockRect, 1, 0u), D3D_OK);
+        uint32_t s = level_surface(t, 0);
+        CHECKEQ(vcall(dev, DV_StretchRect, 5, s, 0u, rt, 0u, 1u), D3D_OK);   /* D3DTEXF_POINT */
+        read_rt(dev, rt, 16, 1, px);
+        for (uint32_t x = 0; x < 16; x++)
+            if (!near_color(px[x], want[x], fmts[i] == FMT_A8R8G8B8 || fmts[i] == FMT_X8R8G8B8 || fmts[i] == FMT_R5G6B5 ? 0 : 1))
+                printf("FAIL format %u pixel %u: 0x%08X, want 0x%08X\n", fmts[i], x, px[x], want[x]), fails++;
+        vcall(s, 2, 0);
+        CHECKEQ(vcall(t, 2, 0), 0);
+    }
+    /* the documented 5-bit expansion: 31 -> 255, 16 -> 132 */
+    uint32_t t = texture(dev, 2, 1, 1, FMT_R5G6B5), lr = gmem(8), px[2];
+    vcall(t, TX_LockRect, 4, 0u, lr, 0u, 0u);
+    uint16_t v[2] = { (uint16_t)(31u << 11), (uint16_t)(16u << 11) };
+    memcpy(hle_ptr(MEM32(lr + 4)), v, 4);
+    vcall(t, TX_UnlockRect, 1, 0u);
+    uint32_t rt2 = render_target(dev, 2, 1), s = level_surface(t, 0);
+    CHECKEQ(vcall(dev, DV_StretchRect, 5, s, 0u, rt2, 0u, 1u), D3D_OK);
+    read_rt(dev, rt2, 2, 1, px);
+    CHECKEQ(px[0], 0xFFFF0000u);
+    CHECKEQ(px[1], 0xFF840000u);
+}
+
+static void group_pitches(void) {
+    uint32_t dev = new_device(16, 16);
+    static const uint32_t fmts[] = { FMT_A8R8G8B8, FMT_R5G6B5, FMT_DXT1, FMT_DXT5 };
+    static const uint32_t sizes[][2] = { { 256, 256 }, { 100, 60 }, { 3, 3 } };
+    for (unsigned f = 0; f < 4; f++)
+        for (unsigned z = 0; z < 3; z++) {
+            uint32_t w = sizes[z][0], h = sizes[z][1], t = texture(dev, w, h, 0, fmts[f]);
+            uint32_t n = vcall(t, TX_GetLevelCount, 0), want_n = 1;
+            for (uint32_t m = w > h ? w : h; m > 1; m >>= 1) want_n++;
+            CHECKEQ(n, want_n);
+            for (uint32_t l = 0; l < n; l++) {
+                uint32_t lw = w >> l ? w >> l : 1, lh = h >> l ? h >> l : 1, desc = gmem(32), lr = gmem(8);
+                CHECKEQ(vcall(t, TX_GetLevelDesc, 2, l, desc), D3D_OK);
+                CHECK(MEM32(desc + 24) == lw && MEM32(desc + 28) == lh && MEM32(desc) == fmts[f]);
+                CHECKEQ(vcall(t, TX_LockRect, 4, l, lr, 0u, 0u), D3D_OK);
+                uint32_t want = fmts[f] == FMT_A8R8G8B8 ? lw * 4 : fmts[f] == FMT_R5G6B5 ? lw * 2
+                              : ((lw + 3) / 4) * (fmts[f] == FMT_DXT1 ? 8u : 16u);
+                if (MEM32(lr) != want) printf("FAIL fmt %X %ux%u level %u pitch %u want %u\n", fmts[f], w, h, l, MEM32(lr), want), fails++;
+                CHECKEQ(vcall(t, TX_UnlockRect, 1, l), D3D_OK);
+            }
+            CHECKEQ(vcall(t, TX_LockRect, 4, n, gmem(8), 0u, 0u), D3DERR_INVALIDCALL);
+            vcall(t, 2, 0);
+        }
+    uint32_t t = texture(dev, 256, 256, 0, FMT_DXT1), lr = gmem(8);
+    vcall(t, TX_LockRect, 4, 0u, lr, 0u, 0u);
+    CHECKEQ(MEM32(lr), 512);
+    vcall(t, TX_UnlockRect, 1, 0u);
+}
+
+static void group_dxt_small_mips(void) {
+    uint32_t dev = new_device(16, 16), t = texture(dev, 8, 8, 4, FMT_DXT1);
+    CHECKEQ(vcall(t, TX_GetLevelCount, 0), 4);
+    for (uint32_t l = 0; l < 4; l++) {
+        uint32_t lr = gmem(8);
+        CHECKEQ(vcall(t, TX_LockRect, 4, l, lr, 0u, 0u), D3D_OK);
+        CHECKEQ(MEM32(lr), l == 0 ? 16u : 8u);              /* two blocks per row at 8x8, one at 4x4 and below */
+        uint8_t *b = hle_ptr(MEM32(lr + 4));
+        uint32_t blocks = l == 0 ? 4 : 1;
+        for (uint32_t i = 0; i < blocks * 8; i++) b[i] = (uint8_t)(0x40 + i);
+        CHECKEQ(vcall(t, TX_UnlockRect, 1, l), D3D_OK);
+    }
+    /* a lock reads back what was written */
+    uint32_t lr = gmem(8);
+    vcall(t, TX_LockRect, 4, 3u, lr, 0u, 0x10u);
+    CHECKEQ(*(uint8_t *)hle_ptr(MEM32(lr + 4)), 0x40);
+    vcall(t, TX_UnlockRect, 1, 3u);
+    mtl_flush(((struct d3d_device *)d3d_host(dev, D3DK_DEVICE))->mtl);   /* the uploads reach the GPU cleanly */
+}
+
+static void group_zeroed(void) {
+    uint32_t dev = new_device(16, 16), t = texture(dev, 8, 8, 1, FMT_A8R8G8B8), lr = gmem(8);
+    CHECKEQ(vcall(t, TX_LockRect, 4, 0u, lr, 0u, 0x10u), D3D_OK);
+    int nz = 0;
+    for (uint32_t i = 0; i < 8 * 8 * 4; i++) nz += ((uint8_t *)hle_ptr(MEM32(lr + 4)))[i] != 0;
+    CHECKEQ(nz, 0);
+    vcall(t, TX_UnlockRect, 1, 0u);
+    /* the GPU copy is zero too */
+    uint32_t rt = render_target(dev, 8, 8), s = level_surface(t, 0), px[64];
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFFFFFFFFu, f32(1), 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_StretchRect, 5, s, 0u, rt, 0u, 1u), D3D_OK);
+    read_rt(dev, rt, 8, 8, px);
+    CHECKEQ(px[0], 0);
+    CHECKEQ(px[63], 0);
+    uint32_t out = gmem(4), ptr = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateVertexBuffer, 6, 4096u, USAGE_WRITEONLY, 0u, POOL_MANAGED, out, 0u), D3D_OK);
+    uint32_t vb = MEM32(out);
+    CHECKEQ(vcall(vb, VB_Lock, 4, 0u, 0u, ptr, 0u), D3D_OK);
+    nz = 0;
+    for (uint32_t i = 0; i < 4096; i++) nz += ((uint8_t *)hle_ptr(MEM32(ptr)))[i] != 0;
+    CHECKEQ(nz, 0);
+    CHECKEQ(vcall(vb, VB_Unlock, 0), D3D_OK);
+    CHECKEQ(vcall(dev, DV_CreateIndexBuffer, 6, 600u, USAGE_DYNAMIC | USAGE_WRITEONLY, FMT_INDEX16, POOL_DEFAULT, out, 0u), D3D_OK);
+    uint32_t ib = MEM32(out), desc = gmem(24);
+    CHECKEQ(vcall(ib, VB_Lock, 4, 100u, 50u, ptr, 0x2000u), D3D_OK);    /* DISCARD */
+    nz = 0;
+    for (uint32_t i = 0; i < 50; i++) nz += ((uint8_t *)hle_ptr(MEM32(ptr)))[i] != 0;
+    CHECKEQ(nz, 0);
+    CHECKEQ(vcall(ib, VB_Unlock, 0), D3D_OK);
+    CHECKEQ(vcall(ib, VB_GetDesc, 1, desc), D3D_OK);
+    CHECK(MEM32(desc) == FMT_INDEX16 && MEM32(desc + 4) == 7 && MEM32(desc + 12) == POOL_DEFAULT && MEM32(desc + 16) == 600);
+    /* a DEFAULT index buffer blocks Reset until released */
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp_new(16, 16, FMT_X8R8G8B8, 1)), D3DERR_INVALIDCALL);
+    CHECKEQ(vcall(ib, 2, 0), 0);
+    vcall(s, 2, 0);
+    vcall(rt, 2, 0);
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp_new(16, 16, FMT_X8R8G8B8, 1)), D3D_OK);
+}
+
+static void group_release_while_bound(void) {
+    uint32_t dev = new_device(16, 16), t = texture(dev, 4, 4, 1, FMT_A8R8G8B8), out = gmem(4);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, t), D3D_OK);
+    CHECKEQ(vcall(t, 2, 0), 1);                              /* the device's reference */
+    CHECK(d3d_alive(t));
+    CHECKEQ(vcall(dev, DV_GetTexture, 2, 0u, out), D3D_OK);
+    CHECKEQ(MEM32(out), t);
+    CHECKEQ(vcall(t, 2, 0), 1);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, 0u), D3D_OK);
+    CHECK(!d3d_alive(t));
+    CHECKEQ(vcall(dev, DV_GetTexture, 2, 0u, out), D3D_OK);
+    CHECKEQ(MEM32(out), 0);
+    /* streams and indices hold their buffers the same way */
+    CHECKEQ(vcall(dev, DV_CreateVertexBuffer, 6, 256u, 0u, 0u, POOL_MANAGED, out, 0u), D3D_OK);
+    uint32_t vb = MEM32(out);
+    CHECKEQ(vcall(dev, DV_SetStreamSource, 4, 0u, vb, 16u, 32u), D3D_OK);
+    CHECKEQ(vcall(vb, 2, 0), 1);
+    uint32_t off = gmem(4), stride = gmem(4);
+    CHECKEQ(vcall(dev, DV_GetStreamSource, 4, 0u, out, off, stride), D3D_OK);
+    CHECK(MEM32(out) == vb && MEM32(off) == 16 && MEM32(stride) == 32);
+    vcall(vb, 2, 0);
+    CHECKEQ(vcall(dev, DV_SetStreamSource, 4, 0u, 0u, 0u, 0u), D3D_OK);
+    CHECK(!d3d_alive(vb));
+    /* the volume and cube textures exist */
+    CHECKEQ(vcall(dev, DV_CreateCubeTexture, 7, 16u, 0u, 0u, FMT_DXT5, POOL_MANAGED, out, 0u), D3D_OK);
+    uint32_t cube = MEM32(out);
+    CHECKEQ(vcall(cube, TX_GetLevelCount, 0), 5);
+    CHECKEQ(vcall(cube, 2, 0), 0);
+    CHECKEQ(vcall(dev, DV_CreateVolumeTexture, 9, 8u, 8u, 4u, 0u, 0u, FMT_A8R8G8B8, POOL_MANAGED, out, 0u), D3D_OK);
+    uint32_t vol = MEM32(out), lb = gmem(12);
+    CHECKEQ(vcall(vol, TX_GetLevelCount, 0), 4);
+    CHECKEQ(vcall(vol, TX_LockRect, 4, 1u, lb, 0u, 0u), D3D_OK);        /* LockBox, level 1: 4x4x2 */
+    CHECK(MEM32(lb) == 16 && MEM32(lb + 4) == 64);
+    CHECKEQ(vcall(vol, TX_UnlockRect, 1, 1u), D3D_OK);
+    CHECKEQ(vcall(vol, 2, 0), 0);
+}
+
+static void group_child_refs(void) {
+    uint32_t dev = new_device(16, 16), t = texture(dev, 8, 8, 0, FMT_A8R8G8B8);
+    uint32_t s = level_surface(t, 1), again = level_surface(t, 1);
+    CHECKEQ(s, again);                                       /* one surface per level */
+    vcall(again, 2, 0);
+    CHECKEQ(vcall(t, 2, 0), 1);                              /* the surface holds its texture */
+    CHECK(d3d_alive(t));
+    uint32_t desc = gmem(32), out = gmem(4);
+    CHECKEQ(vcall(s, SF_GetDesc, 1, desc), D3D_OK);
+    CHECK(MEM32(desc + 24) == 4 && MEM32(desc + 28) == 4);
+    static const uint8_t IID_IDirect3DTexture9[16] = { 0x27, 0x12, 0xC3, 0x85, 0xE5, 0x3D, 0x00, 0x4F,
+                                                       0x9B, 0x3A, 0xF1, 0x1A, 0xC3, 0x8C, 0x18, 0xB5 };
+    uint32_t iid = gmem(16);
+    memcpy(hle_ptr(iid), IID_IDirect3DTexture9, 16);
+    CHECKEQ(vcall(s, SF_GetContainer, 2, iid, out), D3D_OK);
+    CHECKEQ(MEM32(out), t);
+    vcall(t, 2, 0);
+    CHECKEQ(vcall(s, 2, 0), 0);
+    CHECK(!d3d_alive(t) && !d3d_alive(s));
+    /* private data travels with the object */
+    uint32_t t2 = texture(dev, 4, 4, 1, FMT_A8R8G8B8), guid = gmem(16), data = gmem(8), size = gmem(4);
+    memset(hle_ptr(guid), 0x5A, 16);
+    MEM32(data) = 0xCAFEF00Du;
+    CHECKEQ(vcall(t2, TX_SetPrivateData, 4, guid, data, 4u, 0u), D3D_OK);
+    MEM32(data) = 0, MEM32(size) = 2;
+    CHECKEQ(vcall(t2, TX_GetPrivateData, 3, guid, data, size), D3DERR_MOREDATA);
+    MEM32(size) = 4;
+    CHECKEQ(vcall(t2, TX_GetPrivateData, 3, guid, data, size), D3D_OK);
+    CHECKEQ(MEM32(data), 0xCAFEF00Du);
+    CHECKEQ(vcall(t2, TX_FreePrivateData, 1, guid), D3D_OK);
+    CHECKEQ(vcall(t2, TX_GetPrivateData, 3, guid, data, size), D3DERR_NOTFOUND);
+    CHECKEQ(vcall(t2, TX_GetType, 0), 3);
+    vcall(t2, 2, 0);
+}
+
+static void group_formats_check(void) {
+    uint32_t dev = new_device(16, 16), d = g_d3d9;
+    static const uint32_t fmts[] = { FMT_A8R8G8B8, FMT_X8R8G8B8, FMT_R5G6B5, FMT_X1R5G5B5, FMT_A1R5G5B5, FMT_A4R4G4B4,
+        FMT_L8, FMT_A8, 51, 60, 63, 34, 36, FMT_R16F, FMT_G16R16F, FMT_A16B16G16R16F, FMT_R32F, 115,
+        FMT_A32B32G32R32F, FMT_DXT1, 0x32545844u, 0x33545844u, 0x34545844u, FMT_DXT5, FMT_D16, FMT_D24S8, 77, 79, 71,
+        FMT_P8, FMT_R8G8B8, FMT_D16_LOCKABLE, 0x59565955u /* UYVY */ };
+    for (unsigned i = 0; i < sizeof fmts / sizeof *fmts; i++)
+        for (uint32_t usage = 0; usage <= 1; usage++) {
+            uint32_t ok = vcall(d, D9_CheckDeviceFormat, 6, 0u, HAL, FMT_X8R8G8B8, usage, RT_TEXTURE, fmts[i]);
+            uint32_t hr, t = new_texture(dev, 8, 8, 1, usage, fmts[i], usage ? POOL_DEFAULT : POOL_MANAGED, &hr);
+            if ((ok == D3D_OK) != (hr == D3D_OK))
+                printf("FAIL format 0x%X usage %u: CheckDeviceFormat 0x%X, CreateTexture 0x%X\n", fmts[i], usage, ok, hr), fails++;
+            if (t) vcall(t, 2, 0);
+        }
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "lock_roundtrip", group_lock_roundtrip }, { "pitches", group_pitches }, { "dxt_small_mips", group_dxt_small_mips },
+    { "zeroed", group_zeroed }, { "release_while_bound", group_release_while_bound }, { "child_refs", group_child_refs },
+    { "formats_check", group_formats_check },
     { "clear", group_clear }, { "persist", group_persist }, { "present_scaled", group_present_scaled },
     { "reset_rules", group_reset_rules }, { "defaults", group_defaults }, { "fpu", group_fpu },
     { "depth_objects", group_depth_objects },

@@ -51,6 +51,19 @@ void mtl_present(struct mtl_ctx *c, mtl_obj backbuffer);
 void mtl_flush(struct mtl_ctx *c);       /* commit what is recorded and wait */
 uint64_t mtl_frame(struct mtl_ctx *c);   /* frames presented */
 
+/* GPU-visible guest memory for vertex and index buffers (mtl_buffer.m). */
+uint32_t mtl_heap_alloc(uint32_t size);                       /* zeroed, 256-aligned */
+void mtl_heap_free(uint32_t va);
+void mtl_heap_free_after(struct mtl_ctx *c, uint64_t serial, uint32_t va);   /* once that work has finished */
+void mtl_heap_forget_ctx(struct mtl_ctx *c);
+void *mtl_heap_buffer(uint32_t va, uint32_t *offset);         /* id<MTLBuffer> (not retained) */
+uint64_t mtl_serial(struct mtl_ctx *c);                       /* the serial of the work being recorded */
+int mtl_serial_done(struct mtl_ctx *c, uint64_t serial);
+
+/* StretchRect's scaled or converting copy: a draw into dst's rect, sampling src's. */
+void mtl_stretch(struct mtl_ctx *c, mtl_obj src, const char *swizzle, uint32_t sslice, uint32_t slevel,
+                 const struct mtl_rect *sr, struct mtl_target dst, const struct mtl_rect *dr, int linear);
+
 /* Headless tests: Present draws into an offscreen drawable of this size. */
 void mtl_set_test_drawable(uint32_t w, uint32_t h);
 void mtl_read_test_drawable(uint32_t *argb);

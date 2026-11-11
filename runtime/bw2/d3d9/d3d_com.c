@@ -60,7 +60,9 @@ static const struct d3d_iface *iface_of(const char *name) {
     return NULL;
 }
 
+static void resource_defaults(void);
 uint32_t d3d_vtable(const char *iface) {
+    resource_defaults();
     for (int i = 0; i < g_nvt; i++)
         if (!strcmp(g_vt[i].iface, iface)) return g_vt[i].vt;
     const struct d3d_iface *f = iface_of(iface);
@@ -81,6 +83,24 @@ uint32_t d3d_vtable(const char *iface) {
     if (g_nvt == (int)(sizeof g_vt / sizeof g_vt[0])) d3d_fail("too many interfaces");
     g_vt[g_nvt].iface = f->name, g_vt[g_nvt++].vt = vt;
     return vt;
+}
+
+/* Private data is the same for every resource and for volumes. */
+static void resource_defaults(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    static const char *const ifaces[] = { "IDirect3DSurface9", "IDirect3DTexture9", "IDirect3DCubeTexture9",
+        "IDirect3DVolumeTexture9", "IDirect3DVolume9", "IDirect3DVertexBuffer9", "IDirect3DIndexBuffer9", 0 };
+    char name[96];
+    for (int i = 0; ifaces[i]; i++) {
+        snprintf(name, sizeof name, "%s::SetPrivateData", ifaces[i]);
+        if (!impl_of(name)) d3d_impl(strdup(name), d3d_SetPrivateData);
+        snprintf(name, sizeof name, "%s::GetPrivateData", ifaces[i]);
+        if (!impl_of(name)) d3d_impl(strdup(name), d3d_GetPrivateData);
+        snprintf(name, sizeof name, "%s::FreePrivateData", ifaces[i]);
+        if (!impl_of(name)) d3d_impl(strdup(name), d3d_FreePrivateData);
+    }
 }
 
 /* ---- objects ---- */
@@ -121,6 +141,76 @@ void *d3d_host(uint32_t obj, enum d3d_kind kind) {
     return s->host;
 }
 
+/* ---- private data (IDirect3DResource9::SetPrivateData and friends) ---- */
+struct priv { uint32_t obj; uint8_t guid[16]; uint8_t *data; uint32_t size, unk; struct priv *next; };
+static struct priv *g_priv;
+
+static void priv_drop(struct priv *p) {
+    if (p->unk && d3d_alive(p->unk)) d3d_release(p->unk);
+    else if (p->unk) {                                   /* a guest IUnknown: its Release, slot 2 */
+        uint32_t a[1] = { p->unk };
+        hle_call_guest(MEM32(MEM32(p->unk) + 8), 1, a);
+    }
+    free(p->data);
+    free(p);
+}
+static struct priv **priv_find(uint32_t obj, const uint8_t *guid) {
+    for (struct priv **pp = &g_priv; *pp; pp = &(*pp)->next)
+        if ((*pp)->obj == obj && !memcmp((*pp)->guid, guid, 16)) return pp;
+    return NULL;
+}
+static void priv_free_all(uint32_t obj) {
+    for (struct priv **pp = &g_priv; *pp;)
+        if ((*pp)->obj == obj) { struct priv *p = *pp; *pp = p->next; priv_drop(p); }
+        else pp = &(*pp)->next;
+}
+#define D3DSPD_IUNKNOWN 1u
+void d3d_SetPrivateData(void) {                          /* (this, guid, data, size, flags) */
+    uint32_t self = A32(0), size = A32(3), flags = A32(4);
+    const uint8_t *guid = APTR(1);
+    if (!slot_of(self)) d3d_fail("SetPrivateData on dead object 0x%08X", self);
+    if (!guid || (!A32(2) && size)) RET(D3DERR_INVALIDCALL, 5);
+    if ((flags & D3DSPD_IUNKNOWN) && size != 4) RET(D3DERR_INVALIDCALL, 5);
+    struct priv **old = priv_find(self, guid);
+    if (old) { struct priv *p = *old; *old = p->next; priv_drop(p); }
+    struct priv *p = calloc(1, sizeof *p);
+    p->obj = self, p->size = size, p->data = malloc(size ? size : 1);
+    memcpy(p->guid, guid, 16);
+    if (size) memcpy(p->data, APTR(2), size);
+    if (flags & D3DSPD_IUNKNOWN) {
+        memcpy(&p->unk, p->data, 4);
+        if (d3d_alive(p->unk)) d3d_addref(p->unk);
+        else if (p->unk) { uint32_t a[1] = { p->unk }; hle_call_guest(MEM32(MEM32(p->unk) + 4), 1, a); }
+    }
+    p->next = g_priv, g_priv = p;
+    RET(D3D_OK, 5);
+}
+void d3d_GetPrivateData(void) {                          /* (this, guid, data, DWORD* size) */
+    uint32_t self = A32(0), sizep = A32(3);
+    const uint8_t *guid = APTR(1);
+    if (!guid || !sizep) RET(D3DERR_INVALIDCALL, 4);
+    struct priv **pp = priv_find(self, guid);
+    if (!pp) RET(D3DERR_NOTFOUND, 4);
+    struct priv *p = *pp;
+    if (!A32(2)) { MEM32(sizep) = p->size; RET(D3D_OK, 4); }
+    if (MEM32(sizep) < p->size) { MEM32(sizep) = p->size; RET(D3DERR_MOREDATA, 4); }
+    memcpy(APTR(2), p->data, p->size);
+    MEM32(sizep) = p->size;
+    if (p->unk && d3d_alive(p->unk)) d3d_addref(p->unk);
+    else if (p->unk) { uint32_t a[1] = { p->unk }; hle_call_guest(MEM32(MEM32(p->unk) + 4), 1, a); }
+    RET(D3D_OK, 4);
+}
+void d3d_FreePrivateData(void) {                         /* (this, guid) */
+    const uint8_t *guid = APTR(1);
+    if (!guid) RET(D3DERR_INVALIDCALL, 2);
+    struct priv **pp = priv_find(A32(0), guid);
+    if (!pp) RET(D3DERR_NOTFOUND, 2);
+    struct priv *p = *pp;
+    *pp = p->next;
+    priv_drop(p);
+    RET(D3D_OK, 2);
+}
+
 void d3d_release_host(uint32_t obj) {
     struct slot *s = slot_of(obj);
     if (!s) d3d_fail("release of dead object 0x%08X", obj);
@@ -134,6 +224,7 @@ void d3d_release_host(uint32_t obj) {
     }
     g_freeids[g_nfree++] = id;
     g_live--;
+    priv_free_all(obj);
     if (h->destroy) h->destroy(h);
     MEM32(obj) = 0, MEM32(obj + 8) = 0xFFFFFFFFu;  /* a stale call through it faults loudly */
     hle_com_free(obj);

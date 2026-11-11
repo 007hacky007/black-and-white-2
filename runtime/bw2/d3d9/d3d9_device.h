@@ -83,6 +83,35 @@ struct d3d_device {
     struct mtl_ctx *mtl;
 };
 
+struct d3d_box { uint32_t l, t, r, b, front, back; };
+
+struct d3d_texture {
+    struct d3d_obj base;
+    uint32_t device;
+    uint32_t fmt, usage, pool, w, h, d, levels, faces;
+    const struct d3d_format *f;
+    mtl_obj tex, view;                   /* the Metal texture and its sampling view (NULL in system memory) */
+    uint32_t mtl_levels;                 /* AUTOGENMIPMAP: the full chain, of which the guest sees 1 */
+    int autogen;
+    uint32_t *mem;                       /* per subresource (face * levels + level): guest staging, or 0 */
+    uint32_t *child;                     /* per subresource: its surface or volume object, or 0 */
+    int *locked, *lock_ro;
+    struct d3d_box *lockbox;
+    uint32_t lod, priority, autogen_filter;
+    int counts_for_reset;
+};
+
+struct d3d_buffer {
+    struct d3d_obj base;
+    uint32_t device;
+    uint32_t size, usage, fvf_fmt, pool;
+    uint32_t mem;                        /* GPU-visible guest block (mtl_heap) */
+    uint64_t used_serial;                /* the work that last read it */
+    struct mtl_ctx *used_ctx;
+    uint32_t locks;
+    int counts_for_reset;
+};
+
 struct d3d_surface {
     struct d3d_obj base;
     uint32_t device;                     /* guest device */
@@ -97,6 +126,8 @@ struct d3d_surface {
     struct d3d_rect lock;
     int counts_for_reset;
     int owns_tex;
+    struct d3d_texture *parent;          /* a texture's level: its staging is the texture's */
+    uint32_t sub;
 };
 
 /* d3d9_device.c */
@@ -121,6 +152,23 @@ void d3d_surface_upload(struct d3d_surface *s, const struct d3d_rect *r);      /
 void d3d_surface_download(struct d3d_surface *s);                              /* GPU -> staging */
 uint32_t d3d_surface_mem(struct d3d_surface *s);                               /* the staging copy, made on first use */
 void d3d9_surface_register(void);
+
+/* d3d9_texture.c */
+struct d3d_texture *d3d_tex(uint32_t obj);             /* any of the three texture kinds */
+uint32_t d3d_tex_level_w(const struct d3d_texture *t, uint32_t level);
+uint32_t d3d_tex_level_h(const struct d3d_texture *t, uint32_t level);
+uint32_t d3d_tex_level_d(const struct d3d_texture *t, uint32_t level);
+uint32_t d3d_tex_mem(struct d3d_texture *t, uint32_t sub);              /* the staging copy, made on first use */
+void d3d_tex_upload(struct d3d_texture *t, uint32_t sub, const struct d3d_box *b);
+void d3d9_texture_register(void);
+
+/* d3d9_buffer.c */
+struct d3d_buffer *d3d_buf(uint32_t obj);              /* a vertex or index buffer */
+void *d3d_buffer_for_draw(uint32_t obj, uint32_t *offset);             /* id<MTLBuffer>; marks it in use */
+void d3d9_buffer_register(void);
+
+/* d3d9_copy.c */
+void d3d9_copy_register(void);
 
 /* d3d9_convert.c: between the D3D layout and the GPU storage */
 uint32_t d3d_storage_pitch(const struct d3d_format *f, uint32_t w);

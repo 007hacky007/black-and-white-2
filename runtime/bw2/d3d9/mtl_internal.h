@@ -26,6 +26,8 @@
 @property(strong) NSWindow *window;
 @property(strong) CAMetalLayer *layer;
 @property uint32_t passW, passH;
+@property uint64_t submitted;                 /* serial of the last committed command buffer */
+@property(atomic) uint64_t completed;         /* serial of the last finished one */
 @property uint64_t frames, encGen;
 @property int vsync;
 @end
@@ -36,6 +38,8 @@ int mtl_has_stencil(MTLPixelFormat f);
 void mtl_end_encoders(MtlCtx *c);
 id<MTLBlitCommandEncoder> mtl_blit(MtlCtx *c);
 NSString *mtl_target_key(MtlCtx *c);
+void mtl_commit(MtlCtx *c, int wait);         /* commit the open command buffer (serials, frees) */
+void mtl_heap_collect(void);                  /* free blocks whose last use has finished */
 void mtl_pipeline_targets(MtlCtx *c, MTLRenderPipelineDescriptor *pd);
 
 #endif

@@ -9,6 +9,9 @@ void ddraw7_register(void);
 void d3d9_device_register(void);
 void d3d9_state_register(void);
 void d3d9_surface_register(void);
+void d3d9_texture_register(void);
+void d3d9_buffer_register(void);
+void d3d9_copy_register(void);
 
 void bw2_d3d_register(void) {
     d3d9_adapter_register();
@@ -16,4 +19,7 @@ void bw2_d3d_register(void) {
     d3d9_device_register();
     d3d9_state_register();
     d3d9_surface_register();
+    d3d9_texture_register();
+    d3d9_buffer_register();
+    d3d9_copy_register();
 }

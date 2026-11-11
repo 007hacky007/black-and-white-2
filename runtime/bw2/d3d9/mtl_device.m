@@ -22,6 +22,16 @@ static NSString *const kUtilSource = @
     "  float2 p = float2((vid << 1) & 2, vid & 2);\n"
     "  VOut o; o.pos = float4(p * 2.0 - 1.0, z, 1.0); o.uv = float2(p.x, 1.0 - p.y); return o;\n"
     "}\n"
+    "struct Uv { float4 r; float lod; };\n"
+    "vertex VOut copy_vert(uint vid [[vertex_id]], constant Uv &u [[buffer(0)]]) {\n"
+    "  float2 p = float2((vid << 1) & 2, vid & 2);\n"
+    "  VOut o; o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "  o.uv = u.r.xy + float2(p.x, 1.0 - p.y) * u.r.zw; return o;\n"
+    "}\n"
+    "fragment float4 copy_frag(VOut in [[stage_in]], texture2d<float> t [[texture(0)]],\n"
+    "                          sampler s [[sampler(0)]], constant Uv &u [[buffer(0)]]) {\n"
+    "  return t.sample(s, in.uv, level(u.lod));\n"
+    "}\n"
     "fragment float4 present_frag(VOut in [[stage_in]], texture2d<float> t [[texture(0)]],\n"
     "                             sampler s [[sampler(0)]]) {\n"
     "  return float4(t.sample(s, in.uv).rgb, 1.0);\n"
@@ -121,15 +131,23 @@ id<MTLBlitCommandEncoder> mtl_blit(MtlCtx *c) {
     if (!c.blit) c.blit = [cmdbuf(c) blitCommandEncoder];
     return c.blit;
 }
-static void commit_wait(MtlCtx *c) {
+void mtl_commit(MtlCtx *c, int wait) {
     mtl_end_encoders(c);
-    if (c.cb) {
-        [c.cb commit];
-        [c.cb waitUntilCompleted];
-        if (c.cb.error) fprintf(stderr, "[bw2] metal: command buffer failed: %s\n", c.cb.error.description.UTF8String);
-        c.cb = nil;
-    }
+    id<MTLCommandBuffer> cb = c.cb;
+    if (!cb) { mtl_heap_collect(); return; }
+    uint64_t serial = ++c.submitted;
+    __weak MtlCtx *weak = c;
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
+        if (b.error) fprintf(stderr, "[bw2] metal: command buffer failed: %s\n", b.error.description.UTF8String);
+        MtlCtx *s = weak;
+        if (s && s.completed < serial) s.completed = serial;
+    }];
+    [cb commit];
+    if (wait) [cb waitUntilCompleted];
+    c.cb = nil;
+    mtl_heap_collect();
 }
+static void commit_wait(MtlCtx *c) { mtl_commit(c, 1); }
 void mtl_flush(struct mtl_ctx *cc) { commit_wait(ctx(cc)); }
 
 /* ---- context ---- */
@@ -525,9 +543,58 @@ void mtl_present(struct mtl_ctx *cc, mtl_obj backbuffer) {
     }
     dispatch_semaphore_t sem = c.inflight;
     [cb addCompletedHandler:^(id<MTLCommandBuffer> b) { (void)b; dispatch_semaphore_signal(sem); }];
-    [cb commit];
-    if (!drawable && target) [cb waitUntilCompleted];          /* the test drawable is read right after */
-    c.cb = nil;
+    mtl_commit(c, !drawable && target);                       /* the test drawable is read right after */
     c.frames++;
 }
 uint64_t mtl_frame(struct mtl_ctx *cc) { return ctx(cc).frames; }
+
+/* ---- StretchRect ---- */
+void mtl_stretch(struct mtl_ctx *cc, mtl_obj src, const char *swizzle, uint32_t sslice, uint32_t slevel,
+                 const struct mtl_rect *sr, struct mtl_target dst, const struct mtl_rect *dr, int linear) {
+    MtlCtx *c = ctx(cc);
+    id<MTLTexture> s = (__bridge id<MTLTexture>)src, d = (__bridge id<MTLTexture>)dst.tex;
+    MTLTextureSwizzle map[4] = { MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue,
+                                 MTLTextureSwizzleAlpha };
+    for (int i = 0; swizzle && swizzle[0] && i < 4; i++)
+        map[i] = swizzle[i] == 'r' ? MTLTextureSwizzleRed : swizzle[i] == 'g' ? MTLTextureSwizzleGreen
+               : swizzle[i] == 'b' ? MTLTextureSwizzleBlue : swizzle[i] == 'a' ? MTLTextureSwizzleAlpha
+               : swizzle[i] == '0' ? MTLTextureSwizzleZero : MTLTextureSwizzleOne;
+    id<MTLTexture> v = [s newTextureViewWithPixelFormat:s.pixelFormat textureType:MTLTextureType2D
+                                                 levels:NSMakeRange(slevel, 1) slices:NSMakeRange(sslice, 1)
+                                                swizzle:MTLTextureSwizzleChannelsMake(map[0], map[1], map[2], map[3])];
+    NSString *key = [NSString stringWithFormat:@"copy:%lu", (unsigned long)d.pixelFormat];
+    id<MTLRenderPipelineState> p = c.psos[key];
+    if (!p) {
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [c.util newFunctionWithName:@"copy_vert"];
+        pd.fragmentFunction = [c.util newFunctionWithName:@"copy_frag"];
+        pd.colorAttachments[0].pixelFormat = d.pixelFormat;
+        NSError *err = nil;
+        p = [c.dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        if (!p) { fprintf(stderr, "[bw2] FATAL: copy pipeline: %s\n", err.description.UTF8String); abort(); }
+        c.psos[key] = p;
+    }
+    MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+    sd.minFilter = sd.magFilter = linear ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+    sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> smp = [c.dev newSamplerStateWithDescriptor:sd];
+    mtl_end_encoders(c);
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = d;
+    rp.colorAttachments[0].slice = dst.slice, rp.colorAttachments[0].level = dst.level;
+    rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [cmdbuf(c) renderCommandEncoderWithDescriptor:rp];
+    double sw = v.width, sh = v.height;
+    struct { float r[4]; float lod; float pad[3]; } u = {
+        { (float)(sr->x / sw), (float)(sr->y / sh), (float)(sr->w / sw), (float)(sr->h / sh) }, 0, { 0 } };
+    [e setRenderPipelineState:p];
+    [e setViewport:(MTLViewport){ dr->x, dr->y, dr->w, dr->h, 0, 1 }];
+    [e setVertexBytes:&u length:sizeof u atIndex:0];
+    [e setFragmentBytes:&u length:sizeof u atIndex:0];
+    [e setFragmentTexture:v atIndex:0];
+    [e setFragmentSamplerState:smp atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    c.encGen++;
+}

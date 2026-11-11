@@ -66,6 +66,9 @@ uint32_t d3d_qi(uint32_t obj, const uint8_t *iid, uint32_t out);
 void d3d_QueryInterface(void);
 void d3d_AddRef(void);
 void d3d_Release(void);
+void d3d_SetPrivateData(void);
+void d3d_GetPrivateData(void);
+void d3d_FreePrivateData(void);
 
 /* Stop the run: "d3d9: <what> (from guest 0x%08X)". */
 _Noreturn void d3d_fail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

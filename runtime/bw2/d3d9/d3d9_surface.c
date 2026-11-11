@@ -13,7 +13,8 @@ struct d3d_surface *d3d_surf(uint32_t obj) { return d3d_host(obj, D3DK_SURFACE);
 
 static void destroy_surface(struct d3d_obj *o) {
     struct d3d_surface *s = (struct d3d_surface *)o;
-    if (s->mem) hle_free(hle_ptr(s->mem));
+    if (s->parent) s->parent->child[s->sub] = 0;
+    else if (s->mem) hle_free(hle_ptr(s->mem));
     if (s->owns_tex) mtl_release(s->tex);
     if (s->device && d3d_alive(s->device)) {
         struct d3d_device *d = d3d_host(s->device, D3DK_DEVICE);
@@ -36,7 +37,8 @@ uint32_t d3d_surface_new(uint32_t device, uint32_t container, uint32_t fmt, uint
     s->mem_size = s->pitch * d3d_format_rows(s->f, h);
     struct d3d_device *d = d3d_host(device, D3DK_DEVICE);
     if (!tex && (pool == D3DPOOL_DEFAULT || pool == D3DPOOL_MANAGED)) {
-        uint32_t flags = (usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)) ? MT_RENDER : 0;
+        /* a DEFAULT surface may be a StretchRect or ColorFill destination: drawable */
+        uint32_t flags = (usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)) || pool == D3DPOOL_DEFAULT ? MT_RENDER : 0;
         tex = mtl_tex_new(d->mtl, s->f->store, MT_2D, w, h, 1, 1, flags);
         s->owns_tex = 1;
     }
@@ -51,11 +53,17 @@ uint32_t d3d_surface_new(uint32_t device, uint32_t container, uint32_t fmt, uint
 }
 
 uint32_t d3d_surface_mem(struct d3d_surface *s) {
+    if (s->parent) return d3d_tex_mem(s->parent, s->sub);
     if (!s->mem) s->mem = hle_va(hle_alloc(s->mem_size ? s->mem_size : 16));
     return s->mem;
 }
 
 void d3d_surface_upload(struct d3d_surface *s, const struct d3d_rect *r) {
+    if (s->parent) {
+        struct d3d_box b = { (uint32_t)r->l, (uint32_t)r->t, (uint32_t)r->r, (uint32_t)r->b, 0, 1 };
+        d3d_tex_upload(s->parent, s->sub, &b);
+        return;
+    }
     if (!s->tex) return;
     struct d3d_device *d = d3d_host(s->device, D3DK_DEVICE);
     uint32_t bs = s->f->block, x0 = (uint32_t)r->l / bs * bs, y0 = (uint32_t)r->t / bs * bs;
@@ -118,6 +126,9 @@ static void sf_LockRect(void) {                        /* (this, D3DLOCKED_RECT*
     if (r.l < 0 || r.t < 0 || r.r > (int32_t)s->w || r.b > (int32_t)s->h || r.l >= r.r || r.t >= r.b)
         RET(D3DERR_INVALIDCALL, 4);
     if (s->f->block == 4 && ((r.l | r.t) & 3)) RET(D3DERR_INVALIDCALL, 4);
+    if (s->parent && s->parent->pool == D3DPOOL_DEFAULT && !(s->parent->usage & D3DUSAGE_DYNAMIC))
+        RET(D3DERR_INVALIDCALL, 4);                      /* as D3D: a DEFAULT texture is not lockable */
+    if (s->parent && s->parent->locked[s->sub]) RET(D3DERR_INVALIDCALL, 4);
     if (s->tex && (s->type_usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)) && !(flags & D3DLOCK_DISCARD))
         d3d_surface_download(s);                         /* a target's contents are on the GPU */
     uint32_t bs = s->f->block;
