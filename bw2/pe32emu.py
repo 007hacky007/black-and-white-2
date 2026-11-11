@@ -58,6 +58,8 @@ class Pe32Host:
         self._setup_segments()
         self.api: dict[str, tuple[int | None, Callable]] = {}
         self.last_error = 0
+        self.handles: dict[int, object] = {}
+        self._next_handle = 0x100
         self._heap_top = HEAP
         self._stub_of: dict[str, int] = {}
         self._name_of: dict[int, str] = {}
@@ -139,6 +141,12 @@ class Pe32Host:
 
     def _virtual_alloc_api(self, addr: int, size: int, kind: int, prot: int) -> int:
         return addr & ~0xFFF if addr else self.virtual_alloc(size)
+
+    def new_handle(self, obj: object) -> int:
+        h = self._next_handle
+        self._next_handle += 4
+        self.handles[h] = obj
+        return h
 
     def reg(self, name: str) -> int:
         return self.uc.reg_read(_REGS[name])
