@@ -47,9 +47,18 @@ static int usage(void) {
     return BW2_EXIT_BOOT;
 }
 
+/* --selftest-mainsync: a block sent from the guest's thread runs on the process main thread. */
+static uint32_t mainsync_selftest(void) {
+    __block int on_main = 0;
+    bw2_main_sync(^{ on_main = pthread_main_np(); });
+    printf("%s\n", on_main && !pthread_main_np() ? "main sync ok" : "main sync FAILED");
+    fflush(stdout);
+    return on_main ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     const char *game = NULL, *exe = "white.exe";
-    int strict = 0, st_dispatch = 0, st_mem = 0, nlifted = 0, ncall = -1;
+    int strict = 0, st_dispatch = 0, st_mem = 0, st_mainsync = 0, nlifted = 0, ncall = -1;
     uint32_t call_args[8];
     struct { const char *name; uint32_t base; } lifted[8];
     for (int i = 1; i < argc; i++) {
@@ -72,6 +81,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--selftest-dispatch")) st_dispatch = 1;
         else if (!strcmp(argv[i], "--selftest-mem")) st_mem = 1;
         else if (!strcmp(argv[i], "--selftest-eh-depth")) hle_on_exit = report_eh_depth;
+        else if (!strcmp(argv[i], "--selftest-mainsync")) st_mainsync = 1;
         else { fprintf(stderr, "bw2: unknown argument %s\n", argv[i]); return usage(); }
     }
     if (getenv("BW2_TRACE_IMPORTS")) win32hle_trace = 1;   /* one line per import call, with its caller */
@@ -82,6 +92,7 @@ int main(int argc, char **argv) {
         printf("mem base 0x%llx\n", (unsigned long long)(uintptr_t)g_mem_base);
         return 0;
     }
+    if (st_mainsync) return (int)bw2_run_on_main_stack(mainsync_selftest);
     if (!game) return usage();
     char support[PATH_MAX];
     const char *env = getenv("BW2_SUPPORT"), *home = getenv("HOME");

@@ -102,7 +102,9 @@ void bw2_threads_init(void) {
 
 static void *run_main(void *p) {
     uint32_t (*fn)(void) = (uint32_t (*)(void))p;
-    return (void *)(uintptr_t)fn();
+    void *r = (void *)(uintptr_t)fn();
+    bw2_mac_guest_done();
+    return r;
 }
 
 /* fn on a thread with the guest main thread's big stack; its result. */
@@ -114,6 +116,6 @@ uint32_t bw2_run_on_main_stack(uint32_t (*fn)(void)) {
     pthread_attr_setstacksize(&attr, MAIN_STACK);
     if (pthread_create(&t, &attr, run_main, (void *)fn) != 0) hle_fatal("no thread for the guest's main stack");
     pthread_attr_destroy(&attr);
-    pthread_join(t, &ret);
-    return (uint32_t)(uintptr_t)ret;
+    (void)ret;
+    return bw2_mac_main_loop(t);          /* the main thread serves the window meanwhile (mac_main.m) */
 }

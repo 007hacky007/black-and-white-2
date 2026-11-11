@@ -1072,11 +1072,11 @@ root: .asciz "C:\\\\"
 
 def test_shims_selftest(tmp_path):
     import subprocess
-    from bw2.build import BW2RT, FLAGS, RECOMP32, WIN32HLE, check_tools, engine_sources, sdk_path
+    from bw2.build import BW2RT, FLAGS, RECOMP32, WIN32HLE, bw2_includes, check_tools, engine_libs, engine_sources, sdk_path
     srcs = [s for s in engine_sources() if s.name != "main.c"] + [BW2RT / "shims_selftest.c"]
     exe = tmp_path / "shims_selftest"
-    subprocess.run([str(check_tools()), "-O1", *FLAGS, "-isysroot", str(sdk_path()), "-I", str(RECOMP32),
-                    "-I", str(WIN32HLE), "-I", str(BW2RT), *map(str, srcs), "-lpthread", "-lm", "-o", str(exe)],
+    subprocess.run([str(check_tools()), "-O1", *FLAGS, "-fobjc-arc", "-isysroot", str(sdk_path()), "-I", str(RECOMP32),
+                    "-I", str(WIN32HLE), *bw2_includes(), *map(str, srcs), *engine_libs(), "-o", str(exe)],
                    check=True, capture_output=True, text=True)
     r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60, cwd=tmp_path)
     assert r.returncode == 0 and "shims selftest: 0 failed" in r.stdout, r.stdout + r.stderr[-2000:]
@@ -1222,3 +1222,12 @@ def test_relative_path_cannot_climb_out(tmp_path):
     r = _run(tmp_path, b)
     assert r.returncode == 0, r.stderr[-2000:]
     assert not list(tmp_path.parent.glob("escaped.txt")) and not (tmp_path / "escaped.txt").exists()
+
+
+# ---- Plan 4 Task 1: the main thread serves the window ---------------------------
+
+def test_main_sync_runs_on_main_thread(tmp_path, monkeypatch):
+    monkeypatch.setenv("BW2_HEADLESS", "1")
+    b = _engine(tmp_path, "ret", {K32: ["ExitProcess"]})
+    r = _run(tmp_path, b, "--selftest-mainsync")
+    assert r.returncode == 0 and "main sync ok" in r.stdout, r.stdout + r.stderr[-2000:]

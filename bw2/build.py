@@ -25,13 +25,35 @@ WIN32HLE_CORE = ("host.c", "host_lite.c", "guest_mem.c", "pe_loader.c", "module.
                  "ole32.c", "advapi32.c", "wsock32.c", "lz32.c", "storage.c")
 
 
+# Plan 4: the graphics layers, C and Objective-C (ARC).
+BW2_SUBDIRS = ("d3d9", "d3dx")
+FRAMEWORKS = ("Metal", "QuartzCore", "AppKit", "Foundation", "ImageIO", "CoreGraphics")
+
+
 def engine_sources() -> list[Path]:
     own = sorted(p for p in BW2RT.glob("*.c") if not p.stem.endswith("_selftest") and p.name != "linkcheck.c")
+    for d in BW2_SUBDIRS:
+        own += sorted(p for p in (BW2RT / d).glob("*.[cm]") if not p.stem.endswith("_selftest"))
     return own + [WIN32HLE / n for n in WIN32HLE_CORE]
 
 
+def bw2_includes() -> list[str]:
+    """-I flags for the BW2 runtime and its graphics subdirectories."""
+    out = ["-I", str(BW2RT)]
+    for d in BW2_SUBDIRS:
+        out += ["-I", str(BW2RT / d)]
+    return out
+
+
+def engine_libs() -> list[str]:
+    libs = ["-lpthread", "-lm"]
+    for f in FRAMEWORKS:
+        libs += ["-framework", f]
+    return libs
+
+
 HOSTS = {"linkcheck": lambda: [BW2RT / "linkcheck.c"], "engine": engine_sources}
-HOST_LIBS = {"linkcheck": [], "engine": ["-lpthread", "-lm"]}
+HOST_LIBS = {"linkcheck": [], "engine": engine_libs()}
 OPT_LEVELS = ("-O0", "-O1", "-O2", "-O3", "-Os")
 
 
@@ -84,7 +106,8 @@ def _compile_all(clang: Path, jobs, jobs_list) -> list[str]:
     def compile_one(job):
         src, obj, flags = job
         part = obj.with_name(obj.name + ".part")
-        r = subprocess.run([str(clang), "-c", *flags, str(src), "-o", str(part)],
+        objc = ["-fobjc-arc"] if src.suffix == ".m" else []
+        r = subprocess.run([str(clang), "-c", *flags, *objc, str(src), "-o", str(part)],
                            capture_output=True, text=True)
         if r.returncode != 0 or not part.exists() or part.stat().st_size == 0:
             part.unlink(missing_ok=True)
@@ -127,10 +150,11 @@ def build(gen_dir: Path, out: Path, opt: str = "-O3", jobs: int | None = None,
     gen_dir, out = Path(gen_dir), Path(out)
     obj_dir = gen_dir / "obj"
     sdk = sdk_path()
-    incs = ["-I", str(RECOMP32), "-I", str(WIN32HLE), "-I", str(BW2RT), "-I", str(gen_dir)]
+    incs = ["-I", str(RECOMP32), "-I", str(WIN32HLE), *bw2_includes(), "-I", str(gen_dir)]
     cflags = [*FLAGS, "-isysroot", str(sdk), *incs]
     level = lambda src: COLD_OPT if "_cold_" in src.stem else opt
-    headers = [*gen_dir.glob("*.h"), *RECOMP32.glob("*.h"), *WIN32HLE.glob("*.h"), *BW2RT.glob("*.h")]
+    headers = [*gen_dir.glob("*.h"), *RECOMP32.glob("*.h"), *WIN32HLE.glob("*.h"), *BW2RT.glob("*.h"),
+               *(h for d in BW2_SUBDIRS for h in (BW2RT / d).glob("*.h"))]
     # Headers are not in the mtime check, so their content is in the stamp.
     stamp_text = " ".join([str(clang), opt, COLD_OPT, *cflags, _digest(headers)]) + "\n"
     shards = sorted(gen_dir.glob("*.c"))

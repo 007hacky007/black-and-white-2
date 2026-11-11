@@ -48,6 +48,13 @@ extern const win32hle_shim bw2_guard_shims[];
 void bw2_later_register(const char *exe_path);
 int  bw2_later_dll(const char *base_name);
 void bw2_later_load(const char *base_name);
+/* d3d9/mac_main.m (plan 4): the process main thread runs the run loop while the
+ * guest runs on its own thread. bw2_main_sync runs a block there and waits. */
+#include <pthread.h>
+int      bw2_headless(void);                  /* BW2_HEADLESS=1: no NSApplication, no window */
+void     bw2_main_sync(void (^block)(void));
+uint32_t bw2_mac_main_loop(pthread_t guest);  /* until the guest thread ends; its result */
+void     bw2_mac_guest_done(void);
 /* shell.c: the user's folders and name. */
 extern const win32hle_shim bw2_shell_shims[];
 
