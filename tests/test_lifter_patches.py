@@ -31,3 +31,17 @@ def test_unresolved_icall_calls_hook():
 def test_pushf_lifts_without_trap(lifted_c):
     c = lifted_c(make_pe([(".text", b"\x9c\x66\x9c\x66\x9d\x9d\xc3", CODE)], {}, 0x1000), 0x401000)
     assert "RECOMP_TRAP" not in c, c
+
+
+def test_backedge_emitted(lifted_c):
+    # L: dec ecx; jnz L; ret  -- a loop gives other guest threads a turn (RECOMP_BACKEDGE)
+    c = lifted_c(make_pe([(".text", b"\x49\x75\xfd\xc3", CODE)], {}, 0x1000), 0x401000)
+    assert re.search(r"\{ RECOMP_BACKEDGE\(\); goto L_00401000; \}", c), c
+    # test eax, eax; jnz +1; nop; ret  -- a forward branch does not
+    c = lifted_c(make_pe([(".text", b"\x85\xc0\x75\x01\x90\xc3", CODE)], {}, 0x1000), 0x401000)
+    assert "RECOMP_BACKEDGE" not in c, c
+    # L: loop L; ret  and  L: jmp L
+    c = lifted_c(make_pe([(".text", b"\xe2\xfe\xc3", CODE)], {}, 0x1000), 0x401000)
+    assert "RECOMP_BACKEDGE" in c, c
+    c = lifted_c(make_pe([(".text", b"\x90\xeb\xfd", CODE)], {}, 0x1000), 0x401000)
+    assert "RECOMP_BACKEDGE" in c, c

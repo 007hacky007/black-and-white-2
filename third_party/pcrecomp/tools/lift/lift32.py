@@ -1575,7 +1575,7 @@ class Lifter:
                 # so dispatch and return instead of emitting an undefined goto.
                 lines.append(f"RECOMP_ITAIL(0x{target:08X}u); return; {comment}")
             elif target:
-                lines.append(f"goto L_{target:08X}; {comment}")
+                lines.append(f"{self._goto(target, insn)} {comment}")
             else:
                 # Indirect jump: a switch dispatch, or a tail call through a
                 # pointer. C has no computed goto, so branch on the address --
@@ -1595,7 +1595,7 @@ class Lifter:
             if target and self._labels is not None and target not in self._labels:
                 lines.append(f"if ({cond}) {{ RECOMP_ITAIL(0x{target:08X}u); return; }} {comment}")
             elif target:
-                lines.append(f"if ({cond}) goto L_{target:08X}; {comment}")
+                lines.append(f"if ({cond}) {self._goto(target, insn)} {comment}")
             else:
                 lines.append(f"if ({cond}) {{ /* indirect jcc */ }} {comment}")
 
@@ -2095,7 +2095,7 @@ class Lifter:
             t = ops[0].imm if ops and ops[0].type == X86_OP_IMM else None
             reg = 'ecx' if m == 'jecxz' else 'LO16(ecx)'
             if t is not None:
-                lines.append(f"if ({reg} == 0) goto L_{t:08X}; {comment}")
+                lines.append(f"if ({reg} == 0) {self._goto(t, insn)} {comment}")
 
         elif m in ('loop', 'loope', 'loopne'):
             # loope/loopne also test ZF (je/jne's condition), never CF. The
@@ -2106,10 +2106,10 @@ class Lifter:
             # from a corrupt destination.
             t = ops[0].imm if ops and ops[0].type == X86_OP_IMM else None
             if t is not None and m == 'loop':
-                lines.append(f"if (--ecx != 0) goto L_{t:08X}; {comment}")
+                lines.append(f"if (--ecx != 0) {self._goto(t, insn)} {comment}")
             elif t is not None:
                 cond = self._make_condition('je' if m == 'loope' else 'jne')
-                lines.append(f"{{ int _zc = ({cond}); if (--ecx != 0 && _zc) goto L_{t:08X}; }} {comment}")
+                lines.append(f"{{ int _zc = ({cond}); if (--ecx != 0 && _zc) {self._goto(t, insn)} }} {comment}")
 
         elif m == 'scasd':
             lines.append(f"_flag_a = eax; _flag_b = MEM32(edi); _flag_k = FK_CMP; "
@@ -2300,6 +2300,15 @@ class Lifter:
             lines.append("    ;")
 
         return lines
+
+    def _goto(self, target: int, insn) -> str:
+        """A branch to a label. One that goes back (a loop) first lets another
+        guest thread have the machine every RECOMP_YIELD_EVERY times
+        (RECOMP_BACKEDGE): a lifted spin-wait makes no import call, so without
+        it a thread waiting on another thread's flag never lets that thread run."""
+        if target <= insn.address:
+            return f"{{ RECOMP_BACKEDGE(); goto L_{target:08X}; }}"
+        return f"goto L_{target:08X};"
 
     def _computed_jump(self, expr: str, comment: str) -> list:
         """Emit an indirect jump: goto for targets inside this function, tail
