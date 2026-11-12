@@ -5,6 +5,7 @@
  * with the engine (minus main.c) by tests/test_engine.py test_shims_selftest.
  * Every shim the boot needs gets its check here first (plan 3 Task 10).
  */
+#define RECOMP_HOST_CPU      /* recomp_cpuid is cpu.c's */
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,6 +44,51 @@ static uint32_t call(const char *name, int n, ...) {
 }
 
 static uint32_t gmem(uint32_t n) { return hle_va(hle_alloc(n)); }
+
+/* A cdecl call (msvcrt): the shim pops only its return address, the caller its arguments. */
+static uint32_t ccall(const char *name, int n, ...) {
+    uint32_t va = hle_resolve(name);
+    if (!va) { printf("FAIL %s: not answered\n", name); fails++; return 0xDEADBEEFu; }
+    recomp_func_t f = recomp_lookup_import(va);
+    uint32_t a[16];
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) a[i] = va_arg(ap, uint32_t);
+    va_end(ap);
+    uint32_t esp0 = g_esp;
+    for (int i = n - 1; i >= 0; i--) { g_esp -= 4; MEM32(g_esp) = a[i]; }
+    g_esp -= 4;
+    MEM32(g_esp) = 0x12345678u;
+    f();
+    if (g_esp != esp0 - 4u * (uint32_t)n) {
+        printf("FAIL %s: cdecl, popped %d bytes, want 4\n", name, (int)(g_esp - (esp0 - 4u - 4u * (uint32_t)n)));
+        fails++;
+    }
+    g_esp = esp0;
+    return g_eax;
+}
+/* A double as the two argument dwords a cdecl call pushes for it. */
+#define DLO(d) dbits(d, 0)
+#define DHI(d) dbits(d, 1)
+static uint32_t dbits(double d, int hi) { uint64_t u; memcpy(&u, &d, 8); return hi ? (uint32_t)(u >> 32) : (uint32_t)u; }
+static double mem_double(uint32_t va) { uint64_t u = (uint64_t)MEM32(va) | (uint64_t)MEM32(va + 4) << 32; double d; memcpy(&d, &u, 8); return d; }
+static uint32_t gstr(const char *s) { uint32_t va = gmem((uint32_t)strlen(s) + 1); strcpy(hle_ptr(va), s); return va; }
+
+uint32_t bw2_bind_resolve(const char *name);                 /* dll.c */
+
+/* Guest-callable host functions for _initterm and qsort (cdecl). */
+static int g_init_order[8], g_ninit;
+static void t_init1(void) { if (g_ninit < 8) g_init_order[g_ninit] = 1; g_ninit++; g_esp += 4; }
+static void t_init2(void) { if (g_ninit < 8) g_init_order[g_ninit] = 2; g_ninit++; g_esp += 4; }
+static void t_cmp(void) {
+    int32_t a = (int32_t)MEM32(A32(0)), b = (int32_t)MEM32(A32(1));
+    g_eax = (uint32_t)(a < b ? -1 : a > b);
+    g_esp += 4;
+}
+static const win32hle_shim t_init1_tab[] = { { "selftest_crt_init1", t_init1 }, { NULL, NULL } };
+static const win32hle_shim t_init2_tab[] = { { "selftest_crt_init2", t_init2 }, { NULL, NULL } };
+static const win32hle_shim t_cmp_tab[] = { { "selftest_crt_cmp", t_cmp }, { NULL, NULL } };
+static void c_purecall(void) { ccall("_purecall", 0); }
 
 /* A completion routine for ReadFileEx, as a guest function: (error, bytes, overlapped), stdcall. */
 static uint32_t g_done[8][3];
@@ -465,6 +511,222 @@ int main(void) {
             uint32_t r = call("PathGetCharTypeW", 1, ct[i].ch);
             if (r != ct[i].want) printf("FAIL PathGetCharTypeW(0x%X) = %u, want %u\n", ct[i].ch, r, ct[i].want), fails++;
         }
+    }
+
+    /* ---- msvcrt for the lifted D3DX (plan 9 Task 3): cdecl, the caller pops ---- */
+
+    /* crt_heap */
+    {
+        uint32_t p = ccall("malloc", 1, 100u);
+        CHECK(p != 0 && (p & 7) == 0);
+        for (uint32_t i = 0; i < 100; i++) MEM8(p + i) = (uint8_t)(i * 3);
+        uint32_t q = ccall("realloc", 2, p, 1000u);
+        int kept = q != 0;
+        for (uint32_t i = 0; kept && i < 100; i++) kept = MEM8(q + i) == (uint8_t)(i * 3);
+        CHECK(kept);
+        uint32_t c = ccall("calloc", 2, 10u, 10u);
+        int zero = c != 0;
+        for (uint32_t i = 0; zero && i < 100; i++) zero = MEM8(c + i) == 0;
+        CHECK(zero);
+        ccall("free", 1, 0u);
+        ccall("??3@YAXPAX@Z", 1, 0u);
+        ccall("free", 1, q);
+        ccall("free", 1, c);
+        CHECK(ccall("??2@YAPAXI@Z", 1, 16u) != 0);
+        uint32_t s = gstr("ab");
+        uint32_t d = ccall("_strdup", 1, s);
+        CHECK(d != 0 && d != s && !strcmp(hle_ptr(d), "ab"));
+        CHECK(ccall("realloc", 2, 0u, 8u) != 0);                 /* realloc(NULL, n) is malloc(n) */
+        CHECK(ccall("malloc", 1, 0xFFFFFFF0u) == 0);              /* a failed allocation is 0 */
+    }
+
+    /* crt_string */
+    {
+        uint32_t abc = gstr("abc");
+        CHECK(ccall("strchr", 2, abc, (uint32_t)'c') == abc + 2);
+        CHECK(ccall("strchr", 2, abc, 0u) == abc + 3);
+        CHECK(ccall("strchr", 2, abc, (uint32_t)'z') == 0);
+        CHECK((int32_t)ccall("_stricmp", 2, gstr("ABC"), gstr("abd")) < 0);
+        CHECK(ccall("_stricmp", 2, gstr("aBc"), gstr("AbC")) == 0);
+        uint32_t m = gstr("0123456789");
+        CHECK(ccall("memmove", 3, m + 2, m, 5u) == m + 2 && !strcmp(hle_ptr(m), "0101234789"));
+        m = gstr("0123456789");
+        CHECK(ccall("memmove", 3, m, m + 2, 5u) == m && !strcmp(hle_ptr(m), "2345656789"));
+        uint32_t w = gmem(8);
+        MEM16(w) = 'a', MEM16(w + 2) = 0x4E2D, MEM16(w + 4) = 'c', MEM16(w + 6) = 0;
+        CHECK(ccall("wcslen", 1, w) == 3);
+        CHECK(ccall("isalpha", 1, 0xE9u) == 0 && ccall("isalpha", 1, (uint32_t)'q') != 0);
+        CHECK(ccall("tolower", 1, 0xC9u) == 0xC9u && ccall("tolower", 1, (uint32_t)'Q') == 'q');
+        CHECK(ccall("toupper", 1, (uint32_t)'q') == 'Q' && ccall("toupper", 1, 0xE9u) == 0xE9u);
+        CHECK(ccall("isdigit", 1, (uint32_t)'7') != 0 && ccall("isdigit", 1, (uint32_t)'a') == 0);
+        CHECK(ccall("isxdigit", 1, (uint32_t)'F') != 0 && ccall("isxdigit", 1, (uint32_t)'g') == 0);
+        CHECK(ccall("isalnum", 1, (uint32_t)'_') == 0 && ccall("isalnum", 1, (uint32_t)'5') != 0);
+        CHECK(ccall("isspace", 1, (uint32_t)'\t') != 0 && ccall("isspace", 1, 0xA0u) == 0);
+        CHECK(ccall("isalpha", 1, 0xFFFFFFFFu) == 0);                /* EOF */
+    }
+
+    /* crt_numbers: results that are doubles come back in st(0) */
+    {
+        CHECK((int32_t)ccall("atoi", 1, gstr("-42x")) == -42);
+        CHECK((int32_t)ccall("atol", 1, gstr("  +17")) == 17);
+        int top = g_fp_top;
+        ccall("atof", 1, gstr("1.5e2"));
+        CHECK(g_fp_top == top + 1 && g_st[0] == 150.0);
+        ccall("atof", 1, gstr("2.5d1"));                              /* msvcrt also takes a 'd' exponent */
+        CHECK(g_fp_top == top + 2 && g_st[0] == 25.0 && g_st[1] == 150.0);
+        ccall("floor", 2, DLO(-1.5), DHI(-1.5));
+        CHECK(g_st[0] == -2.0);
+        ccall("ceil", 2, DLO(-1.5), DHI(-1.5));
+        CHECK(g_st[0] == -1.0);
+        ccall("ldexp", 3, DLO(3.0), DHI(3.0), 4u);
+        CHECK(g_st[0] == 48.0);
+        uint32_t e = gmem(8);
+        ccall("frexp", 3, DLO(8.0), DHI(8.0), e);
+        CHECK(g_st[0] == 0.5 && MEM32(e) == 4);
+        ccall("modf", 3, DLO(2.75), DHI(2.75), e);
+        CHECK(g_st[0] == 0.75 && mem_double(e) == 2.0);
+        CHECK(g_fp_top == top + 7);
+        while (g_fp_top > top) fp_pop_impl(g_st, &g_fp_top);
+        double nan = __builtin_nan(""), inf = __builtin_inf();
+        CHECK(ccall("_isnan", 2, DLO(nan), DHI(nan)) == 1 && ccall("_isnan", 2, DLO(1.0), DHI(1.0)) == 0);
+        CHECK(ccall("_finite", 2, DLO(inf), DHI(inf)) == 0 && ccall("_finite", 2, DLO(1.0), DHI(1.0)) != 0);
+        CHECK(ccall("_fpclass", 2, DLO(-0.0), DHI(-0.0)) == 0x20);
+        CHECK(ccall("_fpclass", 2, DLO(-inf), DHI(-inf)) == 0x4 && ccall("_fpclass", 2, DLO(2.0), DHI(2.0)) == 0x100);
+        CHECK(ccall("_fpclass", 2, DLO(nan), DHI(nan)) == 0x2 && ccall("_fpclass", 2, DLO(5e-320), DHI(5e-320)) == 0x80);
+        CHECK(g_fp_top == top);
+    }
+
+    /* crt_x87: the helpers take st(0) (and st(1)) and leave what lies under them */
+    {
+        int top = g_fp_top;
+        fp_push_impl(g_st, &g_fp_top, 7.0);
+        fp_push_impl(g_st, &g_fp_top, 2.0);
+        fp_push_impl(g_st, &g_fp_top, 3.0);
+        ccall("_CIpow", 0);
+        CHECK(g_st[0] == 8.0 && g_st[1] == 7.0 && g_fp_top == top + 2);
+        fp_pop_impl(g_st, &g_fp_top);
+        fp_push_impl(g_st, &g_fp_top, 3.0);                           /* 7.0 under 3.0 */
+        ccall("_CIfmod", 0);
+        CHECK(g_st[0] == 1.0 && g_fp_top == top + 1);
+        fp_push_impl(g_st, &g_fp_top, 16.0);
+        ccall("_CIsqrt", 0);
+        CHECK(g_st[0] == 4.0 && g_st[1] == 1.0 && g_fp_top == top + 2);
+        fp_push_impl(g_st, &g_fp_top, 1.0);
+        ccall("_CIacos", 0);
+        CHECK(g_st[0] == 0.0 && g_fp_top == top + 3);
+        fp_push_impl(g_st, &g_fp_top, 0.0);
+        ccall("_CIexp", 0);
+        CHECK(g_st[0] == 1.0 && g_fp_top == top + 4);
+        while (g_fp_top > top) fp_pop_impl(g_st, &g_fp_top);
+    }
+
+    /* crt_controlfp: _controlfp's encoding mapped to and from the x87 control word */
+    {
+        uint16_t cw = g_fpu_cw;
+        uint32_t w = ccall("_controlfp", 2, 0x300u /* _RC_CHOP */, 0x300u /* _MCW_RC */);
+        CHECK(((g_fpu_cw >> 10) & 3) == 3 && (w & 0x300u) == 0x300u);
+        CHECK((g_fpu_cw & ~0x0C00u) == (cw & ~0x0C00u));
+        uint16_t now = g_fpu_cw;
+        CHECK(ccall("_controlfp", 2, 0u, 0u) == w && g_fpu_cw == now);
+        w = ccall("_controlfp", 2, 0x20000u /* _PC_24 */, 0x30000u /* _MCW_PC */);
+        CHECK(((g_fpu_cw >> 8) & 3) == 0 && (w & 0x30000u) == 0x20000u);
+        w = ccall("_controlfp", 2, 0x10000u /* _PC_53 */, 0x30000u);
+        CHECK(((g_fpu_cw >> 8) & 3) == 2 && (w & 0x30000u) == 0x10000u);
+        w = ccall("_controlfp", 2, 0u /* _EM_ZERODIVIDE unmasked */, 0x08u);
+        CHECK((g_fpu_cw & 4) == 0 && (w & 0x08u) == 0);
+        g_fpu_cw = 0x027F;                                         /* Windows' default: all masked, 53 bits, near */
+        CHECK(ccall("_controlfp", 2, 0u, 0u) == 0x0009001Fu);
+        CHECK(ccall("_controlfp", 2, 0u, 0x80000u /* _EM_DENORMAL: _controlfp leaves it */) == 0x0009001Fu && g_fpu_cw == 0x027F);
+        g_fpu_cw = cw;
+    }
+
+    /* crt_vsnprintf: msvcrt's three cases */
+    {
+        uint32_t va = gmem(8), fmt = gstr("%d-%s"), buf = gmem(32);
+        MEM32(va) = 7, MEM32(va + 4) = gstr("ab");
+        memset(hle_ptr(buf), 'Z', 32);
+        CHECK(ccall("_vsnprintf", 4, buf, 16u, fmt, va) == 4 && !memcmp(hle_ptr(buf), "7-ab\0", 5));
+        memset(hle_ptr(buf), 'Z', 32);
+        CHECK(ccall("_vsnprintf", 4, buf, 4u, fmt, va) == 4 && !memcmp(hle_ptr(buf), "7-abZ", 5));
+        memset(hle_ptr(buf), 'Z', 32);
+        CHECK(ccall("_vsnprintf", 4, buf, 3u, fmt, va) == 0xFFFFFFFFu && !memcmp(hle_ptr(buf), "7-aZ", 4));
+        /* a long %s is not cut, and msvcrt's exponents have three digits */
+        char lng[701];
+        memset(lng, 'q', 700), lng[700] = 0;
+        uint32_t big = gmem(1024);
+        MEM32(va) = gstr(lng);
+        CHECK(ccall("_vsnprintf", 4, big, 1024u, gstr("<%s>"), va) == 702 && MEM8(big + 701) == '>');
+        uint32_t va2 = gmem(24);
+        MEM32(va2) = DLO(1500.0), MEM32(va2 + 4) = DHI(1500.0), MEM32(va2 + 8) = DLO(1500.0), MEM32(va2 + 12) = DHI(1500.0);
+        MEM32(va2 + 16) = DLO(0.5), MEM32(va2 + 20) = DHI(0.5);
+        CHECK(ccall("_vsnprintf", 4, big, 64u, gstr("%e|%11.1E|%g"), va2) == 29
+              && !strcmp(hle_ptr(big), "1.500000e+003|   1.5E+003|0.5"));
+        CHECK(ccall("_vsnprintf", 4, big, 64u, gstr("%-11.1e|%010.1e|"), va2) == 23
+              && !strcmp(hle_ptr(big), "1.5e+003   |001.5e+003|"));
+        uint32_t va3 = gmem(12);
+        MEM32(va3) = (uint32_t)-5, MEM32(va3 + 4) = gstr("x"), MEM32(va3 + 8) = 0xAB;
+        CHECK(ccall("_vsnprintf", 4, big, 64u, gstr("[%*s]%p"), va3) == 15 && !strcmp(hle_ptr(big), "[x    ]000000AB"));
+    }
+
+    /* crt_data_import: _adjust_fdiv is a dword in mapped guest memory, not a shim address */
+    {
+        uint32_t a = bw2_bind_resolve("_adjust_fdiv");
+        CHECK(a != 0 && !(a >= 0x7F000000u && a <= 0x7FFFFFFFu) && hle_ptr(a) && MEM32(a) == 0);
+        CHECK(bw2_bind_resolve("_adjust_fdiv") == a);
+        CHECK(bw2_bind_resolve("GetTickCount") == hle_resolve_or_stub("GetTickCount"));
+    }
+
+    /* k32_dll_features: DisableThreadLibraryCalls, and IsProcessorFeaturePresent from cpu.c's CPU */
+    {
+        CHECK(call("DisableThreadLibraryCalls", 1, 0x08000000u) == 1);
+        static const struct { uint32_t pf; int bit; } feat[] = {
+            { 2, 8 }, { 3, 23 }, { 6, 25 }, { 8, 4 }, { 9, 6 }, { 10, 26 } };
+        uint32_t sa = g_eax, sb = g_ebx, sc = g_ecx, sd = g_edx;
+        recomp_cpuid(1, 0);
+        uint32_t edx1 = g_edx;
+        g_eax = sa, g_ebx = sb, g_ecx = sc, g_edx = sd;
+        for (size_t i = 0; i < sizeof feat / sizeof *feat; i++) {
+            uint32_t r = call("IsProcessorFeaturePresent", 1, feat[i].pf);
+            if (r != 1 || r != ((edx1 >> feat[i].bit) & 1))
+                printf("FAIL IsProcessorFeaturePresent(%u) = %u, cpuid bit %d = %u\n", feat[i].pf, r, feat[i].bit,
+                       (edx1 >> feat[i].bit) & 1), fails++;
+        }
+        static const uint32_t absent[] = { 0, 7, 12, 13, 0xFFFF };
+        for (size_t i = 0; i < sizeof absent / sizeof *absent; i++)
+            if (call("IsProcessorFeaturePresent", 1, absent[i]) != 0)
+                printf("FAIL IsProcessorFeaturePresent(%u) is not 0\n", absent[i]), fails++;
+    }
+
+    /* crt_initterm_qsort */
+    {
+        uint32_t f1 = MEM32(hle_com_vtable(t_init1_tab)), f2 = MEM32(hle_com_vtable(t_init2_tab));
+        uint32_t cmp = MEM32(hle_com_vtable(t_cmp_tab));
+        uint32_t t = gmem(12);
+        MEM32(t) = f1, MEM32(t + 4) = 0, MEM32(t + 8) = f2;
+        ccall("_initterm", 2, t, t + 12);
+        CHECK(g_ninit == 2 && g_init_order[0] == 1 && g_init_order[1] == 2);
+        static const int32_t in[5] = { 5, -3, 9, 0, -3 }, want[5] = { -3, -3, 0, 5, 9 };
+        uint32_t a = gmem(20);
+        for (int i = 0; i < 5; i++) MEM32(a + 4u * (uint32_t)i) = (uint32_t)in[i];
+        ccall("qsort", 4, a, 5u, 4u, cmp);
+        int sorted = 1;
+        for (int i = 0; i < 5; i++) sorted &= (int32_t)MEM32(a + 4u * (uint32_t)i) == want[i];
+        CHECK(sorted);
+    }
+
+    /* crt_setlocale: the "C" locale only */
+    {
+        uint32_t r = ccall("setlocale", 2, 4u /* LC_NUMERIC */, gstr("C"));
+        CHECK(r != 0 && !strcmp(hle_ptr(r), "C"));
+        r = ccall("setlocale", 2, 0u, 0u);
+        CHECK(r != 0 && !strcmp(hle_ptr(r), "C"));
+        CHECK(ccall("setlocale", 2, 0u, gstr("German")) == 0);
+    }
+
+    /* crt_purecall: a loud stop */
+    {
+        char err[8192];
+        CHECK(in_child(c_purecall, err, sizeof err) == -1 && strstr(err, "[bw2] FATAL: msvcrt: _purecall"));
     }
 
     printf("shims selftest: %d failed\n", fails);

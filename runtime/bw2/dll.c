@@ -11,6 +11,7 @@
  * its exports from its export table, and a second LoadLibraryA only counts.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include "win32hle.h"
@@ -36,6 +37,48 @@ void bw2_lifted_dll_add(const char *name, uint32_t base) {
     g_lifted[g_nlifted++].base = base;
 }
 
+/* Data imports: an IAT slot that must hold the address of a variable, not of
+ * code. A shim stub address there (the never-mapped shim range) would fault on
+ * the first read with no name, so each known one is answered here with a
+ * dword of guest memory, made once, or stops the load by name. msvcrt's
+ * documented data exports are listed; only _adjust_fdiv has an answer (the
+ * lifted D3DX's CRT init reads it on every DllMain call, plan 9). */
+static const struct { const char *name; int answered; uint32_t value; } g_data_imports[] = {
+    { "_adjust_fdiv", 1, 0 },        /* 0: no Pentium FDIV-flaw workaround */
+    { "_iob", 0, 0 }, { "_pctype", 0, 0 }, { "_pwctype", 0, 0 }, { "__mb_cur_max", 0, 0 }, { "_mbctype", 0, 0 },
+    { "_mbcasemap", 0, 0 }, { "_environ", 0, 0 }, { "_wenviron", 0, 0 }, { "__initenv", 0, 0 },
+    { "__winitenv", 0, 0 }, { "__argc", 0, 0 }, { "__argv", 0, 0 }, { "__wargv", 0, 0 }, { "_acmdln", 0, 0 },
+    { "_wcmdln", 0, 0 }, { "_pgmptr", 0, 0 }, { "_wpgmptr", 0, 0 }, { "_fmode", 0, 0 }, { "_commode", 0, 0 },
+    { "_HUGE", 0, 0 }, { "_osver", 0, 0 }, { "_winver", 0, 0 }, { "_winmajor", 0, 0 }, { "_winminor", 0, 0 },
+    { "_sys_errlist", 0, 0 }, { "_sys_nerr", 0, 0 }, { "_timezone", 0, 0 }, { "_daylight", 0, 0 },
+    { "_dstbias", 0, 0 }, { "_tzname", 0, 0 }, { "__badioinfo", 0, 0 }, { "__pioinfo", 0, 0 },
+    { "_aexit_rtn", 0, 0 }, { "_crtAssertBusy", 0, 0 }, { "_crtBreakAlloc", 0, 0 }, { "_crtDbgFlag", 0, 0 },
+};
+#define N_DATA_IMPORTS (sizeof g_data_imports / sizeof *g_data_imports)
+static uint32_t g_data_va[N_DATA_IMPORTS];
+
+/* The resolver every lifted DLL's imports are bound with: a data import's
+ * variable, else hle_resolve_or_stub (a shim, or a stub that stops loudly by
+ * name when called). Binds run under the machine lock. */
+uint32_t bw2_bind_resolve(const char *name) {
+    for (size_t i = 0; i < N_DATA_IMPORTS; i++) {
+        if (strcmp(g_data_imports[i].name, name)) continue;
+        if (!g_data_imports[i].answered) {
+            fprintf(stderr, "[bw2] FATAL: lifted DLL imports the data %s, which nothing answers\n", name);
+            fflush(stderr);
+            abort();
+        }
+        if (!g_data_va[i]) {
+            void *p = hle_alloc(4);
+            if (!p) hle_fatal("no guest memory for the data import %s", name);
+            *(uint32_t *)p = g_data_imports[i].value;
+            g_data_va[i] = hle_va(p);
+        }
+        return g_data_va[i];
+    }
+    return hle_resolve_or_stub(name);
+}
+
 static int load(const char *base_name, const char *host, uint32_t *hmod) {
     if (bw2_later_dll(base_name)) bw2_later_load(base_name);
     int i = 0;
@@ -53,7 +96,7 @@ static int load(const char *base_name, const char *host, uint32_t *hmod) {
     char guest[600];
     hle_guest_path(host, guest, sizeof guest);
     hle_module_add(guest, img.base, img.resource_rva, img.resource_size, 0);
-    int unresolved = recomp_pe_bind(&img, hle_resolve_or_stub);
+    int unresolved = recomp_pe_bind(&img, bw2_bind_resolve);
     bw2_tls_add_module(img.base);
     bw2_eh_add_image(img.base, img.span);
     fprintf(stderr, "[bw2] %s: lifted DLL at 0x%08X, %d imports unanswered\n", base_name, img.base, unresolved);

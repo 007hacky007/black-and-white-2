@@ -2,6 +2,7 @@
  * shims_k32.c - kernel32 imports win32hle does not answer, as BW2 calls them
  * (each one checked in shims_selftest.c first).
  */
+#define RECOMP_HOST_CPU      /* recomp_cpuid is cpu.c's */
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -151,7 +152,37 @@ static void k_WaitForSingleObjectEx(void) {
  * code page with no lead bytes. The profile dialog's name field asks once per WM_CHAR. */
 static void k_IsDBCSLeadByte(void) { RET(0, 1); }
 
+/* DisableThreadLibraryCalls(hmod): TRUE. On Windows it only stops a DLL's
+ * DLL_THREAD_ATTACH/DETACH notices, an optimisation (the lifted D3DX's DllMain
+ * asks, plan 9). */
+static void k_DisableThreadLibraryCalls(void) { RET(1, 1); }
+
+/* IsProcessorFeaturePresent(feature): the CPU cpu.c's cpuid reports (plan 9
+ * Ruling 8), read from its leaf-1 edx bits so the two cannot drift. 0 for
+ * every feature that has no such bit there (3DNow! 7, NX 12, SSE3 13, ...). */
+static void k_IsProcessorFeaturePresent(void) {
+    static const struct { uint32_t pf; int bit; } feat[] = {
+        { 2, 8 },     /* PF_COMPARE_EXCHANGE_DOUBLE: CX8 */
+        { 3, 23 },    /* PF_MMX_INSTRUCTIONS_AVAILABLE: MMX */
+        { 6, 25 },    /* PF_XMMI_INSTRUCTIONS_AVAILABLE: SSE */
+        { 8, 4 },     /* PF_RDTSC_INSTRUCTION_AVAILABLE: TSC */
+        { 9, 6 },     /* PF_PAE_ENABLED: PAE */
+        { 10, 26 },   /* PF_XMMI64_INSTRUCTIONS_AVAILABLE: SSE2 */
+    };
+    uint32_t f = A32(0), r = 0;
+    for (size_t i = 0; i < sizeof feat / sizeof *feat; i++) {
+        if (feat[i].pf != f) continue;
+        uint32_t a = g_eax, b = g_ebx, c = g_ecx, d = g_edx;
+        recomp_cpuid(1, 0);
+        r = (g_edx >> feat[i].bit) & 1u;
+        g_eax = a, g_ebx = b, g_ecx = c, g_edx = d;
+    }
+    RET(r, 1);
+}
+
 const win32hle_shim bw2_k32_shims[] = {
+    { "DisableThreadLibraryCalls",             k_DisableThreadLibraryCalls },
+    { "IsProcessorFeaturePresent",             k_IsProcessorFeaturePresent },
     { "IsDBCSLeadByte",                        k_IsDBCSLeadByte },
     { "ReadFileEx",                            k_ReadFileEx },
     { "SleepEx",                               k_SleepEx },
