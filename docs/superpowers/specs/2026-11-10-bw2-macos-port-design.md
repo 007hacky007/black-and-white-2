@@ -548,7 +548,10 @@ These are traps NFSU2 hit; the design takes them as requirements.
   - the game's screen size is the desktop mode from the start, or the back buffer
     while a full-screen device lives; the mode list stays on the desktop, so the
     native resolution stays offered;
-  - Cmd-Q and the close button reach the game as `WM_CLOSE`.
+  - Cmd-Q and the close button reach the game as `WM_SYSCOMMAND` `SC_CLOSE`, as
+    Windows gives the close button and Alt+F4, and the game quits by its own path
+    (a bare `WM_CLOSE` goes to `DefWindowProcA`, which destroys the window, and the
+    game does not quit).
 
 ### 7.5 Build and packaging
 

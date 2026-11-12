@@ -4,7 +4,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The game takes real input. Its DirectInput mouse reports the Mac's motion, buttons and wheel; its keyboard, mouse, focus and IME messages arrive as Windows sends them; the Mac window shows the game windowed or in Mac full screen (Cmd+Ctrl+F), with Cmd-Q and the close button reaching the game as `WM_CLOSE`. A scripted run then creates a profile in the front end's first dialog and boots on to the next layer, the HLSL effect compile (exit 4, plan 9's).
+**Goal:** The game takes real input. Its DirectInput mouse reports the Mac's motion, buttons and wheel; its keyboard, mouse, focus and IME messages arrive as Windows sends them; the Mac window shows the game windowed or in Mac full screen (Cmd+Ctrl+F), with Cmd-Q and the close button reaching the game as `WM_SYSCOMMAND` `SC_CLOSE` (as Windows gives the close button and Alt+F4; the game quits on it, and leaves a bare `WM_CLOSE` to `DefWindowProcA`, which destroys its window without quitting). A scripted run then creates a profile in the front end's first dialog and boots on to the next layer, the HLSL effect compile (exit 4, plan 9's).
 
 **Architecture:**
 - The Mac side (main thread) turns each `NSEvent` into a small C struct. A pure C translator turns that struct into input events in the game's terms: client coordinates in back-buffer pixels, Windows virtual keys and scan codes, wheel units and mouse deltas. The events go on a locked host queue.
@@ -144,7 +144,7 @@ Rechecked against a traced boot of main (`BW2_TRACE_IMPORTS=1`, 300 reads): `Dir
   - WHEEL: `hle_input_wheel`. KEY: `hle_input_key_ex`.
   - ACTIVATE active, sent with `hle_send` to the game window in Windows' order: `WM_ACTIVATEAPP` (1, thread id), `WM_ACTIVATE` (`WA_ACTIVE` 1, 0), `WM_SETFOCUS`.
   - ACTIVATE inactive: up messages for every key and button down; `WM_ACTIVATE` (`WA_INACTIVE` 0, 0); `WM_KILLFOCUS`; `WM_ACTIVATEAPP` (0, thread id).
-  - CLOSE: `hle_post_message(window, WM_CLOSE, 0, 0)`.
+  - CLOSE: `hle_post_message(window, WM_SYSCOMMAND, SC_CLOSE, 0)` (0x112, 0xF060; win32hle's `DefWindowProc` turns it into `WM_CLOSE`).
 - **Shims** (`bw2_input_shims`): `GetCursorPos` and `GetAsyncKeyState` drain with `bw2_in_drain_input`, then call win32hle's (`bw2_hle_shim`). `GetKeyState` does not drain (it reports the state as of the messages already queued, as Windows' does for the messages already retrieved).
 - **IMM32, answered as Windows with no IME on the US layout** (`imm32.c`, in `bw2_input_shims`):
   - `ImmCreateContext` returns a new nonzero handle each call; `ImmDestroyContext` of one returns TRUE, of anything else FALSE;
@@ -166,7 +166,7 @@ Rechecked against a traced boot of main (`BW2_TRACE_IMPORTS=1`, 300 reads): `Dir
     - left Alt (`0xA4`) down reads down through `GetKeyState(0xA4)` (the game's window procedure asks exactly that, "Measured" item 8);
     - Alt+F4 gives `WM_SYSKEYDOWN`; `TranslateMessage` on Shift+`A` gives `WM_CHAR` 'A', and on Backspace (8, scan 0x0E) gives `WM_CHAR` 8.
   - `activate` (each ACTIVATE delivered by the pump hook): with L and `A` held, an inactive ACTIVATE gives `WM_LBUTTONUP`, `WM_KEYUP` 'A', then `WM_ACTIVATE` 0, `WM_KILLFOCUS`, `WM_ACTIVATEAPP` 0, in that order, and `bw2_in_active()` is 0; an active one gives `WM_ACTIVATEAPP` 1, `WM_ACTIVATE` 1, `WM_SETFOCUS`.
-  - `close`: CLOSE posts `WM_CLOSE` to the window set by `bw2_in_set_window`.
+  - `close`: CLOSE posts `WM_SYSCOMMAND` `SC_CLOSE` to the window set by `bw2_in_set_window`, and its `DefWindowProc` sends `WM_CLOSE`.
   - `drain_points`:
     - an event pushed before `GetAsyncKeyState('A')` is seen by it; one pushed before `GetKeyState('A')` is not, until the pump hook runs;
     - an inactive ACTIVATE then a KEY pushed before `GetAsyncKeyState`: the recorder sees no `WM_ACTIVATE`, `WM_KILLFOCUS` or `WM_ACTIVATEAPP` during that call, `bw2_in_losses()` went up by one, the KEY is still queued, and `bw2_in_active()` is already 0; the pump hook then delivers the ups, the three messages and the KEY, in that order, `bw2_in_losses()` does not go up again, and `bw2_in_active()` stays 0;
@@ -337,7 +337,7 @@ Rechecked against a traced boot of main (`BW2_TRACE_IMPORTS=1`, 300 reads): `Dir
     - a windowed 640x480 device on a game window made with `CS_DBLCLKS`;
     - synthetic `NSEvent`s posted to the window: left down and up at the view's centre, the `A` key (keyCode 0), a scroll of 3 lines;
     - it prints the messages recorded by `hle_proc_hook`, then `performClose:`;
-    - expected stdout lines: `WM_LBUTTONDOWN 320,240`, `WM_LBUTTONUP 320,240`, `WM_KEYDOWN 41 001E0001`, `WM_MOUSEWHEEL 360`, `WM_CLOSE`, `input window ok`.
+    - expected stdout lines: `WM_LBUTTONDOWN 320,240`, `WM_LBUTTONUP 320,240`, `WM_KEYDOWN 41 001E0001`, `WM_MOUSEWHEEL 360`, `WM_SYSCOMMAND F060`, `WM_CLOSE`, `input window ok`.
 - [ ] **Step 2: Run them.** `.venv/bin/pytest tests/test_d3d9.py::test_display_mode tests/test_input.py::test_window_size -v` and `BW2_GUI=1 .venv/bin/pytest tests/test_engine.py::test_window_input -v`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `.venv/bin/pytest tests/test_d3d9.py tests/test_input.py tests/test_engine.py tests/test_ui.py tests/test_d3dx.py tests/test_effects.py tests/test_audio.py -q > .superpowers/sdd/plan6-task4.txt 2>&1; tail -3 .superpowers/sdd/plan6-task4.txt` (the start screen size changes for every selftest that makes a window or a device), `.venv/bin/python -m bw2.pipeline --build-only && BW2_GAMEFILES=1 .venv/bin/pytest tests/test_boot.py -v` (the new start screen size must leave the boot to the front end unchanged), and `BW2_GUI=1 .venv/bin/pytest tests/test_engine.py -k window -v`. Expected: all pass, including plan 4's `test_window_device_presents`. The GUI tests open a small window for a few seconds; if the session has no window server, record them as not run in the ledger rather than skipping silently.

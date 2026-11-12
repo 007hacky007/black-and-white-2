@@ -138,6 +138,31 @@ def test_boot_profile_to_hlsl(tmp_path):
     assert all(2 * f[6] >= f[7] for f in after), [f for f in after if 2 * f[6] < f[7]]
 
 
+@pytest.mark.gamefiles
+def test_boot_close_quits(tmp_path):
+    # Plan 6: Cmd-Q and the close button push CLOSE, which reaches the game as Windows delivers its close
+    # button and Alt+F4 (WM_SYSCOMMAND SC_CLOSE). The game's own quit path takes it and the game exits 0 by
+    # itself, well before the safety stop at read 600 (BW2_QUIT_AFTER_READS).
+    assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
+    support = tmp_path / "support"
+    script = tmp_path / "close.script"
+    script.write_text("20 close\n")
+    env = dict(os.environ, BW2_SUPPORT=str(support), BW2_HEADLESS="1", BW2_INPUT_SCRIPT=str(script),
+               BW2_QUIT_AFTER_READS="600")
+    r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
+                       timeout=180, env=env)
+    (tmp_path / "stderr.txt").write_text(r.stderr)
+    tail = r.stderr[-4000:]
+    lines = engine_lines(r.stderr)
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    assert not any("BW2_QUIT_AFTER_READS" in ln for ln in lines), tail
+    assert lines.count(FIRST_READ) == 1, tail
+    err = "\n".join(ln for ln in lines if not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln))
+    for word in LOUD:
+        assert word not in err, f"{word!r} in stderr\n{tail}"
+    assert "owned by a later plan" not in r.stderr, tail
+
+
 def _vm_thunks_called_by_the_game():
     """stxt774's thunks into the VM that .text calls directly (the 18 virtualized functions)."""
     import struct

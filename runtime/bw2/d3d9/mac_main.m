@@ -37,7 +37,7 @@ void bw2_mac_guest_done(void) {
     }
 }
 
-void bw2_mac_install_app_delegate(void);   /* mac_window.m: Cmd-Q reaches the game as WM_CLOSE */
+void bw2_mac_install_app_delegate(void);   /* mac_window.m: Cmd-Q reaches the game as SC_CLOSE */
 
 static NSMenu *submenu(NSMenu *bar, NSString *title) {
     NSMenuItem *item = [[NSMenuItem alloc] init];

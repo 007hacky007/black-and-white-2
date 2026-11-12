@@ -356,6 +356,8 @@ static void group_di_quit(const char *how) {
 #define WM_CHAR 0x0102u
 #define WM_SYSKEYDOWN 0x0104u
 #define WM_SYSKEYUP 0x0105u
+#define WM_SYSCOMMAND 0x0112u
+#define SC_CLOSE 0xF060u
 #define WM_MOUSEMOVE 0x0200u
 #define WM_LBUTTONDOWN 0x0201u
 #define WM_LBUTTONUP 0x0202u
@@ -371,6 +373,7 @@ static int g_nrec;
 static uint32_t g_peek_time;
 static int recorded(uint32_t m) {
     return m == WM_ACTIVATE || m == WM_SETFOCUS || m == WM_KILLFOCUS || m == WM_CLOSE || m == WM_ACTIVATEAPP ||
+           m == WM_SYSCOMMAND ||
            (m >= 0x0100u && m <= 0x0109u) || (m >= 0x0200u && m <= 0x020Eu);
 }
 static void recorder(uint32_t h, uint32_t m, uint32_t w, uint32_t l) {
@@ -733,7 +736,8 @@ static void group_close(void) {
     struct bw2_in_event e = { .kind = BW2_IN_CLOSE };
     bw2_in_push(&e);
     pump_all();
-    EXPECT(1, WM_CLOSE, 0u, 0u);
+    /* as Windows gives the close button and Alt+F4; DefWindowProc makes the WM_CLOSE */
+    EXPECT(2, WM_SYSCOMMAND, SC_CLOSE, 0u, WM_CLOSE, 0u, 0u);
     if (g_nrec) CHECKEQ(g_rec[0].h, a);
     bw2_in_set_window(b);
     rec_reset();
@@ -741,7 +745,7 @@ static void group_close(void) {
     bw2_in_drain_input();                                /* a close is posted: a read may drain it */
     CHECKEQ(g_nrec, 0);
     pump_all();
-    EXPECT(1, WM_CLOSE, 0u, 0u);
+    EXPECT(2, WM_SYSCOMMAND, SC_CLOSE, 0u, WM_CLOSE, 0u, 0u);
     if (g_nrec) CHECKEQ(g_rec[0].h, b);
     hle_proc_hook = NULL;
 }
@@ -2316,8 +2320,8 @@ static void group_script_reads(const char *path) {
     CHECKEQ(g_nss, 5);
     EXPECT_SUNK(4, BW2_IN_BUTTON, 1013, 10, 1, 0);
     pump_all();
-    EXPECT(2, WM_RBUTTONUP, ANY, 0x000A03F5u, WM_CLOSE, 0u, 0u);
-    if (g_nrec == 2) CHECKEQ(g_rec[1].h, a);
+    EXPECT(3, WM_RBUTTONUP, ANY, 0x000A03F5u, WM_SYSCOMMAND, SC_CLOSE, 0u, WM_CLOSE, 0u, 0u);
+    if (g_nrec == 3) CHECKEQ(g_rec[1].h, a);
     bw2_in_set_mouse_sink(bw2_dinput8_sink);
     hle_proc_hook = NULL;
 }

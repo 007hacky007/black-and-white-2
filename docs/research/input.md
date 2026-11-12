@@ -208,6 +208,24 @@ from the protection VM appears.
 A run of the same script without its key lines (the clicks only) left the dialog waiting: no
 profile folder after 300 s, and no stop. So the `~ab` check depends on the typed name.
 
+## Closing
+
+Cmd-Q and the close button push CLOSE, which `input.c` posts as `WM_SYSCOMMAND` `SC_CLOSE` (0x112,
+0xF060) to the game window, as Windows gives the close button and Alt+F4. The game's window
+procedure (`sub_009B1430`) quits on that (`cmp 0xF060` at `0x9B1793`) and on Alt+F4 (`WM_SYSKEYDOWN`
+`VK_F4` with `GetKeyState(0xA4)` down, at `0x9B16E1`); both call `sub_009A8690`, which sets its quit
+flag. It does not handle a bare `WM_CLOSE`: that goes to `DefWindowProcA`, which destroys the window,
+and the `PostQuitMessage` of its `WM_DESTROY` is lost, since the loop (`sub_009B1100`) ignores
+`GetMessage`'s return. The first version of plan 6 posted `WM_CLOSE`, and the game then ran on with
+its window gone (to the safety stop at read 600 in the boot test's first run, and to read 2000 when
+let).
+
+With the script `20 close` (headless, fresh support folder, `BW2_QUIT_AFTER_READS=600` as a safety
+stop): the game makes 21 DirectInput reads, releases its device objects and `IDirect3D9`, prints its
+`#END` debug line and calls `ExitProcess(0)` from `sub_00AD77B6`, exit 0, in 4.4 to 5.7 s (3 runs). No
+`DestroyWindow` and no `PostQuitMessage`, and no disc, volume or driver call. Pinned by
+`tests/test_boot.py::test_boot_close_quits`.
+
 ## For plan 9 (HLSL)
 
 - **The stop:** `D3DXCreateEffect` from `sub_00B5237E` (the same wrapper that makes the boot's 34

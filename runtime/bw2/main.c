@@ -98,6 +98,7 @@ static void iw_record(uint32_t h, uint32_t m, uint32_t w, uint32_t l) {
     case 0x0101: printf("WM_KEYUP %X %08X\n", w, l); break;
     case 0x0102: printf("WM_CHAR %X\n", w); break;
     case 0x020A: printf("WM_MOUSEWHEEL %d\n", (int16_t)(w >> 16)); break;
+    case 0x0112: printf("WM_SYSCOMMAND %X\n", w); break;
     case 0x0010: printf("WM_CLOSE\n"); g_iw_close = 1; break;
     case 0x0006: printf("WM_ACTIVATE %X\n", w); break;
     default: return;

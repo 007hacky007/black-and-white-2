@@ -27,7 +27,8 @@
 #define WM_ACTIVATE    0x0006u
 #define WM_SETFOCUS    0x0007u
 #define WM_KILLFOCUS   0x0008u
-#define WM_CLOSE       0x0010u
+#define WM_SYSCOMMAND  0x0112u
+#define SC_CLOSE       0xF060u
 #define WM_ACTIVATEAPP 0x001Cu
 #define WM_MOUSEMOVE   0x0200u
 #define WM_LBUTTONDOWN 0x0201u
@@ -150,7 +151,9 @@ static void handle(const struct bw2_in_event *e) {
         return;
     }
     case BW2_IN_CLOSE:
-        hle_post_message(window(), WM_CLOSE, 0, 0);
+        /* as Windows gives the close button and Alt+F4: the game quits on SC_CLOSE (0x9B1793) and leaves
+         * a bare WM_CLOSE to DefWindowProc, which destroys its window and never quits */
+        hle_post_message(window(), WM_SYSCOMMAND, SC_CLOSE, 0);
         return;
     case BW2_IN_ACTIVATE:
         break;

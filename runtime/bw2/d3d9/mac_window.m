@@ -16,7 +16,8 @@
  *   - each event goes through bw2_translate (translate.c) with the view's
  *     geometry, then onto the host queue (bw2_in_push). keyDown never calls
  *     interpretKeyEvents:, so no press-and-hold accent popup appears;
- *   - the close button and Cmd-Q push CLOSE (the game gets WM_CLOSE) and
+ *   - the close button and Cmd-Q push CLOSE (the game gets WM_SYSCOMMAND
+ *     SC_CLOSE, as Windows gives the close button and Alt+F4) and
  *     never close or quit by themselves while a game window exists;
  *   - becoming key pushes ACTIVATE 1, resigning key ACTIVATE 0 (and the
  *     translator forgets what it gave down: input.c gives the game its ups);
@@ -336,7 +337,7 @@ void bw2_mac_cursor_apply(const struct bw2_cursor_mode *m, const uint8_t *rgba, 
 @interface BW2AppDelegate : NSObject <NSApplicationDelegate>
 @end
 @implementation BW2AppDelegate
-/* Cmd-Q (and logout) while a game window exists: the game gets WM_CLOSE and decides (spec 7.5). */
+/* Cmd-Q (and logout) while a game window exists: the game gets SC_CLOSE and decides (spec 7.5). */
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app {
     (void)app;
     if (g_games.count) { push_kind(BW2_IN_CLOSE, 0); return NSTerminateCancel; }
