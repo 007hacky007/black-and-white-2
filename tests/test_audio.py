@@ -1,5 +1,5 @@
-"""Plan 8 Tasks 2 and 3: the host mixer and its output, and IDirectSound with its streaming buffers
-(runtime/bw2/audio/audio_selftest.c).
+"""Plan 8 Tasks 2 to 4: the host mixer and its output, IDirectSound with its streaming buffers, and
+dsound.dll's private device enumeration with the waveOut guard (runtime/bw2/audio/audio_selftest.c).
 
 Each test runs one group of the selftest headless and expects "<group>: 0 failed".
 The groups put their sample data in hle_alloc blocks; nothing here is game material."""
@@ -155,3 +155,30 @@ def test_ds_stops_openal(selftest, tmp_path):
     r = run_group(selftest, "ds_stops", tmp_path, "openal")
     assert r.returncode == 4 and "ds_stops: returned" not in r.stdout, f"exit {r.returncode}\n" + r.stderr[-2000:]
     assert "[bw2] reached openal32.dll: owned by a later plan" in r.stderr, r.stderr[-2000:]
+
+
+def test_ds_private(selftest, tmp_path):
+    check(selftest, "ds_private", tmp_path)
+
+
+def test_ds_private_rules(selftest, tmp_path):
+    check(selftest, "ds_private_rules", tmp_path)
+
+
+@pytest.mark.parametrize("case, message", [
+    ("class", "dsound: DllGetClassObject of class {47D4D946-62E8-11CF-93BC-444553540000} not answered"),
+    ("iid", "dsound: DllGetClassObject of class {11AB3EC0-25EC-11D1-A4D8-00C04FC28ACA} with IID "
+            "{279AFA83-4981-11CE-A521-0020AF0BE560} not answered"),
+    ("ole32", "dsound: DllGetClassObject of class {47D4D946-62E8-11CF-93BC-444553540000} not answered"),
+    ("id", "IKsPropertySet::Get of set {84624F82-25EC-11D1-A4D8-00C04FC28ACA}, id 8 not implemented"),
+    ("set", "IKsPropertySet::Get of set {31EFAC30-515C-11D0-A9AA-00AA0061BE93}, id 7 not implemented"),
+    ("kset", "IKsPropertySet::Set not implemented"),
+    ("waveout", "waveOutOpen: the waveOut output is not answered"),
+])
+def test_ds_private_stops(selftest, tmp_path, case, message):
+    r = run_group(selftest, "ds_private_rules", tmp_path, case)
+    assert r.returncode == -signal.SIGABRT and "ds_private_rules: returned" not in r.stdout, \
+        f"exit {r.returncode}\n" + r.stdout[-2000:] + r.stderr[-2000:]
+    line = [ln for ln in r.stderr.splitlines() if "FATAL" in ln]
+    assert len(line) == 1 and line[0].startswith("[bw2] FATAL: d3d9: ") and message in line[0], r.stderr[-2000:]
+    assert line[0].count("(from guest 0x") == 1, line[0]

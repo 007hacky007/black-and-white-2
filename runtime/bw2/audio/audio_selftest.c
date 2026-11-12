@@ -702,10 +702,163 @@ static void group_ds_stops(const char *what) {
     printf("ds_stops: returned\n");
 }
 
+/* ---- dsound.dll's private device enumeration and the waveOut guard (Task 4) ---- */
+static const uint8_t CLSID_DirectSoundPrivate[16] = G(0x11AB3EC0, 0x25EC, 0x11D1, 0xA4, 0xD8, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA);
+static const uint8_t IID_IClassFactory[16] = G(0x00000001, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+static const uint8_t IID_IKsPropertySet[16] = G(0x31EFAC30, 0x515C, 0x11D0, 0xA9, 0xAA, 0x00, 0xAA, 0x00, 0x61, 0xBE, 0x93);
+static const uint8_t DSPROPSETID_DirectSoundDevice[16] = G(0x84624F82, 0x25EC, 0x11D1, 0xA4, 0xD8, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA);
+static const uint8_t BW2_DeviceId[16] = G(0xB5D2D6A1, 0x6E0B, 0x4C1F, 0x9A, 0x3E, 0x0D, 0xA5, 0xB0, 0xC0, 0xA8, 0x01);
+enum { CF_CreateInstance = 3, CF_LockServer };
+enum { KS_Get = 3, KS_Set, KS_QuerySupport };
+#define CLASS_E_NOAGGREGATION_ 0x80040110u
+#define E_NOINTERFACE__ 0x80004002u
+#define CONTEXT 0x5EC0C0DEu
+
+/* The enumeration callback, as a guest function: (desc, context), stdcall, returns BOOL.
+ * It keeps what the game's callback reads ("Measured" item 3). */
+static int g_cb_calls;
+static uint32_t g_cb_ctx, g_cb_desc[10], g_cb_ifbyte;
+static char g_cb_text[2][64];
+static void t_enum_callback(void) {
+    uint32_t d = A32(0);
+    g_cb_calls++;
+    g_cb_ctx = A32(1);
+    memcpy(g_cb_desc, hle_ptr(d), 40);
+    for (int i = 0; i < 2; i++)
+        if (g_cb_desc[6 + i]) snprintf(g_cb_text[i], sizeof g_cb_text[i], "%s", (const char *)hle_ptr(g_cb_desc[6 + i]));
+    g_cb_ifbyte = g_cb_desc[8] ? *(const uint8_t *)hle_ptr(g_cb_desc[8]) : 0xFFFFFFFFu;
+    RET(1, 2);
+}
+static const win32hle_shim t_shims[] = { { "selftest_enum_callback", t_enum_callback }, { NULL, NULL } };
+
+static uint32_t gstr(const char *s) { uint32_t p = gmem((uint32_t)strlen(s) + 1); strcpy(hle_ptr(p), s); return p; }
+/* A guest entry the game got from GetProcAddress, called as lifted code calls it. */
+static uint32_t callva(uint32_t va, const char *name, int n, ...) {
+    recomp_func_t f = va ? recomp_lookup_import(va) : NULL;
+    if (!f) { printf("FAIL %s at 0x%08X: no function\n", name, va); fails++; return 0xDEADBEEFu; }
+    uint32_t a[16];
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) a[i] = va_arg(ap, uint32_t);
+    va_end(ap);
+    return run(f, name, n, a);
+}
+/* The probe's first steps: LoadLibraryA(module) and GetProcAddress(.., "DllGetClassObject"). */
+static uint32_t dgco_entry(const char *module) {
+    uint32_t mod = call("LoadLibraryA", 1, gstr(module));
+    CHECK(mod != 0);
+    uint32_t va = call("GetProcAddress", 2, mod, gstr("DllGetClassObject"));
+    CHECK(va != 0);
+    return va;
+}
+static uint32_t dgco(uint32_t entry, const uint8_t *clsid, const uint8_t *iid, uint32_t *hr) {
+    uint32_t out = gmem(4);
+    MEM32(out) = 0xCCCCCCCCu;
+    *hr = callva(entry, "DllGetClassObject", 3, gguid(clsid), gguid(iid), out);
+    return MEM32(out);
+}
+static uint32_t factory(void) {
+    uint32_t hr, f = dgco(dgco_entry("dsound.dll"), CLSID_DirectSoundPrivate, IID_IClassFactory, &hr);
+    CHECKEQ(hr, 0);
+    CHECK(f != 0 && f != 0xCCCCCCCCu);
+    return f;
+}
+static uint32_t create_instance(uint32_t f, uint32_t outer, const uint8_t *iid, uint32_t *hr) {
+    uint32_t out = gmem(4);
+    MEM32(out) = 0xCCCCCCCCu;
+    *hr = vcall(f, CF_CreateInstance, 3, outer, gguid(iid), out);
+    return MEM32(out);
+}
+static uint32_t propset(uint32_t f) {
+    uint32_t hr, ks = create_instance(f, 0, IID_IKsPropertySet, &hr);
+    CHECKEQ(hr, 0);
+    CHECK(ks != 0 && ks != 0xCCCCCCCCu);
+    return ks;
+}
+/* Get(set, id, NULL, 0, {callback, context}, 8, &ret); ret comes back in *ret. */
+static uint32_t ks_get(uint32_t ks, const uint8_t *set, uint32_t id, uint32_t *ret) {
+    uint32_t data = gmem(8), r = gmem(4);
+    MEM32(data) = hle_resolve("selftest_enum_callback"), MEM32(data + 4) = CONTEXT;
+    MEM32(r) = 0xCCCCCCCCu;
+    uint32_t hr = vcall(ks, KS_Get, 7, gguid(set), id, 0u, 0u, data, 8u, r);
+    if (ret) *ret = MEM32(r);
+    return hr;
+}
+
+static void group_ds_private(void) {
+    uint32_t live0 = d3d_live_count(), hr, ret;
+    uint32_t f = factory(), ks = propset(f);
+    CHECKEQ(vcall(f, CF_LockServer, 1, 1u), 0);
+    CHECKEQ(vcall(f, CF_LockServer, 1, 0u), 0);
+    CHECKEQ(d3d_live_count(), live0 + 2);
+    hr = ks_get(ks, DSPROPSETID_DirectSoundDevice, 7, &ret);
+    CHECKEQ(hr, 0);
+    CHECKEQ(ret, 8);
+    CHECKEQ(g_cb_calls, 1);
+    CHECKEQ(g_cb_ctx, CONTEXT);
+    CHECKEQ(g_cb_desc[0], 2);                           /* WDM */
+    CHECKEQ(g_cb_desc[1], 0);                           /* render */
+    CHECK(!memcmp(&g_cb_desc[2], BW2_DeviceId, 16));
+    CHECK(g_cb_desc[6] != 0 && g_cb_desc[7] != 0 && g_cb_desc[8] != 0);
+    CHECK(!strcmp(g_cb_text[0], "Default output"));
+    CHECK(!strcmp(g_cb_text[1], "coreaudio"));
+    CHECKEQ(g_cb_ifbyte, 0);                            /* "": no device path */
+    CHECKEQ(g_cb_desc[9], 0);                           /* WaveDeviceId */
+    /* a second enumeration sees the same device, with the same strings */
+    uint32_t first[10];
+    memcpy(first, g_cb_desc, sizeof first);
+    CHECKEQ(ks_get(ks, DSPROPSETID_DirectSoundDevice, 7, &ret), 0);
+    CHECKEQ(g_cb_calls, 2);
+    CHECK(!memcmp(first, g_cb_desc, sizeof first));
+    CHECKEQ(vcall(ks, 2, 0), 0);
+    CHECKEQ(vcall(f, 2, 0), 0);
+    CHECKEQ(d3d_live_count(), live0);
+}
+
+/* With no arg: the answers that are not stops. With one: that stop, in a child;
+ * it prints "ds_private_rules: returned" only if the call did not stop. */
+static void group_ds_private_rules(const char *what) {
+    uint32_t hr;
+    if (!what) {
+        uint32_t live0 = d3d_live_count(), f = factory();
+        uint32_t ks = create_instance(f, 0x00440000u, IID_IKsPropertySet, &hr);
+        CHECKEQ(hr, CLASS_E_NOAGGREGATION_);
+        CHECKEQ(ks, 0);
+        ks = create_instance(f, 0, IID_IDirectSound, &hr);
+        CHECKEQ(hr, E_NOINTERFACE__);
+        CHECKEQ(ks, 0);
+        CHECKEQ(d3d_live_count(), live0 + 1);
+        CHECKEQ(vcall(f, 2, 0), 0);
+        CHECKEQ(d3d_live_count(), live0);
+        return;
+    }
+    if (!strcmp(what, "class")) {
+        dgco(dgco_entry("dsound.dll"), CLSID_DirectSound, IID_IClassFactory, &hr);
+    } else if (!strcmp(what, "iid")) {
+        dgco(dgco_entry("dsound.dll"), CLSID_DirectSoundPrivate, IID_IDirectSound, &hr);
+    } else if (!strcmp(what, "ole32")) {
+        dgco(dgco_entry("ole32.dll"), CLSID_DirectSound, IID_IClassFactory, &hr);
+    } else if (!strcmp(what, "id")) {
+        ks_get(propset(factory()), DSPROPSETID_DirectSoundDevice, 8, NULL);
+    } else if (!strcmp(what, "set")) {
+        ks_get(propset(factory()), IID_IKsPropertySet, 7, NULL);
+    } else if (!strcmp(what, "kset")) {
+        vcall(propset(factory()), KS_Set, 6, gguid(DSPROPSETID_DirectSoundDevice), 7u, 0u, 0u, gmem(8), 8u);
+    } else if (!strcmp(what, "waveout")) {
+        call("waveOutOpen", 6, gmem(4), 0xFFFFFFFFu, wave(1, 2, 44100, 16), 0u, 0u, 0u);
+    } else {
+        printf("FAIL no stop case %s\n", what);
+        fails++;
+        return;
+    }
+    printf("ds_private_rules: returned\n");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: audio_selftest <group> [arg]\n"); return 2; }
     hle_mem_init();
     bw2_register_shims();
+    win32hle_register(t_shims);
     mach_enter();
     g_esp = hle_va(hle_alloc(1u << 20)) + (1u << 20) - 64;
     if (!strcmp(argv[1], "ds_mix_exact")) group_ds_mix_exact();
@@ -723,6 +876,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "ds_buffer_lock")) group_ds_buffer_lock();
     else if (!strcmp(argv[1], "ds_buffer_stream")) group_ds_buffer_stream();
     else if (!strcmp(argv[1], "ds_stops") && argc > 2) group_ds_stops(argv[2]);
+    else if (!strcmp(argv[1], "ds_private")) group_ds_private();
+    else if (!strcmp(argv[1], "ds_private_rules")) group_ds_private_rules(argc > 2 ? argv[2] : NULL);
     else { fprintf(stderr, "audio_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

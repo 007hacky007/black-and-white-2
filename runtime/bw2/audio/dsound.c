@@ -9,6 +9,12 @@
  * method nobody implemented, and every flag, format or level this layer does
  * not handle, stops loudly, naming it.
  *
+ * Task 4 adds dsound.dll's DllGetClassObject for the game's audio probe: the
+ * private class factory gives an IKsPropertySet whose device enumeration
+ * reports one render device with no device path, so the probe keeps the
+ * DirectSound output (plan 8 Ruling 3). waveOutOpen stops loudly: the game's
+ * other output would otherwise run silently on win32hle's fake device.
+ *
  * Threads: these methods run under the machine lock, as every shim does, so
  * the d3d_com state they touch is never shared without it. The mixer's mutex
  * is a leaf, taken only inside the ds_voice_* calls; no method blocks.
@@ -42,6 +48,12 @@
 #define DSBSTATUS_PLAYING         1u
 #define DSBSTATUS_LOOPING         4u
 #define WAVE_FORMAT_PCM           1u
+#define S_OK_                     0u
+#define E_POINTER_                0x80004003u
+#define CLASS_E_NOAGGREGATION     0x80040110u
+#define DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_A 7u
+#define DSDEVICE_TYPE_WDM         2u
+#define DSDEVICE_DATAFLOW_RENDER  0u
 #define DSBSIZE_MIN               4u
 #define DSBSIZE_MAX               0x0FFFFFFFu
 
@@ -56,6 +68,12 @@ static const uint8_t CLSID_DirectSoundFullDuplex[16] = G(0xFEA4300C, 0x7959, 0x4
 static const uint8_t IID_IUnknown[16] = G(0x00000000, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
 static const uint8_t IID_IDirectSound[16] = G(0x279AFA83, 0x4981, 0x11CE, 0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60);
 static const uint8_t DSDEVID_DefaultPlayback[16] = G(0xDEF00000, 0x9C6D, 0x47ED, 0xAA, 0xF1, 0x4D, 0xDA, 0x8F, 0x2B, 0x5C, 0x03);
+static const uint8_t CLSID_DirectSoundPrivate[16] = G(0x11AB3EC0, 0x25EC, 0x11D1, 0xA4, 0xD8, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA);
+static const uint8_t IID_IClassFactory[16] = G(0x00000001, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+static const uint8_t IID_IKsPropertySet[16] = G(0x31EFAC30, 0x515C, 0x11D0, 0xA9, 0xAA, 0x00, 0xAA, 0x00, 0x61, 0xBE, 0x93);
+static const uint8_t DSPROPSETID_DirectSoundDevice[16] = G(0x84624F82, 0x25EC, 0x11D1, 0xA4, 0xD8, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA);
+/* The Mac's default output as the enumeration names it: a fixed GUID of this port's choosing. */
+static const uint8_t BW2_DeviceId[16] = G(0xB5D2D6A1, 0x6E0B, 0x4C1F, 0x9A, 0x3E, 0x0D, 0xA5, 0xB0, 0xC0, 0xA8, 0x01);
 #undef G
 
 struct dsound {
@@ -255,7 +273,97 @@ static void dsb_Stop(void) {                       /* (this) */
     RET(DS_OK, 1);
 }
 
+/* ---- dsound.dll's private device enumeration ("Measured" item 3) ---- */
+
+static void x_DllGetClassObject(void) {            /* (rclsid, riid, ppv) */
+    const uint8_t *clsid = APTR(0), *iid = APTR(1);
+    uint32_t out = A32(2);
+    char c[40] = "(null)", i[40] = "(null)";
+    if (clsid) hle_guid_string(clsid, c);
+    if (iid) hle_guid_string(iid, i);
+    if (!clsid || memcmp(clsid, CLSID_DirectSoundPrivate, 16))
+        d3d_fail("dsound: DllGetClassObject of class %s not answered", c);
+    if (!iid || memcmp(iid, IID_IClassFactory, 16))
+        d3d_fail("dsound: DllGetClassObject of class %s with IID %s not answered", c, i);
+    if (!out) RET(E_POINTER_, 3);
+    struct d3d_obj *f = calloc(1, sizeof *f);
+    if (!f) abort();
+    MEM32(out) = d3d_new(D3DK_DSPRIVATE, "IClassFactory", f);
+    RET(S_OK_, 3);
+}
+
+static void cf_CreateInstance(void) {              /* (this, pUnkOuter, riid, ppv) */
+    (void)d3d_host(A32(0), D3DK_DSPRIVATE);
+    uint32_t outer = A32(1), out = A32(3);
+    const uint8_t *iid = APTR(2);
+    if (!out) RET(E_POINTER_, 4);
+    MEM32(out) = 0;
+    if (outer) RET(CLASS_E_NOAGGREGATION, 4);
+    if (!iid || memcmp(iid, IID_IKsPropertySet, 16)) RET(E_NOINTERFACE_, 4);
+    struct d3d_obj *k = calloc(1, sizeof *k);
+    if (!k) abort();
+    MEM32(out) = d3d_new(D3DK_KSPROPSET, "IKsPropertySet", k);
+    RET(S_OK_, 4);
+}
+
+static void cf_LockServer(void) {                  /* (this, fLock) */
+    (void)d3d_host(A32(0), D3DK_DSPRIVATE);
+    RET(S_OK_, 2);
+}
+
+/* The one render device, as DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_A (40 bytes):
+ * Type, DataFlow, DeviceId, then the Description, Module and Interface string
+ * pointers and WaveDeviceId. The game copies the Interface string without
+ * checking the pointer, so all three point to strings that live for the run;
+ * Interface is "" (no \\?\ device path, Ruling 3). */
+static uint32_t device_description(void) {
+    static uint32_t desc, text[3];
+    static const char *const s[3] = { "Default output", "coreaudio", "" };
+    if (!desc) {
+        for (int i = 0; i < 3; i++) {
+            text[i] = hle_va(hle_alloc((uint32_t)strlen(s[i]) + 1));
+            memcpy(hle_ptr(text[i]), s[i], strlen(s[i]) + 1);
+        }
+        desc = hle_va(hle_alloc(40));
+    }
+    MEM32(desc) = DSDEVICE_TYPE_WDM;                /* written each time: the callback may have changed it */
+    MEM32(desc + 4) = DSDEVICE_DATAFLOW_RENDER;
+    memcpy(hle_ptr(desc + 8), BW2_DeviceId, 16);
+    for (int i = 0; i < 3; i++) {
+        memcpy(hle_ptr(text[i]), s[i], strlen(s[i]) + 1);
+        MEM32(desc + 0x18 + 4u * (uint32_t)i) = text[i];
+    }
+    MEM32(desc + 0x24) = 0;
+    return desc;
+}
+
+/* (this, rguidPropSet, ulId, pInstanceData, ulInstanceLength, pPropertyData, ulDataLength, pulBytesReturned) */
+static void ks_Get(void) {
+    (void)d3d_host(A32(0), D3DK_KSPROPSET);
+    const uint8_t *set = APTR(1);
+    uint32_t id = A32(2), data = A32(5), cb = A32(6), ret = A32(7);
+    char g[40] = "(null)";
+    if (set) hle_guid_string(set, g);
+    if (!set || memcmp(set, DSPROPSETID_DirectSoundDevice, 16) || id != DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_A)
+        d3d_fail("IKsPropertySet::Get of set %s, id %u not implemented", g, id);
+    if (!data || cb < 8)
+        d3d_fail("IKsPropertySet::Get of set %s, id %u with data 0x%08X of %u bytes not implemented", g, id, data, cb);
+    uint32_t callback = MEM32(data), context = MEM32(data + 4);
+    if (!callback) d3d_fail("IKsPropertySet::Get of set %s, id %u with no callback not implemented", g, id);
+    uint32_t a[2] = { device_description(), context };
+    hle_call_guest(callback, 2, a);                 /* one device: its answer (continue or not) changes nothing */
+    if (ret) MEM32(ret) = 8;
+    RET(S_OK_, 8);
+}
+
+/* ---- the waveOut guard ---- */
+
+static void x_waveOutOpen(void) { d3d_fail("waveOutOpen: the waveOut output is not answered"); }
+
 static const win32hle_shim g_impls[] = {
+    { "IClassFactory::CreateInstance", cf_CreateInstance },
+    { "IClassFactory::LockServer", cf_LockServer },
+    { "IKsPropertySet::Get", ks_Get },
     { "IDirectSound::CreateSoundBuffer", ds_CreateSoundBuffer },
     { "IDirectSound::SetCooperativeLevel", ds_SetCooperativeLevel },
     { "IDirectSound::GetSpeakerConfig", ds_GetSpeakerConfig },
@@ -271,6 +379,8 @@ static const win32hle_shim g_exports[] = {
     { "DirectSoundCreate", x_DirectSoundCreate },
     { "DirectSoundCreate8", x_DirectSoundCreate8 },
     { "DirectSoundEnumerateA", x_DirectSoundEnumerateA },
+    { "DllGetClassObject", x_DllGetClassObject },   /* answered for any system module; only the private class */
+    { "waveOutOpen", x_waveOutOpen },               /* before win32hle's silent one */
     { 0, 0 } };
 
 void bw2_audio_register(void) {
