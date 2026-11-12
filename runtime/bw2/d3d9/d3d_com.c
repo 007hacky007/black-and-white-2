@@ -85,6 +85,37 @@ uint32_t d3d_vtable(const char *iface) {
     return vt;
 }
 
+/* ---- host calls into guest COM ---- */
+/* Slots by (interface, method). Callers pass string constants, so the pointers are the fast key;
+ * a name at a new address is looked up by its text once and added. */
+static struct call_slot { const char *iface, *method; uint32_t slot; } *g_cs;
+static uint32_t g_ncs, g_capcs;
+
+static uint32_t call_slot(const char *iface, const char *method) {
+    for (uint32_t i = 0; i < g_ncs; i++)
+        if (g_cs[i].iface == iface && g_cs[i].method == method) return g_cs[i].slot;
+    const struct d3d_iface *f = iface_of(iface);
+    if (!f) d3d_fail("d3d_call: no interface %s", iface);
+    uint32_t k = 0;
+    while (f->methods[k] && strcmp(f->methods[k], method)) k++;
+    if (!f->methods[k]) d3d_fail("d3d_call: %s has no method %s", iface, method);
+    if (g_ncs == g_capcs) {
+        g_capcs = g_capcs ? 2 * g_capcs : 64;
+        g_cs = realloc(g_cs, sizeof *g_cs * g_capcs);
+        if (!g_cs) abort();
+    }
+    g_cs[g_ncs++] = (struct call_slot){ iface, method, k };
+    return k;
+}
+uint32_t d3d_call(uint32_t obj, const char *iface, const char *method, uint32_t nargs, const uint32_t *args) {
+    uint32_t slot = call_slot(iface, method), a[16];
+    if (nargs > 15) d3d_fail("d3d_call: %s::%s with %u arguments", iface, method, nargs);
+    if (!obj || !MEM32(obj)) d3d_fail("d3d_call: %s::%s on object 0x%08X", iface, method, obj);
+    a[0] = obj;
+    for (uint32_t i = 0; i < nargs; i++) a[1 + i] = args[i];
+    return hle_call_guest(MEM32(MEM32(obj) + 4u * slot), (int)nargs + 1, a);
+}
+
 /* Private data is the same for every resource and for volumes. */
 static void resource_defaults(void) {
     static int done;

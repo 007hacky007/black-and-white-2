@@ -102,21 +102,9 @@ static const char *const g_dname[D_COUNT] = { "SetTransform", "SetMaterial", "Ge
     "SetFVF", "CreateVertexShader", "SetVertexShader", "SetVertexShaderConstantF", "SetVertexShaderConstantI",
     "SetVertexShaderConstantB", "CreatePixelShader", "SetPixelShader", "SetPixelShaderConstantF",
     "SetPixelShaderConstantI", "SetPixelShaderConstantB" };
-static int g_dslot[D_COUNT];
 static uint32_t dcall(uint32_t dev, int m, int n, uint32_t a1, uint32_t a2, uint32_t a3) {
-    if (!g_dslot[D_SetTransform]) {
-        const struct d3d_iface *f = d3d_ifaces;
-        while (f->name && strcmp(f->name, "IDirect3DDevice9")) f++;
-        if (!f->name) d3d_fail("ID3DXEffect: no IDirect3DDevice9 interface");
-        for (int k = 0; k < D_COUNT; k++) {
-            int i = 0;
-            while (f->methods[i] && strcmp(f->methods[i], g_dname[k])) i++;
-            if (!f->methods[i]) d3d_fail("ID3DXEffect: IDirect3DDevice9 has no %s", g_dname[k]);
-            g_dslot[k] = i;
-        }
-    }
-    uint32_t a[4] = { dev, a1, a2, a3 };
-    return hle_call_guest(MEM32(MEM32(dev) + 4u * (uint32_t)g_dslot[m]), n + 1, a);
+    uint32_t a[3] = { a1, a2, a3 };
+    return d3d_call(dev, "IDirect3DDevice9", g_dname[m], (uint32_t)n, a);
 }
 
 /* ---- values ---- */

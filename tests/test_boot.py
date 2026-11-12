@@ -14,10 +14,11 @@ LOUD = ("TRIPWIRE", "trap:", "unresolved indirect call", "unresolved direct call
 
 
 # Where the boot stops after plan 5 (Task 7): the game creates its effects, validates and sets their
-# techniques and runs their passes, then calls one of plan 7's names (measured: D3DXCreateSprite), so the
-# run exits 4 at that layer and never at D3DXCreateEffect (docs/research/shaders.md).
-LATER = ("D3DXCompileShader", "D3DXCompileShaderFromFileA", "D3DXCreateFragmentLinker", "D3DXCreateSprite",
-         "D3DXCreateFontA", "D3DXCreateSphere")
+# techniques and runs their passes, then calls one of plan 7's names, so the run exits 4 at that layer and
+# never at D3DXCreateEffect (docs/research/shaders.md). Plan 7 Task 2 answers D3DXCreateSprite (measured
+# stop since: D3DXCreateFontA).
+LATER = ("D3DXCompileShader", "D3DXCompileShaderFromFileA", "D3DXCreateFragmentLinker", "D3DXCreateFontA",
+         "D3DXCreateSphere")
 
 
 @pytest.mark.gamefiles

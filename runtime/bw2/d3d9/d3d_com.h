@@ -1,6 +1,6 @@
 /*
  * d3d_com.h - guest COM objects for the D3D9, DirectDraw 7 and D3DX layers
- * (plan 4), and DirectInput 8 and D3DX effects (plan 5). A guest object is [vtable][reference count][host id]; the id
+ * (plan 4), DirectInput 8 and D3DX effects (plan 5), and D3DX's sprite and font (plan 7). A guest object is [vtable][reference count][host id]; the id
  * indexes a growable table of host structs (no fixed-size tables, spec 7.2).
  * Each method is a stdcall shim whose argument 0 is `this`.
  */
@@ -12,7 +12,8 @@
 enum d3d_kind {
     D3DK_NONE, D3DK_D3D9, D3DK_DEVICE, D3DK_SWAPCHAIN, D3DK_TEXTURE, D3DK_CUBETEXTURE, D3DK_VOLUMETEXTURE,
     D3DK_SURFACE, D3DK_VOLUME, D3DK_VB, D3DK_IB, D3DK_VDECL, D3DK_VSHADER, D3DK_PSHADER, D3DK_STATEBLOCK,
-    D3DK_QUERY, D3DK_DDRAW7, D3DK_D3DXBUFFER, D3DK_DINPUT8, D3DK_DIDEVICE, D3DK_EFFECT, D3DK_EFFECTPOOL, D3DK_COUNT
+    D3DK_QUERY, D3DK_DDRAW7, D3DK_D3DXBUFFER, D3DK_DINPUT8, D3DK_DIDEVICE, D3DK_EFFECT, D3DK_EFFECTPOOL,
+    D3DK_SPRITE, D3DK_FONT, D3DK_COUNT
 };
 
 /* Every host struct starts with this. destroy (may be NULL) runs at the last Release. */
@@ -59,6 +60,11 @@ void d3d_release_host(uint32_t obj);
 uint32_t d3d_addref(uint32_t obj);                   /* +1, the new count */
 uint32_t d3d_release(uint32_t obj);                  /* -1, destroying at 0; the new count */
 uint32_t d3d_live_count(void);                       /* live objects (tests) */
+
+/* Host code calling a guest COM method: method of obj (an iface) through obj's own guest vtable,
+ * with obj as argument 0 and nargs more from args; the guest's eax. The slot comes from
+ * d3d_ifaces by name (cached); an unknown interface or method stops loudly. */
+uint32_t d3d_call(uint32_t obj, const char *iface, const char *method, uint32_t nargs, const uint32_t *args);
 
 /* QueryInterface by host code: D3D_OK and *out (AddRef'd), or E_NOINTERFACE. out is a guest address. */
 uint32_t d3d_qi(uint32_t obj, const uint8_t *iid, uint32_t out);

@@ -1,8 +1,9 @@
 /*
  * d3d9_methods.c - every COM interface this layer serves, with its methods in
  * vtable order (the declaration order of the D3D9, DirectDraw 7, D3DX and
- * DirectInput 8 headers) and its IID. d3d_vtable() builds a guest vtable from one of these;
- * a method nobody implemented stops loudly, naming itself.
+ * DirectInput 8 headers; d3dx9_25's for ID3DXSprite and ID3DXFont) and its
+ * IID. d3d_vtable() builds a guest vtable from one of these; a method nobody
+ * implemented stops loudly, naming itself.
  */
 #include "d3d_com.h"
 
@@ -82,6 +83,11 @@ static const char *const m_effect[] = { BASEEFFECT, "GetPool", "SetTechnique", "
     "EndPass", "End", "GetDevice", "OnLostDevice", "OnResetDevice", "SetStateManager", "GetStateManager",
     "BeginParameterBlock", "EndParameterBlock", "ApplyParameterBlock", "CloneEffect", 0 };
 static const char *const m_effectpool[] = { UNK, 0 };
+static const char *const m_sprite[] = { UNK, "GetDevice", "GetTransform", "SetTransform", "SetWorldViewRH",
+    "SetWorldViewLH", "Begin", "Draw", "Flush", "End", "OnLostDevice", "OnResetDevice", 0 };
+static const char *const m_font[] = { UNK, "GetDevice", "GetDescA", "GetDescW", "GetTextMetricsA", "GetTextMetricsW",
+    "GetDC", "GetGlyphData", "PreloadCharacters", "PreloadGlyphs", "PreloadTextA", "PreloadTextW", "DrawTextA",
+    "DrawTextW", "OnLostDevice", "OnResetDevice", 0 };
 static const char *const m_dinput8[] = { UNK, "CreateDevice", "EnumDevices", "GetDeviceStatus", "RunControlPanel",
     "Initialize", "FindDevice", "EnumDevicesBySemantics", "ConfigureDevices", 0 };
 static const char *const m_didevice8[] = { UNK, "GetCapabilities", "EnumObjects", "GetProperty", "SetProperty",
@@ -126,6 +132,8 @@ const struct d3d_iface d3d_ifaces[] = {
     { "ID3DXEffect", m_effect, { G(0xD165CCB1, 0x62B0, 0x4A33, 0xB3, 0xFA, 0xA9, 0x23, 0x00, 0x30, 0x6A, 0x3D),
         G(0x017C18AC, 0x103F, 0x4417, 0x8C, 0x51, 0x6B, 0xF6, 0xEF, 0x1E, 0x56, 0xBE) } },
     { "ID3DXEffectPool", m_effectpool, { G(0x9537AB04, 0x3250, 0x412E, 0x82, 0x13, 0xFC, 0xD2, 0xF8, 0x67, 0x79, 0x33) } },
+    { "ID3DXSprite", m_sprite, { G(0xBA0B762D, 0x7D28, 0x43EC, 0xB9, 0xDC, 0x2F, 0x84, 0x44, 0x3B, 0x06, 0x14) } },
+    { "ID3DXFont", m_font, { G(0xD79DBB70, 0x5F21, 0x4D36, 0xBB, 0xC2, 0xFF, 0x52, 0x5C, 0x21, 0x3C, 0xDC) } },
     { "IDirectInput8A", m_dinput8, { G(0xBF798030, 0x483A, 0x4DA2, 0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00) } },
     { "IDirectInputDevice8A", m_didevice8, { G(0x54D41080, 0xDC15, 0x4833, 0xA4, 0x1B, 0x74, 0x8F, 0x73, 0xA3, 0x81, 0x79) } },
     { 0, 0, { { 0 } } },
