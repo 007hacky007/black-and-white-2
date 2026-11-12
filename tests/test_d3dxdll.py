@@ -146,3 +146,4 @@ def test_d3dx_catalog():
     assert len(exports) > 300
     assert set(EXPORTS.values()) <= set(exports)
     assert [hex(a) for a in exports if a not in starts] == []
+    assert [hex(a) for a in d3dx.EXTRA_SEEDS if a not in starts] == []

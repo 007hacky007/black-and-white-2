@@ -3,6 +3,10 @@
  * boot of the game image and its run.
  *
  *   bw2 --game DIR [--exe white.exe] [--strict] [--trace-eh] [--lifted-dll NAME=0xBASE]...
+ *       [--check-d3dx DIR]
+ *
+ * --check-d3dx runs the lifted D3DX's checks named on stdin (d3dx/d3dx_check.c)
+ * after the boot's setup, in place of the game's entry.
  *
  * The support folder (saves, settings, registry, everything the game writes)
  * is $BW2_SUPPORT, or ~/Library/Application Support/Black & White 2.
@@ -41,10 +45,15 @@ static uint32_t call_one(void) {
     return 0;
 }
 
+int bw2_d3dx_check(const char *dir);                    /* d3dx/d3dx_check.c */
+static const char *g_check_dir;
+static uint32_t check_d3dx(void) { return (uint32_t)bw2_d3dx_check(g_check_dir); }
+
 static void report_eh_depth(int code) { (void)code; fprintf(stderr, "eh depth %d\n", bw2_eh_depth()); }
 
 static int usage(void) {
-    fprintf(stderr, "usage: bw2 --game DIR [--exe white.exe] [--strict] [--trace-eh] [--lifted-dll NAME=0xBASE]...\n");
+    fprintf(stderr, "usage: bw2 --game DIR [--exe white.exe] [--strict] [--trace-eh] [--lifted-dll NAME=0xBASE]... "
+                    "[--check-d3dx DIR]\n");
     return BW2_EXIT_BOOT;
 }
 
@@ -285,6 +294,7 @@ int main(int argc, char **argv) {
             g_call_va = (uint32_t)strtoul(argv[++i], NULL, 0);
             while (i + 1 < argc && argv[i + 1][0] != '-' && ncall < 8) call_args[ncall++] = (uint32_t)strtoul(argv[++i], NULL, 0);
         }
+        else if (!strcmp(argv[i], "--check-d3dx") && i + 1 < argc) g_check_dir = argv[++i];
         else if (!strcmp(argv[i], "--lifted-dll") && i + 1 < argc) {
             char *eq = strchr(argv[++i], '=');
             if (!eq) return usage();
@@ -339,6 +349,7 @@ int main(int argc, char **argv) {
     bw2_tls_add_module(pe_field(path, 0x1C));
     bw2_guard_init(pe_field(path, 0x1C));
     bw2_eh_add_image(pe_field(path, 0x1C), pe_field(path, 0x38));
+    if (g_check_dir) return (int)bw2_run_on_main_stack(check_d3dx);
     if (ncall >= 0) {
         g_call_n = (uint32_t)ncall;
         memcpy(g_call_args, call_args, sizeof call_args);

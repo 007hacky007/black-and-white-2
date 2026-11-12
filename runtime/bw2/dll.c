@@ -9,6 +9,11 @@
  * runs its lifted entry once as DllMain(hmod, DLL_PROCESS_ATTACH, 0). A FALSE
  * fails the load with ERROR_DLL_INIT_FAILED. win32hle's GetProcAddress answers
  * its exports from its export table, and a second LoadLibraryA only counts.
+ *
+ * The engine loads one lifted DLL itself (plan 9): the disc's d3dx9_25.dll,
+ * rebased to 0x08000000, through bw2_lifted_dll_open with the same steps. It is
+ * registered under a module name of its own, so the game's GetModuleHandleA and
+ * GetProcAddress never find it in place of the native D3DX.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +32,9 @@
 
 static struct { char name[64]; uint32_t base, held; } g_lifted[MAX_LIFTED];
 static int g_nlifted;
+/* The engine's own lifted DLLs, held from start-up too (plan 9: the lifted d3dx9_25.dll). */
+static struct { uint32_t base, held, hmod; char module[64]; } g_engine[] = { { 0x08000000u, 0, 0, "" } };
+#define N_ENGINE (int)(sizeof g_engine / sizeof *g_engine)
 
 void bw2_lifted_dll_add(const char *name, uint32_t base) {
     for (int i = 0; i < g_nlifted; i++)
@@ -79,35 +87,92 @@ uint32_t bw2_bind_resolve(const char *name) {
     return hle_resolve_or_stub(name);
 }
 
+/* The last bind's imports that nothing answers (each bound to a stub that stops
+ * when called, by name), for the loader line and the checks. */
+#define MAX_UNANSWERED 256
+static const char *g_unanswered[MAX_UNANSWERED];
+static int g_nunanswered;
+static uint32_t bind_counted(const char *name) {
+    uint32_t va = bw2_bind_resolve(name);
+    if (hle_is_stub(va)) {
+        if (g_nunanswered < MAX_UNANSWERED) g_unanswered[g_nunanswered] = name;
+        g_nunanswered++;
+    }
+    return va;
+}
+int bw2_lifted_dll_unanswered(const char ***names) {
+    if (names) *names = g_unanswered;
+    return g_nunanswered < MAX_UNANSWERED ? g_nunanswered : MAX_UNANSWERED;
+}
+
+/* Release every hold (listed or engine DLL) that overlaps [base, base + HOLD). */
+static void release_holds(uint32_t base) {
+    for (int j = 0; j < g_nlifted; j++)              /* entries may share a base */
+        if (g_lifted[j].held && g_lifted[j].base < base + HOLD && base < g_lifted[j].base + HOLD)
+            hle_vm_release(g_lifted[j].base, HOLD), g_lifted[j].held = 0;
+    for (int j = 0; j < N_ENGINE; j++)
+        if (g_engine[j].held && g_engine[j].base < base + HOLD && base < g_engine[j].base + HOLD)
+            hle_vm_release(g_engine[j].base, HOLD), g_engine[j].held = 0;
+}
+
+/* Map host at base, register it as guest, bind, set up TLS and EH, run DllMain. 1 with *hmod, or -1
+ * (DllMain said FALSE). name is what the loader line calls it. */
+static int map_and_start(const char *name, const char *host, const char *guest, uint32_t base, uint32_t *hmod) {
+    pe_image img;
+    release_holds(base);
+    if (recomp_pe_map(host, &img) != 0)
+        hle_fatal("lifted DLL %s: cannot map it at its base 0x%08X (the range is taken)", name, base);
+    if (img.base != base)
+        hle_fatal("lifted DLL %s: mapped at 0x%08X, but it was lifted for 0x%08X", name, img.base, base);
+    hle_module_add(guest, img.base, img.resource_rva, img.resource_size, 0);
+    g_nunanswered = 0;
+    recomp_pe_bind(&img, bind_counted);
+    bw2_tls_add_module(img.base);
+    bw2_eh_add_image(img.base, img.span);
+    fprintf(stderr, "[bw2] %s: lifted DLL at 0x%08X, %d imports unanswered\n", name, img.base, g_nunanswered);
+    uint32_t args[3] = { img.base, 1u /* DLL_PROCESS_ATTACH */, 0 };
+    if (img.entry != img.base && !hle_call_guest(img.entry, 3, args)) {
+        fprintf(stderr, "[bw2] %s: DllMain returned FALSE\n", name);
+        return -1;
+    }
+    *hmod = img.base;
+    return 1;
+}
+
 static int load(const char *base_name, const char *host, uint32_t *hmod) {
     if (bw2_later_dll(base_name)) bw2_later_load(base_name);
     int i = 0;
     while (i < g_nlifted && strcmp(g_lifted[i].name, base_name)) i++;
     if (i == g_nlifted) return 0;
     if (!host) { hle_set_last_error(ERROR_MOD_NOT_FOUND); return -1; }
-    pe_image img;
-    for (int j = 0; j < g_nlifted; j++)              /* any hold on this range (entries may share a base) */
-        if (g_lifted[j].held && g_lifted[j].base < g_lifted[i].base + HOLD && g_lifted[i].base < g_lifted[j].base + HOLD)
-            hle_vm_release(g_lifted[j].base, HOLD), g_lifted[j].held = 0;
-    if (recomp_pe_map(host, &img) != 0)
-        hle_fatal("lifted DLL %s: cannot map it at its base 0x%08X (the range is taken)", base_name, g_lifted[i].base);
-    if (img.base != g_lifted[i].base)
-        hle_fatal("lifted DLL %s: mapped at 0x%08X, but it was lifted for 0x%08X", base_name, img.base, g_lifted[i].base);
     char guest[600];
     hle_guest_path(host, guest, sizeof guest);
-    hle_module_add(guest, img.base, img.resource_rva, img.resource_size, 0);
-    int unresolved = recomp_pe_bind(&img, bw2_bind_resolve);
-    bw2_tls_add_module(img.base);
-    bw2_eh_add_image(img.base, img.span);
-    fprintf(stderr, "[bw2] %s: lifted DLL at 0x%08X, %d imports unanswered\n", base_name, img.base, unresolved);
-    uint32_t args[3] = { img.base, 1u /* DLL_PROCESS_ATTACH */, 0 };
-    if (img.entry != img.base && !hle_call_guest(img.entry, 3, args)) {
-        fprintf(stderr, "[bw2] %s: DllMain returned FALSE\n", base_name);
+    if (map_and_start(base_name, host, guest, g_lifted[i].base, hmod) < 0) {
         hle_set_last_error(ERROR_DLL_INIT_FAILED);
         return -1;
     }
-    *hmod = img.base;
     return 1;
+}
+
+/* A lifted DLL the engine itself needs: mapped at base (which must be an engine
+ * DLL's), registered as module_name in the host file's guest folder, bound,
+ * started as the game's LoadLibraryA would. Its module handle; the same handle
+ * on a second call; 0 when DllMain said FALSE. Not added to the game's
+ * LoadLibraryA list. Call under the machine lock. */
+uint32_t bw2_lifted_dll_open(const char *module_name, const char *host_path, uint32_t base) {
+    int i = 0;
+    while (i < N_ENGINE && g_engine[i].base != base) i++;
+    if (i == N_ENGINE) hle_fatal("lifted DLL %s: 0x%08X is no engine DLL's base", module_name, base);
+    if (g_engine[i].hmod) return g_engine[i].hmod;
+    char guest[600];
+    hle_guest_path(host_path, guest, sizeof guest);
+    char *bs = strrchr(guest, '\\');
+    snprintf(bs ? bs + 1 : guest, sizeof guest - (size_t)(bs ? bs + 1 - guest : 0), "%s", module_name);
+    const char *file = strrchr(host_path, '/');
+    uint32_t h = 0;
+    if (map_and_start(file ? file + 1 : host_path, host_path, guest, base, &h) < 0) return 0;
+    snprintf(g_engine[i].module, sizeof g_engine[i].module, "%s", module_name);
+    return g_engine[i].hmod = h;
 }
 
 /* Hold each listed DLL's range, except one that overlaps the main image (its
@@ -117,6 +182,11 @@ void bw2_dll_hold(uint32_t main_base, uint32_t main_span) {
         uint32_t b = g_lifted[i].base;
         if (b < main_base + main_span && main_base < b + HOLD) continue;
         g_lifted[i].held = hle_vm_reserve(b, HOLD) == b;
+    }
+    for (int i = 0; i < N_ENGINE; i++) {
+        uint32_t b = g_engine[i].base;
+        if (b < main_base + main_span && main_base < b + HOLD) continue;
+        g_engine[i].held = hle_vm_reserve(b, HOLD) == b;
     }
 }
 

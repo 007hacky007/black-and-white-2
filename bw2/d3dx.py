@@ -32,8 +32,47 @@ REBASED_SHA256 = "505a12cf1fa5a7cf1162a27085f7e30036d7bae4f1b666b999777b60a55c24
 CATALOG = REPO / "bw2" / "catalog" / "d3dx9_25-apr2005.functions.json"
 # Function starts discovery misses, at the rebased base. Each entry names the address
 # that calls or reads it (an unresolved direct target in the link, or an unresolved
-# indirect call into 0x08000000-0x08253000 at run time).
-EXTRA_SEEDS: list[int] = []
+# indirect call into 0x08000000-0x08253000 at run time). Plan 9 Task 4: the compiler's
+# first run called 0x0813986E (from sub_0813879A, read from the table at 0x0801B4A8);
+# the rest of the batch are the other relocated pointers in .text to code that sits
+# after int3 padding and is not in the catalog (each reads from the address named).
+EXTRA_SEEDS: list[int] = [
+    0x0813986E,  # sub_0813879A calls it, from the table at 0x0801B4A8
+    0x080F8C13,  # 0x0800B438
+    0x081395D7,  # 0x0801B454
+    0x0813967A,  # 0x0801B46C
+    0x081396DA,  # 0x0801B478
+    0x0813970F,  # 0x0801B484
+    0x08139766,  # 0x0801B490
+    0x081397E1,  # 0x0801B49C
+    0x081398CE,  # 0x0801B4B4
+    0x0813995F,  # 0x0801B4CC
+    0x08139B8A,  # 0x0801B4E4
+    0x08139D30,  # 0x0801B508
+    0x08139D9F,  # 0x0801B514
+    0x08139DE2,  # 0x0801B520
+    0x0814CCCF,  # 0x0801DEEC
+    0x0814D4AD,  # 0x0801DF40, 0x08020038
+    0x0814E61C,  # 0x0801DF04
+    0x0814F27E,  # 0x0801EFBC
+    0x08158083,  # 0x0801EFE8
+    0x08158B17,  # 0x0801EFC0
+    0x0815A46B,  # 0x0801EFD4
+    0x0815B4E4,  # 0x0801FFE4
+    0x0815D4EA,  # 0x0801FFF0
+    0x0816A927,  # 0x0801D8A4, 0x08020B7C
+    0x0816A9E5,  # 0x08020B94, 0x08020B9C
+    0x081B82BE,  # 0x080230A4, 0x080230C8
+    0x081B8511,  # 0x08022EEC, 0x08022EF0
+    0x081B85CC,  # 0x08022EDC, 0x08023184
+    0x081B900F,  # 0x0802313C
+    0x081B91CB,  # 0x08023134, 0x08023190
+    0x081B91E9,  # 0x08023148
+    0x081B91F8,  # 0x0802314C
+    0x081B9D00,  # 0x080232AC
+    0x081B9D0C,  # 0x080232C0
+    0x081BAAF9,  # 0x080232B8
+]
 
 TAR = "/usr/bin/tar"
 TOOL_ENV = {"PATH": "/usr/bin:/bin"}

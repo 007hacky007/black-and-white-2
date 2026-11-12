@@ -16,14 +16,14 @@
 #include "win32hle.h"
 #include "bw2.h"
 
-/* Plan 4 answers d3d9, ddraw and D3DX's math and textures, plan 7 its sprite and font;
- * later plans own D3DX's HLSL compiler, fragment linker and mesh (named below). */
+/* Plan 4 answers d3d9, ddraw and D3DX's math and textures, plan 7 its sprite and font, plan 9
+ * D3DXCompileShader through the lifted D3DX; later plans own D3DX's fragment linker and mesh (named below). */
 static const char *const g_later_dlls[] = {
     "dinput.dll", "binkw32.dll", "openal32.dll", "wrap_oal.dll", NULL,
 };
 static const char *const g_later_names[] = {
     "DirectDrawCreate", "DirectDrawEnumerateExA",
-    "D3DXCompileShader", "D3DXCompileShaderFromFileA", "D3DXCreateFragmentLinker", "D3DXCreateSphere",
+    "D3DXCreateFragmentLinker", "D3DXCreateSphere",
     NULL,
 };
 

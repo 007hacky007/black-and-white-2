@@ -1,7 +1,8 @@
 /*
  * d3d_register.c - the graphics layers' imports and method implementations
  * (plan 4; plan 5 adds shaders, the shader assembler and effects; plan 7 the
- * sprite, the font and the gdi32 memory-font exports), registered before win32hle's
+ * sprite, the font and the gdi32 memory-font exports; plan 9 the lifted D3DX's
+ * forwarders and d3d9.dll's shader validator), registered before win32hle's
  * tables (register.c).
  */
 #include "bw2.h"
@@ -25,6 +26,7 @@ void fx_effect_register(void);
 void d3dx_sprite_register(void);
 void d3dx_font_register(void);
 void bw2_font_register(void);
+void d3dx_lifted_register(void);
 
 void bw2_d3d_register(void) {
     d3d9_adapter_register();
@@ -46,4 +48,5 @@ void bw2_d3d_register(void) {
     d3dx_sprite_register();
     d3dx_font_register();
     bw2_font_register();
+    d3dx_lifted_register();
 }

@@ -63,8 +63,10 @@ def test_boot_to_front_end(tmp_path):
     assert (face, height, weight) == ("Courier New", "-16", "400") and source.startswith("/"), fonts[0]
     assert [f[:3] for f in fonts[1:]] == [("Arial Narrow", str(h), "400") for h in ARIAL_NARROW_HEIGHTS], fonts
     assert all(f[3] == "memory" for f in fonts[1:]), fonts
-    # the script plugin loads as a lifted DLL with every import answered
-    assert "scriptlibraryr.dll: lifted DLL at 0x10000000, 0 imports unanswered" in r.stderr, tail
+    # the script plugin loads as a lifted DLL. 12 of its imports have no answer, each bound to a stub that
+    # stops by name if called: its crash reporter's dbghelp calls (SymInitialize, StackWalk and 6 more),
+    # DebugBreak, IsDebuggerPresent, PeekNamedPipe and GDI's DeleteObject; the boot calls none of them
+    assert "scriptlibraryr.dll: lifted DLL at 0x10000000, 12 imports unanswered" in r.stderr, tail
     # audio: one streaming buffer, and the mixer plays non-silent seconds of it
     bufs = [ln for ln in lines if ln.startswith("[bw2] audio buffer ")]
     assert bufs == ["[bw2] audio buffer 1: 2 ch, 44100 Hz, 16 bit, 21504 bytes, flags 0x18000"], bufs
