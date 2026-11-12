@@ -324,10 +324,14 @@ void mtl_tex_upload(struct mtl_ctx *cc, mtl_obj tex, uint32_t slice, uint32_t le
                     uint32_t slice_pitch) {
     MtlCtx *c = ctx(cc);
     id<MTLTexture> t = (__bridge id<MTLTexture>)tex;
-    uint32_t rows = is_bc(t.pixelFormat) ? (h + 3) / 4 : h;
+    uint32_t rows = is_bc(t.pixelFormat) ? (h + 3) / 4 : h, dd = d ? d : 1;
     if (!slice_pitch) slice_pitch = pitch * rows;
-    id<MTLBuffer> b = [c.dev newBufferWithBytes:data length:(NSUInteger)slice_pitch * (d ? d : 1)
-                                         options:MTLResourceStorageModeShared];
+    /* Read only the bytes the box covers: a box that is not the whole level starts inside the
+     * caller's memory, so a whole slice from there would read past its end. */
+    NSUInteger rowb = (NSUInteger)(is_bc(t.pixelFormat) ? (w + 3) / 4 : w) * fmt_bytes(t.pixelFormat);
+    NSUInteger span = (NSUInteger)slice_pitch * (dd - 1) + (NSUInteger)pitch * (rows - 1) + rowb;
+    id<MTLBuffer> b = [c.dev newBufferWithLength:(NSUInteger)slice_pitch * dd options:MTLResourceStorageModeShared];
+    memcpy(b.contents, data, span);
     [mtl_blit(c) copyFromBuffer:b sourceOffset:0 sourceBytesPerRow:pitch sourceBytesPerImage:slice_pitch
                      sourceSize:MTLSizeMake(w, h, d ? d : 1) toTexture:t destinationSlice:slice
                destinationLevel:level destinationOrigin:MTLOriginMake(x, y, z)];
