@@ -2101,7 +2101,7 @@ class Lifter:
             t = ops[0].imm if ops and ops[0].type == X86_OP_IMM else None
             reg = 'ecx' if m == 'jecxz' else 'LO16(ecx)'
             if t is not None:
-                lines.append(f"if ({reg} == 0) {self._goto(t, insn)} {comment}")
+                lines.append(f"if ({reg} == 0) {self._branch(t, insn)} {comment}")
 
         elif m in ('loop', 'loope', 'loopne'):
             # loope/loopne also test ZF (je/jne's condition), never CF. The
@@ -2112,10 +2112,10 @@ class Lifter:
             # from a corrupt destination.
             t = ops[0].imm if ops and ops[0].type == X86_OP_IMM else None
             if t is not None and m == 'loop':
-                lines.append(f"if (--ecx != 0) {self._goto(t, insn)} {comment}")
+                lines.append(f"if (--ecx != 0) {self._branch(t, insn)} {comment}")
             elif t is not None:
                 cond = self._make_condition('je' if m == 'loope' else 'jne')
-                lines.append(f"{{ int _zc = ({cond}); if (--ecx != 0 && _zc) {self._goto(t, insn)} }} {comment}")
+                lines.append(f"{{ int _zc = ({cond}); if (--ecx != 0 && _zc) {self._branch(t, insn)} }} {comment}")
 
         elif m == 'scasd':
             lines.append(f"_flag_a = eax; _flag_b = MEM32(edi); _flag_k = FK_CMP; "
@@ -2306,6 +2306,13 @@ class Lifter:
             lines.append("    ;")
 
         return lines
+
+    def _branch(self, target: int, insn) -> str:
+        """A conditional branch's taken side: a goto, or a dispatch when the target has
+        no label in this function (bytes that were never code, as with a jcc)."""
+        if self._labels is not None and target not in self._labels:
+            return f"{{ RECOMP_ITAIL(0x{target:08X}u); return; }}"
+        return self._goto(target, insn)
 
     def _goto(self, target: int, insn) -> str:
         """A branch to a label. One that goes back (a loop) first lets another

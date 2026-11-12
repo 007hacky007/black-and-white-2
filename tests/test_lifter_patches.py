@@ -45,3 +45,18 @@ def test_backedge_emitted(lifted_c):
     assert "RECOMP_BACKEDGE" in c, c
     c = lifted_c(make_pe([(".text", b"\x90\xeb\xfd", CODE)], {}, 0x1000), 0x401000)
     assert "RECOMP_BACKEDGE" in c, c
+
+
+def test_loop_and_jecxz_to_a_target_with_no_block_dispatch(lifted_c):
+    # Data in .text decoded as code: a loop/jecxz whose target does not decode has no
+    # label, so the branch dispatches (loudly, through RECOMP_ITAIL) like a jcc does,
+    # instead of an undeclared goto (d3dx9_25.dll 0x08005C6D: loope).
+    bad = b"\xff\xff"                                  # not an instruction
+    for op in (b"\xe2", b"\xe1", b"\xe0", b"\xe3"):    # loop, loope, loopne, jecxz
+        code = op + b"\x02" + b"\xc3\xcc" + bad
+        c = lifted_c(make_pe([(".text", code, CODE)], {}, 0x1000), 0x401000)
+        assert "goto L_00401004" not in c, c
+        assert "RECOMP_ITAIL(0x00401004u); return;" in c, c
+    # a loop to a real label still jumps there
+    c = lifted_c(make_pe([(".text", b"\x40\xe2\xfd\xc3", CODE)], {}, 0x1000), 0x401000)
+    assert "goto L_00401000;" in c, c
