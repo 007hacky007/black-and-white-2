@@ -71,6 +71,12 @@ mtl_obj mtl_library_async(const char *msl, const char *name) {
     return (__bridge_retained void *)l;
 }
 
+const char *mtl_library_error(mtl_obj h) {
+    MtlAsyncLib *l = (__bridge MtlAsyncLib *)h;
+    dispatch_group_wait(l.done, DISPATCH_TIME_FOREVER);
+    return l.lib ? NULL : l.err.description.UTF8String;
+}
+
 static id<MTLLibrary> library_wait(mtl_obj h) {
     MtlAsyncLib *l = (__bridge MtlAsyncLib *)h;
     dispatch_group_wait(l.done, DISPATCH_TIME_FOREVER);
@@ -247,7 +253,9 @@ static id<MTLRenderPipelineState> pipeline(MtlCtx *c, const struct ff_draw *d) {
     memset(&key, 0, sizeof key);
     if (!d->vs) key.vk = *d->vk;          /* with a shader, the stage's key is the shader and its variant */
     else key.vs_hash = d->vs->hash, memcpy(key.vs_var, d->vs->variant, sizeof key.vs_var);
-    key.pk = *d->pk, key.nattr = d->nattr;
+    if (!d->ps) key.pk = *d->pk;
+    else key.ps_hash = d->ps->hash, memcpy(key.ps_var, d->ps->variant, sizeof key.ps_var);
+    key.nattr = d->nattr;
     key.points = d->prim == 1;
     memcpy(key.attr, d->attr, sizeof d->attr[0] * d->nattr);
     for (uint32_t i = 0; i < d->nattr; i++) key.stride[d->attr[i].stream] = d->stream_stride[d->attr[i].stream];
@@ -266,12 +274,13 @@ static id<MTLRenderPipelineState> pipeline(MtlCtx *c, const struct ff_draw *d) {
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     if (d->vs) {                                        /* the stages from separate libraries */
         pd.vertexFunction = [library_wait(d->vs->lib) newFunctionWithName:@"vsh"];
-        pd.fragmentFunction = [library(c.dev, ff_msl_fragment(d->pk, 8)) newFunctionWithName:@"fff"];
+        if (!d->ps) pd.fragmentFunction = [library(c.dev, ff_msl_fragment(d->pk, 8)) newFunctionWithName:@"fff"];
     } else {
         id<MTLLibrary> lib = library(c.dev, ff_msl(d->vk, d->pk));
         pd.vertexFunction = [lib newFunctionWithName:@"ffv"];
-        pd.fragmentFunction = [lib newFunctionWithName:@"fff"];
+        if (!d->ps) pd.fragmentFunction = [lib newFunctionWithName:@"fff"];
     }
+    if (d->ps) pd.fragmentFunction = [library_wait(d->ps->lib) newFunctionWithName:@"psh"];
     MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
     for (uint32_t i = 0; i < d->nattr; i++) {
         const struct ff_attr *a = &d->attr[i];
@@ -312,8 +321,8 @@ static id<MTLRenderPipelineState> pipeline(MtlCtx *c, const struct ff_draw *d) {
     }
     if (!p) p = [c.dev newRenderPipelineStateWithDescriptor:pd error:&err];
     if (!p) {
-        fprintf(stderr, "[bw2] FATAL: d3d9: %s pipeline: %s\n", d->vs ? "vertex shader" : "fixed-function",
-                err.description.UTF8String);
+        fprintf(stderr, "[bw2] FATAL: d3d9: %s vertex and %s pixel pipeline: %s\n", d->vs ? "shader" : "fixed-function",
+                d->ps ? "shader" : "fixed-function", err.description.UTF8String);
         abort();
     }
     if (g_archive && !g_require_hits) {
@@ -435,12 +444,13 @@ void mtl_draw(struct mtl_ctx *cc, const struct ff_draw *d) {
         [e setVertexBytes:d->vs->f length:d->vs->fsize atIndex:1];
         [e setVertexBytes:d->vs->ib length:d->vs->ibsize atIndex:2];
     }
+    if (d->ps) [e setFragmentBytes:d->ps->f length:d->ps->fsize atIndex:1];
     for (int i = 0; i < 16; i++)
         if (d->stream_buf[i])
             [e setVertexBuffer:(__bridge id<MTLBuffer>)d->stream_buf[i] offset:d->stream_off[i]
                        atIndex:FF_STREAM_BUFFER0 + i];
-    for (int i = 0; i < d->pk->nstages; i++)
-        if (d->pk->textype[i]) {
+    for (int i = 0; i < 16; i++)                        /* the samplers the draw bound (ff stages or a shader's) */
+        if (d->tex[i]) {
             [e setFragmentTexture:(__bridge id<MTLTexture>)d->tex[i] atIndex:i];
             [e setFragmentSamplerState:sampler(c, &d->smp[i]) atIndex:i];
         }

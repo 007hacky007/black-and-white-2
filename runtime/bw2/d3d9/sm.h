@@ -142,4 +142,23 @@ struct sm_vs_variant {
  * version, the instruction and its token offset. */
 char *sm_msl_vertex(const struct sm_shader *s, const struct sm_vs_variant *v);
 
+/* Task 4: a pixel shader becomes one `fragment FOut psh(VOut in [[stage_in]], ...)`: buffer(0) plan 4's PU
+ * uniforms, buffer(1) float4 c[32] (ps 1.x constants arrive clamped to [-1, 1]), texture and sampler n for
+ * sampler n (ps 1.x: stage n). The variant is what the draw adds: per sampler the type of the bound texture
+ * (SM_TEX_*; none reads (0, 0, 0, 1); the coordinates it takes follow the bound type), for ps 1.1-1.3 the
+ * stage's D3DTTFF_PROJECTED divisor (the component, 1-4; 0 none), and plan 4's fog (ff_pkey.fog), alpha
+ * function (0 off), flat shading and sRGB write, all applied after the shader as the fixed pipeline does. */
+enum { SM_TEX_NONE, SM_TEX_2D, SM_TEX_CUBE, SM_TEX_VOLUME };
+struct sm_ps_variant {
+    uint8_t textype[16];
+    uint8_t proj[8];
+    uint8_t fog, alpha_func, flat, srgb;
+};
+/* The samplers a pixel shader reads (bit n: sampler or stage n), and for ps 1.1-1.3 the stages whose
+ * coordinates D3DTTFF_PROJECTED can divide. */
+uint32_t sm_ps_samplers(const struct sm_shader *s, uint32_t *projectable);
+/* The usual draw: each sampler read holds a texture of its dcl's type (2D for ps 1.x), nothing else. */
+void sm_ps_variant_default(const struct sm_shader *s, struct sm_ps_variant *v);
+char *sm_msl_fragment(const struct sm_shader *s, const struct sm_ps_variant *v);
+
 #endif

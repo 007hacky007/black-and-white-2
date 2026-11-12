@@ -1,7 +1,7 @@
 /*
  * sm_selftest.c - the shader assembler and decoder (plan 5 Task 2), called
  * directly and through D3DX's imports as lifted code calls them, and vertex
- * shaders drawn on a headless device (Task 3). Built with
+ * (Task 3) and pixel (Task 4) shaders drawn on a headless device. Built with
  * the engine (minus main.c) by tests/test_shaders.py;
  * `sm_selftest <group> [arg]` runs one group and prints "<group>: <n> failed".
  *
@@ -9,6 +9,7 @@
  * as assembly, assemble that, and compare the tokens.
  */
 #include <dirent.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1036,6 +1037,504 @@ static void group_vs_loud(void) {
     printf("vs_loud: returned\n");
 }
 
+/* ---- Task 4: pixel shaders on Metal ---- */
+
+enum { DV_CreateCubeTexture = 25, DV_CreatePixelShader = 106, DV_SetPixelShader = 107, DV_GetPixelShader = 108,
+       DV_SetPixelShaderConstantF = 109 };
+enum { CT_LockRect = 19, CT_UnlockRect };
+#define U8(x) ((float)(x) / 255.0f)
+
+/* pretransformed vertices: XYZRHW, DIFFUSE, SPECULAR and two 4-component texture coordinate sets */
+#define PV_FVF 0xA02C4u
+struct pv { float x, y, z, rhw; uint32_t c0, c1; float t0[4], t1[4]; };
+#define PV_DIFFUSE 0x80C04020u
+#define PV_SPECULAR 0x40FF8000u
+
+static uint32_t ps_new(uint32_t dev, const char *src) {
+    uint32_t *t = NULL, nt = 0, out = gmem(4);
+    char *errs = NULL;
+    if (sm_assemble(src, strlen(src), NULL, &t, &nt, &errs)) {
+        printf("FAIL does not assemble:\n%s\n%s", src, errs);
+        fails++;
+        free(errs);
+        return 0;
+    }
+    uint32_t g = gbytes(t, 4 * nt);
+    free(t);
+    CHECKEQ(vcall(dev, DV_CreatePixelShader, 2, g, out), D3D_OK);
+    return MEM32(out);
+}
+static void psf(uint32_t dev, uint32_t start, const float *v, uint32_t n) {
+    CHECKEQ(vcall(dev, DV_SetPixelShaderConstantF, 3, start, gbytes(v, 16 * n), n), D3D_OK);
+}
+/* the whole 64x64 target at z 0.5; t0 runs from t0a (left edge) to t0b (right edge), t1 is constant */
+static void pquad(uint32_t dev, const float *t0a, const float *t0b, const float *t1) {
+    static const float zero[4];
+    struct pv q[4];
+    const float xy[4][2] = { { -0.5f, -0.5f }, { 63.5f, -0.5f }, { -0.5f, 63.5f }, { 63.5f, 63.5f } };
+    for (int i = 0; i < 4; i++) {
+        q[i] = (struct pv){ xy[i][0], xy[i][1], 0.5f, 1, PV_DIFFUSE, PV_SPECULAR, { 0 }, { 0 } };
+        memcpy(q[i].t0, i & 1 ? (t0b ? t0b : zero) : (t0a ? t0a : zero), 16);
+        memcpy(q[i].t1, t1 ? t1 : zero, 16);
+    }
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, PV_FVF), D3D_OK);
+    draw_up(dev, 5, 2, q, 4, sizeof q[0]);
+}
+static uint32_t tex2d(uint32_t dev, uint32_t w, uint32_t h, const uint32_t *px) {
+    uint32_t out = gmem(4), lr = gmem(8);
+    CHECKEQ(vcall(dev, DV_CreateTexture, 8, w, h, 1u, 0u, FMT_A8R8G8B8, 1u, out, 0u), D3D_OK);
+    uint32_t t = MEM32(out);
+    CHECKEQ(vcall(t, TX_LockRect, 4, 0u, lr, 0u, 0u), D3D_OK);
+    for (uint32_t y = 0; y < h; y++) memcpy((uint8_t *)hle_ptr(MEM32(lr + 4)) + y * MEM32(lr), px + w * y, 4 * w);
+    CHECKEQ(vcall(t, TX_UnlockRect, 1, 0u), D3D_OK);
+    return t;
+}
+/* a 1x1 cube texture, one colour per face (+X -X +Y -Y +Z -Z) */
+static uint32_t texcube(uint32_t dev, const uint32_t *faces) {
+    uint32_t out = gmem(4), lr = gmem(8);
+    CHECKEQ(vcall(dev, DV_CreateCubeTexture, 7, 1u, 1u, 0u, FMT_A8R8G8B8, 1u, out, 0u), D3D_OK);
+    uint32_t t = MEM32(out);
+    for (uint32_t f = 0; f < 6; f++) {
+        CHECKEQ(vcall(t, CT_LockRect, 5, f, 0u, lr, 0u, 0u), D3D_OK);
+        MEM32(MEM32(lr + 4)) = faces[f];
+        CHECKEQ(vcall(t, CT_UnlockRect, 2, f, 0u), D3D_OK);
+    }
+    return t;
+}
+static void px_float(uint32_t px, float *f) {
+    f[0] = U8(px >> 16 & 0xFF), f[1] = U8(px >> 8 & 0xFF), f[2] = U8(px & 0xFF), f[3] = U8(px >> 24);
+}
+/* one pixel shader drawn over the target through pretransformed vertices; the centre pixel */
+static uint32_t ps_draw(uint32_t dev, uint32_t rt, uint32_t ps, const float *t0a, const float *t0b, const float *t1) {
+    CHECKEQ(vcall(dev, DV_SetPixelShader, 1, ps), D3D_OK);
+    clear(dev, 0xFF0000FFu);
+    pquad(dev, t0a, t0b, t1);
+    read_rt(dev, rt, 64, 64, g_px);
+    return g_px[32 * 64 + 32];
+}
+static uint32_t ps_run(uint32_t dev, uint32_t rt, const char *src, const float (*c)[4], int nc, const float *t0,
+                       const float *t1) {
+    uint32_t ps = ps_new(dev, src);
+    if (!ps) return 0;
+    if (nc) psf(dev, 0, c[0], (uint32_t)nc);
+    uint32_t px = ps_draw(dev, rt, ps, t0, t0, t1);
+    CHECKEQ(vcall(dev, DV_SetPixelShader, 1, 0u), D3D_OK);
+    CHECKEQ(vcall(ps, 2, 0), 0);
+    return px;
+}
+static uint32_t ps_device(uint32_t *rt) {
+    uint32_t dev = new_device(64, 64);
+    *rt = argb_target(dev, 64, 64);
+    return dev;
+}
+
+/* Each ps instruction the game uses: c0-c3 set, v0 PV_DIFFUSE, v1 PV_SPECULAR. */
+#define P20 "ps_2_0\n"
+static const struct vs_case g_ps_cases[] = {
+    { "add", "ps_1_1\nadd r0, c0, c1\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.3f, 0.5f, 0.7f, 0.9f } },
+    { "sub", "ps_1_1\nsub r0, c1, c0\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.4f, 0.6f, 0.8f } }, { 0.1f, 0.2f, 0.3f, 0.4f } },
+    { "mul", "ps_1_1\nmul r0, c0, c1\n", { { 0.5f, 0.5f, 0.25f, 1 }, { 0.2f, 0.4f, 0.8f, 0.6f } }, { 0.1f, 0.2f, 0.2f, 0.6f } },
+    { "mad", "ps_1_1\nmad r0, c0, c1, c2\n", { { 0.5f, 0.5f, 0.5f, 0.5f }, { 0.2f, 0.4f, 0.6f, 0.8f }, { 0.1f, 0.1f, 0.1f, 0.1f } },
+      { 0.2f, 0.3f, 0.4f, 0.5f } },
+    { "mov", "ps_1_1\nmov r0, c0\n", { { 0.1f, 0.9f, 0.3f, 0.6f } }, { 0.1f, 0.9f, 0.3f, 0.6f } },
+    { "mov_v0", "ps_1_1\nmov r0, v0\n", { { 0 } }, { U8(0xC0), U8(0x40), U8(0x20), U8(0x80) } },
+    { "mov_v1", "ps_1_1\nmov r0, v1\n", { { 0 } }, { 1, U8(0x80), 0, U8(0x40) } },
+    { "lrp", "ps_1_1\nlrp r0, c0, c1, c2\n", { { 0, 1, 0.5f, 0.25f }, { 0.8f, 0.8f, 0.8f, 0.8f }, { 0.4f, 0.4f, 0.4f, 0.4f } },
+      { 0.4f, 0.8f, 0.6f, 0.5f } },
+    { "dp3", "ps_1_1\ndp3 r0, c0, c1\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.2f, 0.2f, 0.2f, 0.2f } },
+    { "def11", "ps_1_1\ndef c5, 0.5, 0.25, 0.125, 1\nmov r0, c5\n", { { 0 } }, { 0.5f, 0.25f, 0.125f, 1 } },
+    /* 1.1-1.3 cnd reads r0.a only; 1.4 tests each component */
+    { "cnd11_true", "ps_1_1\nmov r0, c0\ncnd r0, r0.a, c1, c2\n",
+      { { 0, 0, 0, 0.75f }, { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.5f, 0.6f, 0.7f, 0.8f } }, { 0.1f, 0.2f, 0.3f, 0.4f } },
+    { "cnd11_half", "ps_1_1\nmov r0, c0\ncnd r0, r0.a, c1, c2\n",
+      { { 1, 1, 1, 0.5f }, { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.5f, 0.6f, 0.7f, 0.8f } }, { 0.5f, 0.6f, 0.7f, 0.8f } },
+    { "cnd14", "ps_1_4\ncnd r0, c0, c1, c2\n",
+      { { 0.75f, 0.25f, 0.6f, 0.5f }, { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.5f, 0.6f, 0.7f, 0.8f } }, { 0.1f, 0.6f, 0.3f, 0.8f } },
+    { "cmp12", "ps_1_2\ncmp r0, c0, c1, c2\n",
+      { { 0.5f, -0.5f, 0, -0.01f }, { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.5f, 0.6f, 0.7f, 0.8f } }, { 0.1f, 0.6f, 0.3f, 0.8f } },
+    { "dp4_14", "ps_1_4\ndp4 r0, c0, c1\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.4f, 0.4f, 0.4f, 0.4f } },
+    /* ps 1.x constants are clamped to [-1, 1]; 2.0's are not */
+    { "const_clamp11", "ps_1_1\nmul r0, c0, c1\n", { { 2, 2, -2, 2 }, { 0.25f, 0.25f, 0.25f, 0.25f } }, { 0.25f, 0.25f, 0, 0.25f } },
+    { "const20", P20 "mul r0, c0, c1\nmov oC0, r0\n", { { 2, 2, 2, 2 }, { 0.25f, 0.125f, 0.25f, 0.25f } }, { 0.5f, 0.25f, 0.5f, 0.5f } },
+    { "abs", P20 "abs r0, c0\nmov oC0, r0\n", { { -0.25f, 0.5f, -0.75f, 1 } }, { 0.25f, 0.5f, 0.75f, 1 } },
+    { "dp2add", P20 "dp2add r0, c0, c1, c2.x\nmov oC0, r0\n", { { 0.5f, 0.25f, 9, 9 }, { 0.4f, 0.8f, 9, 9 }, { 0.1f } },
+      { 0.5f, 0.5f, 0.5f, 0.5f } },
+    { "dp3_20", P20 "dp3 r0, c0, c1\nmov oC0, r0\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.2f, 0.2f, 0.2f, 0.2f } },
+    { "dp4", P20 "dp4 r0, c0, c1\nmov oC0, r0\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.4f, 0.4f, 0.4f, 0.4f } },
+    { "max", P20 "max r0, c0, c1\nmov oC0, r0\n", { { 0.1f, 0.9f, 0.3f, 0.6f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.2f, 0.9f, 0.4f, 0.6f } },
+    { "min", P20 "min r0, c0, c1\nmov oC0, r0\n", { { 0.1f, 0.9f, 0.3f, 0.6f }, { 0.2f, 0.3f, 0.4f, 0.5f } }, { 0.1f, 0.3f, 0.3f, 0.5f } },
+    { "nrm", P20 "nrm r0, c0\nmov oC0, r0\n", { { 0.3f, 0, 0.4f, 0.25f } }, { 0.6f, 0, 0.8f, 0.5f } },
+    { "pow", P20 "pow r0, c0.x, c0.y\nmov oC0, r0\n", { { 0.25f, 0.5f } }, { 0.5f, 0.5f, 0.5f, 0.5f } },
+    { "rsq", P20 "rsq r0, c0.w\nmov oC0, r0\n", { { 0, 0, 0, 4 } }, { 0.5f, 0.5f, 0.5f, 0.5f } },
+    { "rcp", P20 "rcp r0, c0.z\nmov oC0, r0\n", { { 0, 0, 4 } }, { 0.25f, 0.25f, 0.25f, 0.25f } },
+    { "cmp20", P20 "cmp r0, c0, c1, c2\nmov oC0, r0\n",
+      { { 0.5f, -0.5f, 0, -0.01f }, { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.5f, 0.6f, 0.7f, 0.8f } }, { 0.1f, 0.6f, 0.3f, 0.8f } },
+    { "lrp20", P20 "lrp r0, c0, c1, c2\nmov oC0, r0\n",
+      { { 0, 1, 0.5f, 0.25f }, { 0.8f, 0.8f, 0.8f, 0.8f }, { 0.4f, 0.4f, 0.4f, 0.4f } }, { 0.4f, 0.8f, 0.6f, 0.5f } },
+    { "mad20", P20 "mad_pp r0, c0, c1, c2\nmov oC0, r0\n",
+      { { 0.5f, 0.5f, 0.5f, 0.5f }, { 0.2f, 0.4f, 0.6f, 0.8f }, { 0.1f, 0.1f, 0.1f, 0.1f } }, { 0.2f, 0.3f, 0.4f, 0.5f } },
+    { "add_neg20", P20 "add r0, c1, -c0\nmov oC0, r0\n", { { 0.1f, 0.2f, 0.3f, 0.4f }, { 0.2f, 0.4f, 0.6f, 0.8f } },
+      { 0.1f, 0.2f, 0.3f, 0.4f } },
+    { "v0_20", P20 "dcl v0\ndcl v1\nadd r0, v0, v1\nmul oC0, r0, c0\n", { { 0.5f, 0.5f, 0.5f, 0.5f } },
+      { 0.5f * (U8(0xC0) + 1), 0.5f * (U8(0x40) + U8(0x80)), 0.5f * U8(0x20), 0.5f * (U8(0x80) + U8(0x40)) } },
+    { "def20", P20 "def c5, 0.5, 0.25, 0.125, 1\nmov oC0, c5\n", { { 0 } }, { 0.5f, 0.25f, 0.125f, 1 } },
+    { "sat20", P20 "add_sat r0, c0, c0\nmul oC0, r0, c1\n", { { 0.75f, 0.25f, 0, 1 }, { 0.5f, 0.5f, 0.5f, 0.5f } },
+      { 0.5f, 0.25f, 0, 0.5f } },
+};
+
+static void group_ps_ops(void) {
+    uint32_t rt, dev = ps_device(&rt);
+    for (size_t i = 0; i < sizeof g_ps_cases / sizeof *g_ps_cases; i++) {
+        const struct vs_case *k = &g_ps_cases[i];
+        expect_px(k->name, ps_run(dev, rt, k->src, k->c, 4, NULL, NULL), k->want);
+    }
+}
+
+/* the source modifiers on a texture read, the shifts, saturate and co-issue */
+static void group_ps_modifiers(void) {
+    uint32_t rt, dev = ps_device(&rt);
+    const uint32_t texel = 0xA0C0E060u;                        /* a r g b */
+    const float t[4] = { U8(0xC0), U8(0xE0), U8(0x60), U8(0xA0) };
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, tex2d(dev, 1, 1, &texel)), D3D_OK);
+    struct { const char *name, *src; float c[2][4]; float want[4]; } k[16];
+    int n = 0;
+#define K(NAME, SRC, C0, C1, W) do { k[n].name = NAME, k[n].src = SRC; \
+        const float c0_[4] = C0, c1_[4] = C1, w_[4] = W; memcpy(k[n].c[0], c0_, 16), memcpy(k[n].c[1], c1_, 16); \
+        memcpy(k[n].want, w_, 16); n++; } while (0)
+#define F4(a, b, c, d) { a, b, c, d }
+#define ALL4(e) { e(0), e(1), e(2), e(3) }
+#define BIAS(i) (t[i] - 0.5f)
+#define BX2(i) (2 * t[i] - 1)
+#define COMP(i) (1 - t[i])
+#define NEGBX2(i) (2 - 2 * t[i])
+#define HALF(i) (0.5f * t[i])
+#define SAT2(i) (0.5f * (2 * t[i] > 1 ? 1 : 2 * t[i]))
+    K("bias", "ps_1_1\ntex t0\nmov r0, t0_bias\n", F4(0, 0, 0, 0), F4(0, 0, 0, 0), ALL4(BIAS));
+    K("bx2", "ps_1_1\ntex t0\nmov r0, t0_bx2\n", F4(0, 0, 0, 0), F4(0, 0, 0, 0), ALL4(BX2));
+    K("neg_bias", "ps_1_1\ntex t0\nadd r0, c0, -t0_bias\n", F4(0.5f, 0.5f, 0.5f, 0.5f), F4(0, 0, 0, 0), ALL4(COMP));
+    K("neg_bx2", "ps_1_1\ntex t0\nadd r0, c0, -t0_bx2\n", F4(1, 1, 1, 1), F4(0, 0, 0, 0), ALL4(NEGBX2));
+    K("comp", "ps_1_1\ntex t0\nmov r0, 1-t0\n", F4(0, 0, 0, 0), F4(0, 0, 0, 0), ALL4(COMP));
+    K("negate", "ps_1_1\ntex t0\nadd r0, c0, -t0\n", F4(1, 1, 1, 1), F4(0, 0, 0, 0), ALL4(COMP));
+    K("x2", "ps_1_4\ntexld r0, t0\nmul r0, r0_x2, c0\n", F4(0.5f, 0.25f, 1, 0.5f), F4(0, 0, 0, 0),
+      F4(t[0], 0.5f * t[1], 2 * t[2], t[3]));
+    K("abs", "ps_2_0\ndcl t0\ndcl_2d s0\ntexld r0, t0, s0\nadd r0, r0, c0\nabs r0, r0\nmov oC0, r0\n",
+      F4(-1, -1, -1, -1), F4(0, 0, 0, 0), ALL4(COMP));
+    K("shift_x2", "ps_1_1\ntex t0\nmul_x2 r0, t0, c0\n", F4(0.25f, 0.25f, 0.25f, 0.25f), F4(0, 0, 0, 0), ALL4(HALF));
+    K("shift_x4", "ps_1_1\ntex t0\nmul_x4 r0, t0, c0\n", F4(0.25f, 0.25f, 0.25f, 0.25f), F4(0, 0, 0, 0), F4(t[0], t[1], t[2], t[3]));
+    K("shift_d2", "ps_1_1\ntex t0\nmov_d2 r0, t0\n", F4(0, 0, 0, 0), F4(0, 0, 0, 0), ALL4(HALF));
+    K("shift_x8_d8", "ps_1_4\nmov_x8 r1, c0\nmov_d8 r0, r1\n", F4(0.1f, 0.05f, 0.025f, 0.125f), F4(0, 0, 0, 0),
+      F4(0.1f, 0.05f, 0.025f, 0.125f));
+    K("saturate", "ps_1_1\ntex t0\nadd_sat r1, t0, t0\nmul r0, r1, c0\n", F4(0.5f, 0.5f, 0.5f, 0.5f), F4(0, 0, 0, 0), ALL4(SAT2));
+    K("coissue", "ps_1_1\ntex t0\nmul r0.rgb, t0, c0\n+mov r0.a, c1\n", F4(0.5f, 0.5f, 0.5f, 0.5f), F4(0, 0, 0, 0.3f),
+      F4(0.5f * t[0], 0.5f * t[1], 0.5f * t[2], 0.3f));
+    K("coissue14", "ps_1_4\ntexld r0, t0\nmul r0.rgb, r0, c0\n+add r0.a, r0, c1\n", F4(0.5f, 0.5f, 0.5f, 0.5f),
+      F4(0, 0, 0, -0.5f), F4(0.5f * t[0], 0.5f * t[1], 0.5f * t[2], t[3] - 0.5f));
+    const float t0[4] = { 0.5f, 0.5f, 0, 1 };
+    for (int i = 0; i < n; i++) expect_px(k[i].name, ps_run(dev, rt, k[i].src, k[i].c, 2, t0, NULL), k[i].want);
+    /* _dz and _dw divide the coordinates before ps_1_4 reads the texture (2x2, point sampled) */
+    static const uint32_t tx2[4] = { 0xFF102030u, 0xFF405060u, 0xFF708090u, 0xFFA0B0C0u };
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, tex2d(dev, 2, 2, tx2)), D3D_OK);
+    float want[4];
+    px_float(tx2[1], want);
+    const float tw[4] = { 2.25f, 0.75f, 0, 3 }, tz[4] = { 2.25f, 0.75f, 3, 0 };
+    expect_px("dw", ps_run(dev, rt, "ps_1_4\ntexld r0, t0_dw.xyw\n", NULL, 0, tw, NULL), want);
+    expect_px("dz", ps_run(dev, rt, "ps_1_4\ntexld r0, t0_dz.xyz\n", NULL, 0, tz, NULL), want);
+    expect_px("dw texcrd", ps_run(dev, rt, "ps_1_4\ntexcrd r1.rgb, t0_dw.xyw\nphase\ntexld r0, r1\n", NULL, 0,
+                                  tw, NULL), want);
+#undef K
+}
+
+static void group_ps_tex(void) {
+    uint32_t rt, dev = ps_device(&rt);
+    static const uint32_t tx2[4] = { 0xFF102030u, 0xFF405060u, 0xFF708090u, 0xFFA0B0C0u };
+    static const uint32_t faces[6] = { 0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFF00u, 0xFF00FFFFu, 0xFFFF00FFu };
+    uint32_t t2 = tex2d(dev, 2, 2, tx2), tc = texcube(dev, faces);
+    float want[4];
+    const float c10[4] = { 0.75f, 0.25f, 0, 1 }, c01[4] = { 0.25f, 0.75f, 0, 1 }, c00[4] = { 0.25f, 0.25f, 0, 1 };
+    /* ps_1_1 tex: the stage's texture with the set's coordinates, 2D and cube (a variant each) */
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, t2), D3D_OK);
+    px_float(tx2[1], want);
+    expect_px("tex 2d", ps_run(dev, rt, "ps_1_1\ntex t0\nmov r0, t0\n", NULL, 0, c10, NULL), want);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, tc), D3D_OK);
+    const float dy[4] = { 0, -1, 0.2f, 1 }, dx[4] = { 1, 0.1f, -0.2f, 1 };
+    px_float(faces[3], want);
+    expect_px("tex cube -y", ps_run(dev, rt, "ps_1_1\ntex t0\nmov r0, t0\n", NULL, 0, dy, NULL), want);
+    px_float(faces[0], want);
+    expect_px("tex cube +x", ps_run(dev, rt, "ps_1_1\ntex t0\nmov r0, t0\n", NULL, 0, dx, NULL), want);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, t2), D3D_OK);
+    /* ps_1_4: phase 1 copies the coordinates, phase 2 reads through them */
+    px_float(tx2[2], want);
+    expect_px("ps_1_4 phase", ps_run(dev, rt, "ps_1_4\ntexcrd r1.rgb, t0\nphase\ntexld r0, r1\n", NULL, 0, c01, NULL),
+              want);
+    px_float(tx2[1], want);
+    expect_px("ps_1_4 texld", ps_run(dev, rt, "ps_1_4\ntexld r0, t0\n", NULL, 0, c10, NULL), want);
+    /* ps_2_0 texld and texldp */
+    px_float(tx2[0], want);
+    expect_px("texld", ps_run(dev, rt, P20 "dcl t0\ndcl_2d s0\ntexld r0, t0, s0\nmov oC0, r0\n", NULL, 0, c00, NULL), want);
+    const float proj[4] = { 0.75f, 2.25f, 0, 3 };
+    px_float(tx2[2], want);
+    expect_px("texldp", ps_run(dev, rt, P20 "dcl t0\ndcl_2d s0\ntexldp r0, t0, s0\nmov oC0, r0\n", NULL, 0, proj, NULL),
+              want);
+    /* ps_1_1 texcoord: the coordinates as a colour, clamped, alpha 1 */
+    const float tcc[4] = { 1.5f, 0.25f, -0.5f, 0.3f }, wcc[4] = { 1, 0.25f, 0, 1 };
+    expect_px("texcoord", ps_run(dev, rt, "ps_1_1\ntexcoord t0\nmov r0, t0\n", NULL, 0, tcc, NULL), wcc);
+    /* a sampler with no texture reads (0, 0, 0, 1) */
+    const float black[4] = { 0, 0, 0, 1 };
+    expect_px("unbound", ps_run(dev, rt, P20 "dcl t0\ndcl_2d s1\ntexld r0, t0, s1\nmov oC0, r0\n", NULL, 0, c00, NULL),
+              black);
+    /* texkill: t0.x runs from -1 to 1; the left half keeps the clear colour */
+    const char *kills[2] = { P20 "dcl t0\ntexkill t0\ndef c0, 1, 1, 1, 1\nmov oC0, c0\n",
+                             "ps_1_1\ntexkill t0\nmov r0, c0\n" };
+    const float one[4] = { 1, 1, 1, 1 }, ka[4] = { -1, 0.5f, 0.5f, 1 }, kb[4] = { 1, 0.5f, 0.5f, 1 };
+    for (int i = 0; i < 2; i++) {
+        uint32_t ps = ps_new(dev, kills[i]);
+        psf(dev, 0, one, 1);
+        ps_draw(dev, rt, ps, ka, kb, NULL);
+        int kept = 0, killed = 0;
+        for (int y = 0; y < 64; y++)
+            for (int x = 0; x < 64; x++) {
+                uint32_t p = g_px[y * 64 + x];
+                if (x < 32) killed += p == 0xFF0000FFu;
+                else kept += p == 0xFFFFFFFFu;
+            }
+        if (killed != 32 * 64 || kept != 32 * 64) printf("FAIL texkill %d: killed %d kept %d\n", i, killed, kept), fails++;
+        CHECKEQ(vcall(dev, DV_SetPixelShader, 1, 0u), D3D_OK);
+        vcall(ps, 2, 0);
+    }
+}
+
+/* texbem: stage 1 read at its coordinates moved by stage 1's bump matrix times t0's red and green */
+static void group_ps_bump(void) {
+    uint32_t rt, dev = ps_device(&rt);
+    const uint32_t du = 0xFF804020u;                           /* r 0x80, g 0x40, b 0x20 */
+    uint32_t tx4[16];
+    for (int i = 0; i < 16; i++) tx4[i] = 0xFF000000u | (uint32_t)(i * 16) << 16 | (uint32_t)(255 - i * 16) << 8 | (uint32_t)(i * 7);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, tex2d(dev, 1, 1, &du)), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 1u, tex2d(dev, 4, 4, tx4)), D3D_OK);
+    const float tc1[4] = { 0.1f, 0.1f, 0, 1 };
+    struct { float m[4]; int texel; } k[] = {
+        { { 0, 0, 0, 0 }, 0 },                                 /* no movement: texel (0, 0) */
+        { { 0.5f, 0, 0, 0.5f }, 1 },                           /* (0.1 + 0.5 r, 0.1 + 0.5 g): (1, 0) */
+        { { 0, 1, 1, 0 }, 9 },                                 /* 01 and 10: (0.1 + g, 0.1 + r): (1, 2) */
+    };
+    float want[4];
+    for (size_t i = 0; i < sizeof k / sizeof *k; i++) {
+        for (int j = 0; j < 4; j++) tss(dev, 1, 7 + (uint32_t)j, f2u(k[i].m[j]));
+        px_float(tx4[k[i].texel], want);
+        char what[32];
+        snprintf(what, sizeof what, "texbem %zu", i);
+        expect_px(what, ps_run(dev, rt, "ps_1_1\ntex t0\ntexbem t1, t0\nmov r0, t1\n", NULL, 0, NULL, tc1), want);
+    }
+    /* texbeml: the colour times saturate(t0.b * lscale + loffset) */
+    tss(dev, 1, 22, f2u(0.5f)), tss(dev, 1, 23, f2u(0.25f));
+    float l = U8(0x20) * 0.5f + 0.25f;
+    px_float(tx4[1], want);
+    for (int j = 0; j < 3; j++) want[j] *= l;
+    for (int j = 0; j < 4; j++) tss(dev, 1, 7 + (uint32_t)j, f2u(k[1].m[j]));
+    expect_px("texbeml", ps_run(dev, rt, "ps_1_1\ntex t0\ntexbeml t1, t0\nmov r0, t1\n", NULL, 0, NULL, tc1), want);
+    /* ps_1_4 bem: r1.rg = c0.rg + the matrix of stage 1 (bem's destination) times r0.rg */
+    for (int j = 0; j < 4; j++) tss(dev, 1, 7 + (uint32_t)j, f2u(k[2].m[j]));
+    const float c[1][4] = { { 0.25f, 0.125f, 0.5f, 1 } };
+    const float wb[4] = { 0.25f + U8(0x40), 0.125f + U8(0x80), 0, 0 };
+    uint32_t px = ps_run(dev, rt, "ps_1_4\ntexld r0, t0\nbem r1.rg, c0, r0\nphase\nmov r0.rg, r1\nmov r0.ba, c0\n",
+                         c, 1, tc1, tc1);
+    float got[4];
+    px_float(px, got);
+    if (fabsf(got[0] - wb[0]) > 1.5f / 255 || fabsf(got[1] - wb[1]) > 1.5f / 255 || fabsf(got[2] - 0.5f) > 1.5f / 255)
+        printf("FAIL bem: pixel 0x%08X\n", px), fails++;
+}
+
+/* fog after the shader (vertex fog from oFog; linear table fog) and the alpha test after it */
+static void group_ps_fog_alpha(void) {
+    uint32_t rt, dev = ps_device(&rt);
+    rs(dev, 28, 1);                                            /* FOGENABLE */
+    rs(dev, 34, 0xFF00FF00u);                                  /* FOGCOLOR green */
+    rs(dev, 140, 3);                                           /* FOGVERTEXMODE LINEAR */
+    uint32_t ps = ps_new(dev, P20 "def c0, 0.25, 0.5, 1, 0.75\nmov oC0, c0\n");
+    /* vs_1_1 writes the fog factor 0.25: three quarters fog colour */
+    uint32_t d = vdecl(dev, 1, g_pos_decl);
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, d), D3D_OK);
+    uint32_t vs = vs_new(dev, V11 "mov oFog, c0.x\n");
+    const float f[4] = { 0.25f, 0, 0, 0 };
+    vsf(dev, 0, f, 1);
+    CHECKEQ(vcall(dev, DV_SetPixelShader, 1, ps), D3D_OK);
+    const float want_v[4] = { 0.0625f, 0.75f + 0.125f, 0.25f, 0.75f };
+    expect_px("vertex fog", draw_centre(dev, rt, vs), want_v);
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, 0u), D3D_OK);
+    /* table fog LINEAR 0..1 at z 0.5: half */
+    rs(dev, 35, 3);
+    rs(dev, 36, f2u(0.0f)), rs(dev, 37, f2u(1.0f));
+    const float want_t[4] = { 0.125f, 0.75f, 0.5f, 0.75f };
+    expect_px("table fog", ps_draw(dev, rt, ps, NULL, NULL, NULL), want_t);
+    rs(dev, 28, 0);
+    /* alpha test GREATER 0x80: alpha 0.25 is dropped, 0.75 kept */
+    rs(dev, 15, 1), rs(dev, 24, 0x80), rs(dev, 25, 5);
+    const float c[2][4] = { { 0.5f, 0.5f, 0.5f, 0.25f }, { 0.5f, 0.5f, 0.5f, 0.75f } };
+    uint32_t pa = ps_new(dev, P20 "mov oC0, c0\n");
+    psf(dev, 0, c[0], 1);
+    ps_draw(dev, rt, pa, NULL, NULL, NULL);
+    int clear_px = 0;
+    for (int i = 0; i < 64 * 64; i++) clear_px += g_px[i] == 0xFF0000FFu;
+    CHECKEQ(clear_px, 64 * 64);
+    psf(dev, 0, c[1], 1);
+    expect_px("alpha kept", ps_draw(dev, rt, pa, NULL, NULL, NULL), c[1]);
+    rs(dev, 15, 0);
+}
+
+/* a shader stage paired with the fixed-function stage of the other kind */
+static void group_mixed_stages(void) {
+    uint32_t rt, dev = ps_device(&rt);
+    /* the fixed vertex pipeline (diffuse, one texture coordinate) and ps_2_0 reading v0 and t0 */
+    rs(dev, 137, 0);                                           /* no lighting */
+    struct { float x, y, z; uint32_t c; float u, v; } q[4];
+    const float xy[4][2] = { { -1, 1 }, { 1, 1 }, { -1, -1 }, { 1, -1 } };
+    for (int i = 0; i < 4; i++) q[i] = (__typeof__(q[0])){ xy[i][0], xy[i][1], 0.5f, 0xFF804020u, 0.25f, 0.75f };
+    uint32_t ps = ps_new(dev, P20 "dcl v0\ndcl t0.xy\nmov r0, v0\nmov r0.xy, t0\nmov oC0, r0\n");
+    CHECKEQ(vcall(dev, DV_SetPixelShader, 1, ps), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, 0x142u), D3D_OK);
+    clear(dev, 0);
+    draw_up(dev, 5, 2, q, 4, sizeof q[0]);
+    read_rt(dev, rt, 64, 64, g_px);
+    const float want1[4] = { 0.25f, 0.75f, U8(0x20), 1 };
+    expect_px("ff vertex + ps_2_0", g_px[32 * 64 + 32], want1);
+    /* the second texture coordinate set comes through too, as stage 1's (ps_1_1 texcoord t1) */
+    struct { float x, y, z; uint32_t c; float u0, v0, u1, v1; } q2[4];
+    for (int i = 0; i < 4; i++) q2[i] = (__typeof__(q2[0])){ xy[i][0], xy[i][1], 0.5f, 0xFF804020u, 0.25f, 0.75f, 0.5f, 0.125f };
+    uint32_t ps11 = ps_new(dev, "ps_1_1\ntexcoord t1\nmul r0, t1, c0\n");
+    const float mask[4] = { 1, 1, 0, 1 };
+    psf(dev, 0, mask, 1);
+    CHECKEQ(vcall(dev, DV_SetPixelShader, 1, ps11), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, 0x242u), D3D_OK);
+    clear(dev, 0);
+    draw_up(dev, 5, 2, q2, 4, sizeof q2[0]);
+    read_rt(dev, rt, 64, 64, g_px);
+    const float want2[4] = { 0.5f, 0.125f, 0, 1 };
+    expect_px("ff vertex + ps_1_1 t1", g_px[32 * 64 + 32], want2);
+    CHECKEQ(vcall(dev, DV_SetPixelShader, 1, 0u), D3D_OK);
+    /* vs_1_1 and the fixed pixel pipeline: MODULATE TEXTURE DIFFUSE */
+    static const uint32_t tx2[4] = { 0xFF102030u, 0x80405060u, 0xFF708090u, 0xFFA0B0C0u };
+    CHECKEQ(vcall(dev, DV_SetTexture, 2, 0u, tex2d(dev, 2, 2, tx2)), D3D_OK);
+    tss(dev, 0, 1, 4), tss(dev, 0, 2, 2), tss(dev, 0, 3, 0);  /* colour MODULATE TEXTURE DIFFUSE */
+    tss(dev, 0, 4, 4), tss(dev, 0, 5, 2), tss(dev, 0, 6, 0);  /* alpha the same */
+    static const uint8_t rows[2][5] = { { 0, 0, 2, 0, 0 }, { 0, 12, 1, 5, 0 } };
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, vdecl(dev, 2, rows)), D3D_OK);
+    uint32_t vs = vs_new(dev, "vs_1_1\ndcl_position v0\ndcl_texcoord v1\nmov oPos, v0\nmov oD0, c0\nmov oT0, v1\n");
+    const float c0[4] = { 0.5f, 1, 0.25f, 1 };
+    vsf(dev, 0, c0, 1);
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, vs), D3D_OK);
+    clear(dev, 0);
+    struct xyzuv v[4] = { { -1, 1, 0.5f, 0.75f, 0.25f }, { 1, 1, 0.5f, 0.75f, 0.25f }, { -1, -1, 0.5f, 0.75f, 0.25f },
+                          { 1, -1, 0.5f, 0.75f, 0.25f } };
+    draw_up(dev, 5, 2, v, 4, sizeof v[0]);
+    read_rt(dev, rt, 64, 64, g_px);
+    float want3[4];
+    px_float(tx2[1], want3);
+    for (int i = 0; i < 4; i++) want3[i] *= c0[i];
+    expect_px("vs_1_1 + fixed pixel", g_px[32 * 64 + 32], want3);
+}
+
+/* SRGBWRITEENABLE: the shader's result is written sRGB-encoded */
+static void group_ps_srgb(void) {
+    uint32_t rt, dev = ps_device(&rt);
+    rs(dev, 194, 1);
+    const float want[4] = { 0.7353570f, 0.5370987f, 0.04045f, 1 };
+    expect_px("srgb", ps_run(dev, rt, P20 "def c0, 0.5, 0.25, 0.0031308, 1\nmov oC0, c0\n", NULL, 0, NULL, NULL), want);
+    rs(dev, 194, 0);
+    const float lin[4] = { 0.5f, 0.25f, 0.0031308f, 1 };
+    expect_px("linear", ps_run(dev, rt, P20 "def c0, 0.5, 0.25, 0.0031308, 1\nmov oC0, c0\n", NULL, 0, NULL, NULL), lin);
+}
+
+/* IDirect3DPixelShader9: GetFunction, GetDevice, references, Set/Get */
+static void group_ps_objects(void) {
+    uint32_t rt, dev = ps_device(&rt), out = gmem(4), size = gmem(4);
+    uint32_t *t = NULL, nt = 0;
+    char *errs = NULL;
+    const char *src = P20 "def c0, 0, 1, 0, 1\nmov oC0, c0\n";
+    CHECKEQ(sm_assemble(src, strlen(src), NULL, &t, &nt, &errs), 0);
+    uint32_t g = gbytes(t, 4 * nt);
+    CHECKEQ(vcall(dev, DV_CreatePixelShader, 2, g, out), D3D_OK);
+    uint32_t ps = MEM32(out);
+    CHECK(ps != 0);
+    CHECKEQ(refs(ps), 1);
+    CHECKEQ(vcall(ps, SH_GetFunction, 2, 0u, size), D3D_OK);
+    CHECKEQ(MEM32(size), 4 * nt);
+    uint32_t buf = gmem(4 * nt);
+    CHECKEQ(vcall(ps, SH_GetFunction, 2, buf, size), D3D_OK);
+    CHECK(!memcmp(hle_ptr(buf), t, 4 * nt));
+    free(t);
+    uint32_t r0 = refs(dev);
+    CHECKEQ(vcall(ps, SH_GetDevice, 1, out), D3D_OK);
+    CHECKEQ(MEM32(out), dev);
+    CHECKEQ(refs(dev), r0 + 1);
+    vcall(dev, 2, 0);
+    CHECKEQ(vcall(dev, DV_SetPixelShader, 1, ps), D3D_OK);
+    CHECKEQ(refs(ps), 2);
+    CHECKEQ(vcall(dev, DV_GetPixelShader, 1, out), D3D_OK);
+    CHECKEQ(MEM32(out), ps);
+    CHECKEQ(refs(ps), 3);
+    vcall(ps, 2, 0);
+    const float green[4] = { 0, 1, 0, 1 };
+    expect_px("shader", ps_draw(dev, rt, ps, NULL, NULL, NULL), green);
+    /* SetPixelShader(NULL): the fixed pixel pipeline again (stage 0 SELECTARG1 DIFFUSE) */
+    CHECKEQ(vcall(dev, DV_SetPixelShader, 1, 0u), D3D_OK);
+    CHECKEQ(refs(ps), 1);
+    float dif[4];
+    px_float(PV_DIFFUSE, dif);
+    expect_px("fixed", ps_draw(dev, rt, 0, NULL, NULL, NULL), dif);
+    CHECKEQ(vcall(dev, DV_CreatePixelShader, 2, 0u, out), D3DERR_INVALIDCALL_);
+    CHECKEQ(vcall(dev, DV_CreatePixelShader, 2, g, 0u), D3DERR_INVALIDCALL_);
+    CHECKEQ(vcall(dev, DV_CreatePixelShader, 2, gbytes(g_m4x4, sizeof g_m4x4), out), D3DERR_INVALIDCALL_);
+    CHECKEQ(vcall(ps, 2, 0), 0);
+}
+
+static void group_ps_loud(void) {
+    uint32_t dev = new_device(16, 16), out = gmem(4);
+    static const uint32_t ps30[] = { 0xFFFF0300u, 0x02000001, 0x800F0800, 0xA0E40000, 0x0000FFFF };
+    vcall(dev, DV_CreatePixelShader, 2, gbytes(ps30, sizeof ps30), out);
+    printf("ps_loud: returned\n");
+}
+
+/* Every shader file in dir (token streams) decodes, translates (the usual variant, and for pixel shaders a
+ * fogged, alpha-tested, flat, sRGB one) and compiles with Metal. */
+static void group_compile_files(const char *dir) {
+    char **names;
+    int n = list_dir(dir, &names);
+    for (int i = 0; i < n; i++) {
+        char path[1024], err[256], vb[16];
+        snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+        size_t len;
+        uint32_t *t = (uint32_t *)read_file(path, &len), nt = (uint32_t)(len / 4);
+        if (!t) continue;
+        struct sm_shader s;
+        if (sm_decode(t, nt, &s, err, sizeof err)) { printf("FAIL %s: %s\n", names[i], err); fails++; free(t); continue; }
+        char *msl[2] = { NULL, NULL };
+        if (!s.is_ps) {
+            struct sm_vs_variant v;
+            memset(&v, 0, sizeof v);
+            for (uint32_t k = 0; k < s.nins; k++)
+                if (s.ins[k].op == SM_DCL && s.ins[k].dst.type == SM_R_INPUT) v.input[s.ins[k].dst.index] = SM_IN_FLOAT;
+            msl[0] = sm_msl_vertex(&s, &v);
+        } else {
+            struct sm_ps_variant v;
+            sm_ps_variant_default(&s, &v);
+            msl[0] = sm_msl_fragment(&s, &v);
+            v.fog = 4, v.alpha_func = 5, v.flat = 1, v.srgb = 1;
+            msl[1] = sm_msl_fragment(&s, &v);
+        }
+        int ok = 1;
+        for (int j = 0; j < 2 && msl[j]; j++) {
+            mtl_obj lib = mtl_library_async(msl[j], names[i]);
+            const char *e = mtl_library_error(lib);
+            if (e) { printf("FAIL %s: %s\n%s\n", names[i], e, msl[j]); fails++; ok = 0; }
+            mtl_release(lib);
+            free(msl[j]);
+        }
+        if (ok) printf("%s: %s compiled\n", names[i], sm_version_name(t[0], vb, sizeof vb));
+        sm_free(&s);
+        free(t);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: sm_selftest <group> [arg]\n"); return 2; }
     hle_mem_init();
@@ -1061,6 +1560,16 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "shader_objects")) group_shader_objects();
     else if (!strcmp(argv[1], "vs_cache")) group_vs_cache();
     else if (!strcmp(argv[1], "vs_loud")) group_vs_loud();
+    else if (!strcmp(argv[1], "ps_ops")) group_ps_ops();
+    else if (!strcmp(argv[1], "ps_modifiers")) group_ps_modifiers();
+    else if (!strcmp(argv[1], "ps_tex")) group_ps_tex();
+    else if (!strcmp(argv[1], "ps_bump")) group_ps_bump();
+    else if (!strcmp(argv[1], "ps_fog_alpha")) group_ps_fog_alpha();
+    else if (!strcmp(argv[1], "mixed_stages")) group_mixed_stages();
+    else if (!strcmp(argv[1], "ps_srgb")) group_ps_srgb();
+    else if (!strcmp(argv[1], "ps_objects")) group_ps_objects();
+    else if (!strcmp(argv[1], "ps_loud")) group_ps_loud();
+    else if (!strcmp(argv[1], "compile_files") && arg) group_compile_files(arg);
     else { fprintf(stderr, "sm_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

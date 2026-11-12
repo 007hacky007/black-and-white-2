@@ -59,7 +59,7 @@ struct ff_ps_u {
     float constant[8][4];
     float bumpmat[8][4];              /* 00, 01, 10, 11 */
     float bumpl[8][4];                /* lscale, loffset */
-    float lodbias[8][4];
+    float lodbias[16][4];             /* per sampler (a pixel shader has 16) */
     float fogcolor[4];
     float fog[4];                     /* start, end, density, alpha ref (0-1) */
 };
@@ -102,8 +102,8 @@ struct ff_draw {
     const struct ff_prog *vs, *ps;    /* NULL: the fixed-function stage */
     void *stream_buf[16];             /* id<MTLBuffer> per stream, or NULL */
     uint32_t stream_off[16], stream_stride[16];
-    mtl_obj tex[8];                   /* sampling views */
-    struct ff_sampler smp[8];
+    mtl_obj tex[16];                  /* sampling views, per sampler (NULL: none bound) */
+    struct ff_sampler smp[16];
     uint32_t prim;                    /* D3DPRIMITIVETYPE (fans already lists) */
     uint32_t count, start;            /* vertices, or indices when indexed */
     int32_t base_vertex;
@@ -123,6 +123,8 @@ void mtl_pipeline_cache_drop(void);              /* tests: forget the in-memory 
 /* A library compiled from msl on a background queue (one per distinct source); the first draw that
  * needs it waits. name labels a compile error. The handle is retained: mtl_release drops it. */
 mtl_obj mtl_library_async(const char *msl, const char *name);
+/* Waits for the library: NULL when it compiled, else Metal's message (valid while the handle lives). */
+const char *mtl_library_error(mtl_obj lib);
 
 /* ff_msl.c: the MSL for a key pair; malloc'd, NUL-terminated. */
 char *ff_msl(const struct ff_vkey *vk, const struct ff_pkey *pk);
@@ -131,5 +133,8 @@ char *ff_msl_fragment(const struct ff_pkey *pk, unsigned ntc);
 /* What every vertex function writes and every fragment function reads: the uniform structs, then
  * struct VOut { pos, c0, c1, tc0..tc(ntc-1), fog, fogz, [psize], [clip[nclip]] }. malloc'd. */
 char *ff_msl_vout(unsigned ntc, int flat, int points, unsigned nclip);
+/* What follows the colour in a fragment function: fog (ff_pkey.fog: in.fog or in.fogz), the alpha test
+ * (D3DCMP, 0 off) and the sRGB encoding, on the float4 named var (u is the PU). malloc'd. */
+char *ff_msl_post(unsigned fog, unsigned alpha_func, int srgb, const char *var);
 
 #endif

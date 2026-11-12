@@ -31,7 +31,7 @@ static const char *HEADER =
     "struct Light { float4 diffuse, specular, ambient, position, direction, p0, p1; };\n"
     "struct VU { float4x4 wv, proj, wvp, normal_m, view, world; float4x4 tex[8];\n"
     "  float4 vp, vpz, md, ma, ms, me, ambient, fog; float4 clip[6]; float4 power; Light light[8]; };\n"
-    "struct PU { float4 tfactor; float4 cst[8]; float4 bumpmat[8]; float4 bumpl[8]; float4 lodbias[8];\n"
+    "struct PU { float4 tfactor; float4 cst[8]; float4 bumpmat[8]; float4 bumpl[8]; float4 lodbias[16];\n"
     "  float4 fogcolor; float4 fog; };\n";
 
 /* D3DTOP */
@@ -218,6 +218,33 @@ static const char *cmp_op(int f) {
     }
 }
 
+/* After the colour: fog, the alpha test, the sRGB encoding (shared with the translated pixel shaders). */
+static void post(struct sb *b, unsigned fog, unsigned alpha_func, int srgb, const char *v) {
+    if (fog) {
+        if (fog == 1) put(b, "  float f = in.fog;\n");
+        else {
+            put(b, "  float fz = in.fogz;\n");
+            if (fog == 2) put(b, "  float f = exp(-fz * u.fog.z);\n");
+            else if (fog == 3) put(b, "  float f = exp(-(fz * u.fog.z) * (fz * u.fog.z));\n");
+            else put(b, "  float f = (u.fog.y - fz) / (u.fog.y - u.fog.x);\n");
+        }
+        put(b, "  %s.rgb = mix(u.fogcolor.rgb, %s.rgb, saturate(f));\n", v, v);
+    }
+    if (alpha_func == 1) put(b, "  discard_fragment();\n");
+    else if (cmp_op((int)alpha_func))
+        put(b, "  if (!(rint(saturate(%s.a) * 255.0) %s u.fog.w)) discard_fragment();\n", v, cmp_op((int)alpha_func));
+    if (srgb)
+        put(b, "  %s.rgb = select(1.055 * pow(%s.rgb, float3(1.0 / 2.4)) - 0.055, %s.rgb * 12.92,"
+               " %s.rgb <= 0.0031308);\n", v, v, v, v);
+}
+
+char *ff_msl_post(unsigned fog, unsigned alpha_func, int srgb, const char *var) {
+    struct sb b = { 0 };
+    put(&b, "%s", "");
+    post(&b, fog, alpha_func, srgb, var);
+    return b.s;
+}
+
 static void pixel(struct sb *b, const struct ff_pkey *k, unsigned ntc) {
     static const char *types[] = { NULL, "texture2d<float>", "texturecube<float>", "texture3d<float>" };
     put(b, "fragment float4 fff(VOut in [[stage_in]], constant PU &u [[buffer(0)]]");
@@ -253,22 +280,7 @@ static void pixel(struct sb *b, const struct ff_pkey *k, unsigned ntc) {
         put(b, "    %s = float4(rc, ra);\n  }\n", k->resultarg[i] == 5 ? "temp" : "current");
     }
     if (k->specular_add) put(b, "  current.rgb = saturate(current.rgb + specular.rgb);\n");
-    if (k->fog) {
-        if (k->fog == 1) put(b, "  float f = in.fog;\n");
-        else {
-            put(b, "  float fz = in.fogz;\n");
-            if (k->fog == 2) put(b, "  float f = exp(-fz * u.fog.z);\n");
-            else if (k->fog == 3) put(b, "  float f = exp(-(fz * u.fog.z) * (fz * u.fog.z));\n");
-            else put(b, "  float f = (u.fog.y - fz) / (u.fog.y - u.fog.x);\n");
-        }
-        put(b, "  current.rgb = mix(u.fogcolor.rgb, current.rgb, saturate(f));\n");
-    }
-    if (k->alpha_func == 1) put(b, "  discard_fragment();\n");
-    else if (cmp_op(k->alpha_func))
-        put(b, "  if (!(rint(saturate(current.a) * 255.0) %s u.fog.w)) discard_fragment();\n", cmp_op(k->alpha_func));
-    if (k->srgb_write)
-        put(b, "  current.rgb = select(1.055 * pow(current.rgb, float3(1.0 / 2.4)) - 0.055, current.rgb * 12.92,"
-               " current.rgb <= 0.0031308);\n");
+    post(b, k->fog, k->alpha_func, k->srgb_write, "current");
     put(b, "  return current;\n}\n");
 }
 

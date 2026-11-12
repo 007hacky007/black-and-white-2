@@ -63,7 +63,27 @@ static int type_comps(uint32_t t) {
     return t < 17 ? n[t] : 0;
 }
 
-void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint32_t prim, int with_vs,
+/* Sampler i's texture (made current) and state into the draw; its type (0 none, 1 2D, 2 cube, 3 volume). */
+int ff_bind_sampler(struct d3d_device *dv, uint32_t i, struct ff_draw *dr, struct ff_ps_u *pu) {
+    struct d3d_state *st = &dv->st;
+    uint32_t t = st->tex[i];
+    dr->tex[i] = NULL;
+    if (!t) return 0;
+    struct d3d_texture *tx = d3d_tex(t);
+    if (tx->autogen && tx->mip_dirty) {                  /* drawn into since: make the chain again first */
+        mtl_tex_mipgen(dv->mtl, tx->tex);
+        tx->mip_dirty = 0;
+    }
+    dr->tex[i] = tx->view;
+    if (st->ss[i][11]) dr->tex[i] = d3d_tex_srgb_view(tx);
+    const uint32_t *ss = st->ss[i];
+    dr->smp[i] = (struct ff_sampler){ ss[1], ss[2], ss[3], ss[5], ss[6], ss[7], ss[10],
+                                      ss[9] > tx->lod ? ss[9] : tx->lod, ss[4] };
+    pu->lodbias[i][0] = f32(ss[8]);
+    return tx->base.kind == D3DK_TEXTURE ? 1 : tx->base.kind == D3DK_CUBETEXTURE ? 2 : 3;
+}
+
+void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint32_t prim, int with_vs, int with_ps,
               struct ff_draw *dr, struct ff_vkey *vk, struct ff_pkey *pk, struct ff_vs_u *vu, struct ff_ps_u *pu) {
     struct d3d_state *st = &dv->st;
     const uint32_t *rs = st->rs;
@@ -98,38 +118,34 @@ void ff_build(struct d3d_device *dv, const uint8_t (*el)[8], uint32_t nel, uint3
     }
     if (!have_pos) d3d_fail("vertex declaration without a position");
 
-    /* the texture stages: up to the first DISABLE */
+    /* the texture stages: up to the first DISABLE. With a pixel shader the stages' combiners are unused, and
+     * the fixed vertex stage writes all eight coordinate sets, each as its stage's index and transform say. */
     int n = 0;
     while (n < NTS && st->tss[n][1] != 1) n++;
-    vk->nstages = pk->nstages = (uint8_t)n;
-    for (int i = 0; i < n; i++) {
+    int nc = with_ps ? NTS : n;
+    vk->nstages = (uint8_t)nc;
+    pk->nstages = (uint8_t)(with_ps ? 0 : n);
+    for (int i = 0; i < nc; i++) {
         const uint32_t *ts = st->tss[i];
-        pk->colorop[i] = (uint8_t)ts[1], pk->alphaop[i] = (uint8_t)ts[4];
-        pk->colorarg[i][0] = (uint8_t)ts[26], pk->colorarg[i][1] = (uint8_t)ts[2], pk->colorarg[i][2] = (uint8_t)ts[3];
-        pk->alphaarg[i][0] = (uint8_t)ts[27], pk->alphaarg[i][1] = (uint8_t)ts[5], pk->alphaarg[i][2] = (uint8_t)ts[6];
-        pk->resultarg[i] = (uint8_t)ts[28];
         uint32_t tci = ts[11];
         vk->tci_set[i] = (uint8_t)((tci & 0xFFFF) < 8 ? tci & 0xFFFF : 0), vk->tci_mode[i] = (uint8_t)(tci >> 16);
         if (vk->tci_mode[i] > 4) d3d_fail("D3DTSS_TEXCOORDINDEX 0x%X is not supported", tci);
         uint32_t ttf = ts[24];
         vk->ttf_count[i] = (uint8_t)(ttf & 0xFF);
+    }
+    for (int i = 0; i < pk->nstages; i++) {
+        const uint32_t *ts = st->tss[i];
+        pk->colorop[i] = (uint8_t)ts[1], pk->alphaop[i] = (uint8_t)ts[4];
+        pk->colorarg[i][0] = (uint8_t)ts[26], pk->colorarg[i][1] = (uint8_t)ts[2], pk->colorarg[i][2] = (uint8_t)ts[3];
+        pk->alphaarg[i][0] = (uint8_t)ts[27], pk->alphaarg[i][1] = (uint8_t)ts[5], pk->alphaarg[i][2] = (uint8_t)ts[6];
+        pk->resultarg[i] = (uint8_t)ts[28];
+        uint32_t ttf = ts[24];
         pk->tcount[i] = (uint8_t)(ttf & 0xFF), pk->projected[i] = (ttf & 256) != 0;
-        uint32_t t = st->tex[i];
-        if (t) {
-            struct d3d_texture *tx = d3d_tex(t);
-            if (tx->autogen && tx->mip_dirty) {          /* drawn into since: make the chain again first */
-                mtl_tex_mipgen(dv->mtl, tx->tex);
-                tx->mip_dirty = 0;
-            }
-            pk->textype[i] = tx->base.kind == D3DK_TEXTURE ? 1 : tx->base.kind == D3DK_CUBETEXTURE ? 2 : 3;
-            dr->tex[i] = tx->view;
-            if (st->ss[i][11]) dr->tex[i] = d3d_tex_srgb_view(tx);
-            const uint32_t *ss = st->ss[i];
-            dr->smp[i] = (struct ff_sampler){ ss[1], ss[2], ss[3], ss[5], ss[6], ss[7], ss[10],
-                                              ss[9] > tx->lod ? ss[9] : tx->lod, ss[4] };
-            pu->lodbias[i][0] = f32(ss[8]);
-        }
+        pk->textype[i] = (uint8_t)ff_bind_sampler(dv, (uint32_t)i, dr, pu);
         color4(pu->constant[i], ts[32]);
+    }
+    for (int i = 0; i < NTS; i++) {                     /* the bump matrices: texbem and bem read any stage's */
+        const uint32_t *ts = st->tss[i];
         pu->bumpmat[i][0] = f32(ts[7]), pu->bumpmat[i][1] = f32(ts[8]), pu->bumpmat[i][2] = f32(ts[9]);
         pu->bumpmat[i][3] = f32(ts[10]);
         pu->bumpl[i][0] = f32(ts[22]), pu->bumpl[i][1] = f32(ts[23]);

@@ -1,5 +1,5 @@
-"""Plan 5 Tasks 2-3: the D3DX shader assembler, the bytecode decoder and vertex shaders on Metal
-(runtime/bw2/d3d9/sm_selftest.c).
+"""Plan 5 Tasks 2-4: the D3DX shader assembler, the bytecode decoder, and vertex and pixel shaders on
+Metal (runtime/bw2/d3d9/sm_selftest.c).
 
 Every shader here is written by the test. The expected tokens follow the D3D9 token format
 (version, instruction, destination and source parameter tokens). The game's own assembly files
@@ -198,3 +198,34 @@ def test_vs30_is_loud(selftest, tmp_path):
     r = run_group(selftest, "vs_loud", tmp_path)
     assert r.returncode != 0 and "vs_loud: returned" not in r.stdout, r.stdout[-2000:]
     assert "FATAL: d3d9: IDirect3DDevice9::CreateVertexShader: vs_3_0" in r.stderr, r.stderr[-2000:]
+
+
+# ---- Task 4: pixel shaders on Metal ----
+
+@pytest.mark.parametrize("group", ["ps_ops", "ps_modifiers", "ps_tex", "ps_bump", "ps_fog_alpha", "mixed_stages",
+                                   "ps_srgb", "ps_objects"])
+def test_pixel_shaders(selftest, tmp_path, group):
+    check(selftest, group, tmp_path)
+
+
+def test_ps30_is_loud(selftest, tmp_path):
+    r = run_group(selftest, "ps_loud", tmp_path)
+    assert r.returncode != 0 and "ps_loud: returned" not in r.stdout, r.stdout[-2000:]
+    assert "FATAL: d3d9: IDirect3DDevice9::CreatePixelShader: ps_3_0" in r.stderr, r.stderr[-2000:]
+
+
+@pytest.mark.gamefiles
+def test_game_shaders_compile(selftest, tmp_path):
+    # Every distinct shader in the 59 effects decodes, translates and compiles with Metal.
+    d = tmp_path / "blobs"
+    d.mkdir()
+    blobs = _effect_shaders()
+    for h, b in blobs.items():
+        (d / f"{h}.bin").write_bytes(b)
+    r = check(selftest, "compile_files", tmp_path, d)
+    got = collections.Counter(ln.split()[1] for ln in r.stdout.splitlines() if ln.endswith(" compiled"))
+    print(dict(got))
+    assert sum(got.values()) == len(blobs), r.stdout[-4000:]
+    # Measured here (distinct blobs): the plan's "Measured" counts (vs_1_1 22, vs_2_0 20, ps_1_1 17, ps_1_4 4,
+    # ps_2_0 19) do not come out of the size-checked scan; Task 2's ruling has these, ps_1_3 included.
+    assert got == {"vs_1_1": 67, "vs_2_0": 44, "ps_1_1": 58, "ps_1_3": 1, "ps_1_4": 8, "ps_2_0": 79}, got
