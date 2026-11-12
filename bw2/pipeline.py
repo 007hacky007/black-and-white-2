@@ -1,14 +1,18 @@
-"""Lift the game, the VM interpreter and ScriptLibraryR.dll, then build the link check.
+"""Lift the game, the VM interpreter, ScriptLibraryR.dll and the disc's d3dx9_25.dll,
+then build the engine. Every build puts the rebased d3dx9_25.dll beside the engine
+binary, where the engine loads it from.
 
     python -m bw2.pipeline [--opt O3] [--lift-only] [--build-only]
 """
 import argparse
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
 
 from .build import build
+from .d3dx import CATALOG as D3DX_CATALOG, DLL_NAME as D3DX_DLL_NAME, d3dx_dll
 from .extrastarts import EXTRA, VM_EXTRA, load_extra_starts, vm_entries
 from .lift import ModuleLift, lift_module, link_tables
 from .paths import GAMEFILES, REPO
@@ -25,7 +29,8 @@ def modules():
     dll = script_dll(GAMEFILES / "patches" / "BW2Patch1_2.exe", GAMEFILES / "dll")
     return [("white", exe, CAT / "white-1.42.functions.json", (".text",)),
             ("vm", exe, CAT / "white-1.42.vm.json", VM_SECTIONS),
-            ("slr", dll, CAT / "scriptlibraryr-1.2.functions.json", (".text",))]
+            ("slr", dll, CAT / "scriptlibraryr-1.2.functions.json", (".text",)),
+            ("d3dx", d3dx_dll(), D3DX_CATALOG, (".text",))]
 
 
 def lift_all(gen: Path, only: tuple = ()) -> list[ModuleLift]:
@@ -67,6 +72,11 @@ def run_pipeline(gen: Path = REPO / "gen", out: Path = REPO / "out" / "bw2",
               f"binary {st.binary_bytes / 1e6:.1f} MB", flush=True)
         res["build"] = {"objects": st.objects, "compiled": st.compiled, "seconds": st.seconds,
                         "binary_bytes": st.binary_bytes}
+        beside = Path(out).parent / D3DX_DLL_NAME
+        part = beside.with_name(beside.name + ".part")
+        shutil.copyfile(d3dx_dll(), part)
+        part.replace(beside)
+        print(f"[build] {beside}", flush=True)
     res["seconds"] = round(time.time() - t0, 1)
     return res
 
@@ -77,7 +87,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="O1, O2 or O3 (or --opt=-O3)")
     ap.add_argument("--lift-only", action="store_true")
     ap.add_argument("--build-only", action="store_true")
-    ap.add_argument("--only", action="append", default=[], help="lift only this module (white, vm, slr)")
+    ap.add_argument("--only", action="append", default=[], help="lift only this module (white, vm, slr, d3dx)")
     return ap.parse_args(argv)
 
 

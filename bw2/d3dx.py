@@ -12,12 +12,13 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pefile
 
 from . import disc
-from .paths import GAMEFILES
+from .paths import GAMEFILES, REPO
 
 CAB_PATH = "DIRECTX9/APR200~2.CAB"
 CAB_SIZE = 1079850
@@ -27,6 +28,12 @@ DLL_SIZE = 2337488
 DLL_SHA256 = "4c54df27ce84d21b2924e64ff79b13e7876ce85d8e0c9c1d0abd8da73888187a"
 LIFT_BASE = 0x08000000
 REBASED_SHA256 = "505a12cf1fa5a7cf1162a27085f7e30036d7bae4f1b666b999777b60a55c2428"
+
+CATALOG = REPO / "bw2" / "catalog" / "d3dx9_25-apr2005.functions.json"
+# Function starts discovery misses, at the rebased base. Each entry names the address
+# that calls or reads it (an unresolved direct target in the link, or an unresolved
+# indirect call into 0x08000000-0x08253000 at run time).
+EXTRA_SEEDS: list[int] = []
 
 TAR = "/usr/bin/tar"
 TOOL_ENV = {"PATH": "/usr/bin:/bin"}
@@ -145,13 +152,46 @@ def d3dx_dll(gamefiles: Path = GAMEFILES) -> Path:
     return out
 
 
+def export_seeds(dll: Path) -> list[int]:
+    """Every exported function's address: GetProcAddress is the only thing that names one."""
+    pe = pefile.PE(str(dll))
+    base = pe.OPTIONAL_HEADER.ImageBase
+    text = next(s for s in pe.sections if s.Name.rstrip(b"\0") == b".text")
+    lo, hi = base + text.VirtualAddress, base + text.VirtualAddress + text.Misc_VirtualSize
+    return sorted({base + e.address for e in pe.DIRECTORY_ENTRY_EXPORT.symbols
+                   if not e.forwarder and lo <= base + e.address < hi})
+
+
+def catalog(out: Path = CATALOG) -> Path:
+    """Discover the rebased DLL's functions into the committed catalog (addresses only)."""
+    from .discover import coverage, discover
+    dll = d3dx_dll()
+    exports = export_seeds(dll)
+    t0 = time.time()
+    cat = discover(dll, out, extra_seeds=tuple(exports) + tuple(EXTRA_SEEDS),
+                   code_sections=(".text",), code_reloc_seeds=True,
+                   cfg_aliases=True)
+    c = coverage(cat, dll)
+    import json
+    seeds = json.loads(Path(cat).read_text())["bw2_seeds"]
+    print(f"[catalog] {cat.name}: {c.functions} functions, coverage "
+          f"{100.0 * c.covered_bytes / c.text_bytes:.2f}% of {c.text_bytes} bytes, "
+          f"{time.time() - t0:.0f} s", flush=True)
+    print(f"[catalog] seeds: {len(exports)} export, {len(EXTRA_SEEDS)} extra, {seeds}", flush=True)
+    return cat
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m bw2.d3dx",
                                  description="Make the rebased d3dx9_25.dll from disc 1.")
-    ap.parse_args(argv)
+    ap.add_argument("--catalog", action="store_true",
+                    help=f"also discover its functions into {CATALOG.relative_to(REPO)}")
+    a = ap.parse_args(argv)
     out = d3dx_dll()
     print(out)
     print(_sha256(out))
+    if a.catalog:
+        catalog()
     return 0
 
 

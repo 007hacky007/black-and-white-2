@@ -181,3 +181,51 @@ def test_reclean_refuses_cleaned_catalog_without_uncleaned_copy(tmp_path):
                                 "functions": [_fn(0x401000, 0x401006)]}))
     with pytest.raises(SystemExit, match="uncleaned"):
         main([str(full), str(exe), str(tmp_path / "out.json")])
+
+
+def test_cfg_labels_of_a_relocated_image_become_aliases(tmp_path):
+    # In an image with relocations every address the code can take is a relocation target,
+    # a call target or an export. A catalog start that is none of these and that a trusted
+    # function's own control flow reaches is a label of that function, not a function:
+    # d3dx9_25.dll had 304 loop heads of one 176 KB function catalogued as starts, each
+    # lifting as a full copy of it.
+    import json
+    import struct
+    from bw2.catclean import alias_cfg_labels
+    from fixtures import CODE, DATA, make_pe
+    text = bytearray(b"\xcc" * 0x200)
+
+    def put(va, raw):
+        text[va - 0x401000:va - 0x401000 + len(raw)] = raw
+
+    put(0x401000, bytes.fromhex("33c9"            # 401000 xor ecx, ecx
+                                "eb0b"            # 401002 jmp 0x40100f
+                                "cccccccccccccccccccccc"   # 401004 a hole the jmp skips
+                                "41"              # 40100f L: inc ecx
+                                "83f910"          # 401010 cmp ecx, 16
+                                "7cfa"            # 401013 jl 0x40100f
+                                "eb00"            # 401015 jmp 0x401017
+                                "c3"))            # 401017 R: ret
+    put(0x401040, bytes.fromhex("e8bbffffff"      # 401040 call 0x401000
+                                "c3"))
+    put(0x401060, bytes.fromhex("40c3"))          # an uncalled function outside every body
+    put(0x401100, struct.pack("<I", 0x401017))    # a relocated pointer to R
+    reloc = struct.pack("<IIHH", 0x1000, 12, 0x3100, 0)
+    exe = tmp_path / "x.dll"
+    exe.write_bytes(make_pe([(".text", bytes(text), CODE), (".reloc", reloc, DATA)], {}, 0x1000,
+                            data_dirs={5: (0x2000, len(reloc))}))
+    fn = lambda a, e, calls=(): {"address": a, "end": e, "size": e - a, "entry_kind": "start",
+                                 "is_thunk": False, "calls_to": list(calls)}
+    full = tmp_path / "full.json"
+    full.write_text(json.dumps({"functions": [fn(0x401000, 0x40100f), fn(0x40100f, 0x401017),
+                                              fn(0x401017, 0x401018),
+                                              fn(0x401040, 0x401046, [0x401000]),
+                                              fn(0x401060, 0x401062)]}))
+    assert alias_cfg_labels(full, exe) == 1
+    kinds = {f["address"]: f["entry_kind"] for f in json.loads(full.read_text())["functions"]}
+    assert kinds == {0x401000: "start", 0x40100f: "alias", 0x401017: "start",
+                     0x401040: "start", 0x401060: "start"}
+    # a strong seed is never folded
+    full.write_text(json.dumps({"functions": [fn(0x401000, 0x40100f), fn(0x40100f, 0x401017),
+                                              fn(0x401040, 0x401046, [0x401000])]}))
+    assert alias_cfg_labels(full, exe, strong={0x40100f}) == 0

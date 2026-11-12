@@ -176,6 +176,61 @@ def clean_full(full: Path, exe: Path, seeds=frozenset(), weak_seeds=frozenset())
     return stats
 
 
+def relocated_code_targets(exe: Path) -> set[int]:
+    """Every value a HIGHLOW relocation site holds that points into .text: in an image
+    with relocations, every absolute address of code the program can take."""
+    pe = pefile.PE(str(exe))
+    base = pe.OPTIONAL_HEADER.ImageBase
+    text = next(s for s in pe.sections if s.Name.rstrip(b"\0") == b".text")
+    lo, hi = base + text.VirtualAddress, base + text.VirtualAddress + text.Misc_VirtualSize
+    img = pe.get_memory_mapped_image()
+    out = set()
+    for blk in getattr(pe, "DIRECTORY_ENTRY_BASERELOC", []):
+        for e in blk.entries:
+            if e.type == 3 and e.rva + 4 <= len(img):
+                v = int.from_bytes(img[e.rva:e.rva + 4], "little")
+                if lo <= v < hi:
+                    out.add(v)
+    return out
+
+
+def alias_cfg_labels(full: Path, exe: Path, strong=frozenset()) -> int:
+    """Fold the labels of trusted bodies into them, for an image that keeps its relocations.
+
+    There, code is reached by a direct call or jump, or through an address the program
+    takes, and every such address is a relocation target (or an export, passed in
+    `strong`). A start that is neither called, nor relocated, nor strong can only be
+    reached by direct jumps and fall-through, which the lifter follows inside each body
+    (disasm32's disassemble_function, branches within 1 MB). When such a start is an
+    instruction of a trusted body (called, relocated or strong), it is a label of that
+    body and becomes an alias, which the lifter skips. A jump from farther away than the
+    lifter follows dispatches to it and shows up as an unresolved target in the link.
+    Returns the number of starts folded."""
+    from .discover import _pcr_disassembler
+    doc = json.loads(Path(full).read_text())
+    fns = doc["functions"]
+    called = {t for f in fns for t in f.get("calls_to", ())}
+    protected = called | relocated_code_targets(exe) | set(strong)
+    dis, iat = _pcr_disassembler(exe)
+    labels = set()
+    for f in fns:
+        if f["entry_kind"] != "start" or f["address"] not in protected:
+            continue
+        body = dis.disassemble_function(f["address"], iat)
+        if body is not None:
+            labels.update(i.address for b in body.blocks.values() for i in b.instructions
+                          if i.address != f["address"])
+    n = 0
+    for f in fns:
+        if f["entry_kind"] == "start" and f["address"] in labels and f["address"] not in protected:
+            f["entry_kind"] = "alias"
+            n += 1
+    _restore_extents({f["address"]: f for f in fns})
+    doc.setdefault("bw2_clean", {})["cfg_aliases"] = n
+    Path(full).write_text(json.dumps(doc, indent=0))
+    return n
+
+
 def main(argv=None) -> int:
     """Re-clean an existing full catalog without rerunning discovery.
 

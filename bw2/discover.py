@@ -16,7 +16,7 @@ import pefile
 from capstone import x86
 
 from . import pcr
-from .catclean import clean_full, seed_classes
+from .catclean import alias_cfg_labels, clean_full, seed_classes
 from .gaps import code_seeds, gaps
 from .paths import GAMEFILES
 
@@ -86,9 +86,142 @@ def reloc_data_targets(exe: Path) -> list[int]:
     return _reloc_targets_from(pe, entries) if entries else []
 
 
+def _pcr_disassembler(exe: Path):
+    """pcrecomp's Disassembler and IAT map for an image, as the lifter builds them."""
+    from .pcr import PCR
+    import sys
+    for sub in ("pe", "disasm"):
+        p = str(PCR / "tools" / sub)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    from pe_analyze import analyze_pe, build_iat_map
+    from disasm32 import Disassembler
+    info = analyze_pe(str(exe))
+    return Disassembler(Path(exe).read_bytes(), info.image_base, info.sections), build_iat_map(info)
+
+
+def _table_span(dis, table: int, limit: int = 256) -> tuple[int, int]:
+    """The slots of the jump table at `table` that disasm32's table_entries reads as
+    entries, with its own end rule (a couple of non-code slots end it)."""
+    last, misses = -1, 0
+    for k in range(limit):
+        raw = dis.read_bytes(table + 4 * k, 4)
+        if not raw or len(raw) < 4:
+            break
+        if dis.is_code_address(int.from_bytes(raw, "little")):
+            last, misses = k, 0
+            continue
+        misses += 1
+        if (last >= 0 and misses >= 2) or (last < 0 and misses >= 4):
+            break
+    return table, table + 4 * (last + 1)
+
+
+def _decoded_marks(dis, roots, lo: int, hi: int) -> tuple[bytearray, bytearray]:
+    """(covered, starts): a byte per .text address, set where a decoded instruction or a
+    jump table it dispatches through lies, and where an instruction starts.
+
+    The union of what disasm32's disassemble_function decodes from each root (its first
+    pass: straight-line scans from block leaders, following branches within 1 MB and
+    jump-table arms), walked once with a shared visited set: decoding an address gives
+    the same instruction whichever function reaches it, and image bodies overlap a lot
+    (d3dx9_25.dll's 5,855 starts decode 12.7M instructions between them)."""
+    cov, ist = bytearray(hi - lo), bytearray(hi - lo)
+    seen, work = set(), [(r, r) for r in sorted(set(roots)) if lo <= r < hi]
+
+    def mark(a: int, b: int) -> None:
+        a, b = max(a, lo), min(b, hi)
+        if b > a:
+            cov[a - lo:b - lo] = b"\x01" * (b - a)
+
+    def follow(t, root):
+        if t is not None and dis.is_code_address(t) and abs(t - root) < 0x100000 and t not in seen:
+            work.append((t, root))
+
+    while work:
+        addr, root = work.pop()
+        if addr in seen or not dis.is_code_address(addr):
+            continue
+        seen.add(addr)
+        last = None
+        for ins in dis.disassemble_at(addr, max_bytes=8192):
+            if ins.address != addr and lo <= ins.address < hi and ist[ins.address - lo]:
+                last = None
+                break                            # joined code already walked
+            last = ins
+            mark(ins.address, ins.end_address)
+            if lo <= ins.address < hi:
+                ist[ins.address - lo] = 1
+            if ins.is_call:
+                continue
+            if ins.is_cond_jump:
+                follow(ins.get_branch_target(), root)
+                follow(ins.end_address, root)
+                break
+            if ins.is_uncond_jump:
+                t = ins.get_branch_target()
+                if t is not None:
+                    follow(t, root)
+                else:
+                    arms = dis.jump_table_targets(ins)
+                    if arms:
+                        mark(*_table_span(dis, ins.operands[0].mem.disp & 0xFFFFFFFF))
+                    for arm in arms:
+                        if arm not in seen:
+                            work.append((arm, root))
+                break
+            if ins.is_ret or ins.mnemonic == "int3":
+                break
+        else:
+            if last is not None and last.end_address not in seen:
+                work.append((last.end_address, root))
+    return cov, ist
+
+
+def reloc_code_targets(exe: Path, decoded, vtable=frozenset()) -> list[int]:
+    """Code pointers that .text itself holds, for images that keep read-only data there.
+
+    A HIGHLOW relocation site inside .text whose dword points into .text, when the site
+    lies outside every instruction decoded from the function starts in `decoded` (a first
+    disassembly round) and outside every jump table those dispatch through, so neither an
+    instruction's operand nor a switch's mid-function arms count. The target must be a
+    vtable-scan method (`vtable`), or not fall inside a decoded instruction and decode as
+    a function body (disasm32's probes_as_function_body)."""
+    pe = pefile.PE(str(exe))
+    base = pe.OPTIONAL_HEADER.ImageBase
+    text = next(s for s in pe.sections if _sname(s.Name) == ".text")
+    lo, hi = base + text.VirtualAddress, base + text.VirtualAddress + text.Misc_VirtualSize
+    sites = sorted({base + e.rva for blk in getattr(pe, "DIRECTORY_ENTRY_BASERELOC", [])
+                    for e in blk.entries if e.type == 3 and lo <= base + e.rva < hi})
+    if not sites:
+        return []
+    dis, _ = _pcr_disassembler(exe)
+    cov, ist = _decoded_marks(dis, decoded, lo, hi)
+    img = pe.get_memory_mapped_image()
+    vtable, out = set(vtable), set()
+    for site in sites:
+        if any(cov[k - lo] for k in range(site, min(site + 4, hi))):
+            continue
+        v = struct.unpack_from("<I", img, site - base)[0]
+        if not lo <= v < hi:
+            continue
+        if v in vtable or ((ist[v - lo] or not cov[v - lo]) and dis.probes_as_function_body(v)):
+            out.add(v)
+    return sorted(out)
+
+
 def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
-             code_sections: tuple[str, ...] = (".text",), max_rounds: int = 4) -> Path:
-    """Run discovery; the compact catalog goes to `out`, the full one stays in GAMEFILES."""
+             code_sections: tuple[str, ...] = (".text",), max_rounds: int = 4,
+             code_reloc_seeds: bool = False, cfg_aliases: bool = False) -> Path:
+    """Run discovery; the compact catalog goes to `out`, the full one stays in GAMEFILES.
+
+    code_reloc_seeds: after the first round, add reloc_code_targets (pointers .text holds
+    itself) as strong seeds for the rounds that follow. For images that merge their
+    read-only data into .text (d3dx9_25.dll); off for the others.
+
+    cfg_aliases: after cleaning, catclean.alias_cfg_labels folds starts that only
+    direct jumps reach into the trusted bodies whose control flow holds them. Sound
+    only for an image that keeps its relocations (d3dx9_25.dll); off for the others."""
     exe, out = Path(exe).resolve(), Path(out).resolve()
     work = GAMEFILES / "discover"
     work.mkdir(parents=True, exist_ok=True)
@@ -106,10 +239,10 @@ def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
     view = code_view(exe, code_sections, work / ("view_" + "_".join(s.strip(".") for s in code_sections) + ".exe"))
     log = work / (out.stem + ".log")
     full = work / (out.stem + ".full.json")
-    rounds, added = 0, []
+    rounds, added, code_relocs = 0, [], []
     while True:
         rounds += 1
-        merged.write_text(json.dumps(sorted(set(seeds) | set(added))))
+        merged.write_text(json.dumps(sorted(set(seeds) | set(added) | set(code_relocs))))
         r = pcr.run("tools/disasm/disasm32.py", str(view), "--seed-functions", str(merged),
                     "-o", str(full), check=False)
         log.write_text(r.stdout + r.stderr)
@@ -118,8 +251,12 @@ def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
         if ".text" not in code_sections or rounds >= max_rounds:
             break
         have = {f["address"] for f in load_functions(full)}
+        fresh = []
+        if code_reloc_seeds and rounds == 1:
+            code_relocs = [a for a in reloc_code_targets(exe, sorted(have), vt) if inside(a)]
+            fresh = [a for a in code_relocs if a not in have]
         new = [a for a in code_seeds(gaps(full, exe)) if a not in have and a not in added]
-        if not new:
+        if not new and not fresh:
             break
         added += new
     doc = json.loads(full.read_text())
@@ -127,11 +264,18 @@ def discover(exe: Path, out: Path, extra_seeds: tuple[int, ...] = (),
     doc["bw2_seeds"] = {"rtti": len(rtti), "vtable": len(vt), "extra": len(extra_seeds),
                         "used": len(seeds), "code_sections": list(code_sections),
                         "rounds": rounds, "gap_seeds": len(added), "reloc_seeds": len(relocs)}
+    if code_reloc_seeds:
+        doc["bw2_seeds"]["code_reloc_seeds"] = len(code_relocs)
     full.write_text(json.dumps(doc, indent=0))
-    merged.write_text(json.dumps(sorted(set(seeds) | set(added))))
+    merged.write_text(json.dumps(sorted(set(seeds) | set(added) | set(code_relocs))))
     (work / f"{out.stem}.seeds_gap.json").write_text(json.dumps(sorted(added)))
+    if code_reloc_seeds:
+        (work / f"{out.stem}.seeds_code_reloc.json").write_text(json.dumps(code_relocs))
     full.with_suffix(".uncleaned.json").write_text(full.read_text())
-    clean_full(full, exe, *seed_classes(rtti, vt, extra_seeds, added))
+    strong, weak = seed_classes(rtti, vt, tuple(extra_seeds) + tuple(code_relocs), added)
+    clean_full(full, exe, strong, weak)
+    if cfg_aliases:
+        alias_cfg_labels(full, view, strong)
     from .releases import sha256_file
     return compact_catalog(full, out, sha256_file(exe))
 

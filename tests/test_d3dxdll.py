@@ -119,3 +119,30 @@ def test_disc_dll(tmp_path):
     mtime = out.stat().st_mtime_ns
     assert d3dx.d3dx_dll(g) == out
     assert out.stat().st_mtime_ns == mtime
+
+
+EXPORTS = {"D3DXCompileShader": 0x080EB93A, "D3DXCompileShaderFromFileA": 0x080EB45C,
+           "D3DXCreateEffectCompiler": 0x080F910A, "D3DXCreateFragmentLinker": 0x0816909B,
+           "D3DXCreateSphere": 0x080CC4B8}
+
+
+@pytest.mark.gamefiles
+def test_d3dx_catalog():
+    import json
+    from bw2 import d3dx
+    from bw2.discover import load_functions
+    cat = paths.REPO / "bw2" / "catalog" / "d3dx9_25-apr2005.functions.json"
+    doc = json.loads(cat.read_text())
+    assert doc["sha256"] == d3dx.REBASED_SHA256
+    assert doc["image_base"] == 0x08000000
+    starts = {f["address"] for f in load_functions(cat) if f["entry_kind"] != "alias"}
+    pe = pefile.PE(str(d3dx.d3dx_dll()))
+    base = pe.OPTIONAL_HEADER.ImageBase
+    by_name = {s.name.decode(): base + s.address for s in pe.DIRECTORY_ENTRY_EXPORT.symbols if s.name}
+    for name, va in EXPORTS.items():
+        assert by_name[name] == va, name
+        assert va in starts, name
+    exports = d3dx.export_seeds(d3dx.d3dx_dll())
+    assert len(exports) > 300
+    assert set(EXPORTS.values()) <= set(exports)
+    assert [hex(a) for a in exports if a not in starts] == []

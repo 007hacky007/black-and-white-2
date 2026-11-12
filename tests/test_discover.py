@@ -93,3 +93,48 @@ def test_reloc_data_targets_only_from_data_sections(tmp_path):
     assert reloc_data_targets(p) == []          # no reloc table yet
     from bw2.discover import _reloc_targets_from
     assert _reloc_targets_from(pe, [(0x2000, 3), (0x1004, 3)]) == [0x401010]
+
+
+def _reloc_block(page: int, offsets: list[int]) -> bytes:
+    import struct
+    words = [0x3000 | o for o in offsets]
+    if len(words) % 2:
+        words.append(0)
+    body = b"".join(struct.pack("<H", w) for w in words)
+    return struct.pack("<II", page, 8 + len(body)) + body
+
+
+def test_reloc_code_targets(tmp_path):
+    # .text keeps its own pointer tables, as d3dx9_25.dll does (read-only data merged into
+    # .text). Only relocated dwords outside decoded instructions and recognized jump tables
+    # that point at plausible code are seeds.
+    import struct
+    from bw2.discover import reloc_code_targets
+    text = bytearray(b"\xcc" * 0x300)
+
+    def put(va, raw):
+        text[va - 0x401000:va - 0x401000 + len(raw)] = raw
+
+    put(0x401000, bytes.fromhex("558bec"          # push ebp; mov ebp, esp
+                                "8b4508"          # mov eax, [ebp+8]
+                                "83f801"          # cmp eax, 1
+                                "7725"            # ja 0x401030
+                                "ff2485") + struct.pack("<I", 0x401200))   # jmp [eax*4+0x401200]
+    put(0x401020, b"\xb8" + struct.pack("<I", 0x401080) + b"\xeb\x09")   # mov eax, 0x401080; jmp
+    put(0x401028, bytes.fromhex("33c0eb04"))                             # xor eax, eax; jmp
+    put(0x401030, bytes.fromhex("5dc3"))                                 # pop ebp; ret
+    put(0x401040, bytes.fromhex("33c0c3"))                               # function B
+    put(0x401060, bytes.fromhex("b801000000c3"))                         # function C
+    put(0x401080, bytes.fromhex("40c3"))                                 # function D: only the mov names it
+    put(0x401100, struct.pack("<III", 0x401000, 0x401040, 0x401060))     # pointer table
+    put(0x401140, struct.pack("<I", 0x401280))                           # pointer to zeroed data
+    put(0x401200, struct.pack("<II", 0x401020, 0x401028) + bytes(8))     # the switch's jump table
+    put(0x401280, bytes(32))
+    reloc = _reloc_block(0x1000, [0x00E, 0x021, 0x100, 0x104, 0x108, 0x140, 0x200, 0x204])
+    p = tmp_path / "r.dll"
+    p.write_bytes(make_pe([(".text", bytes(text), CODE), (".reloc", reloc, DATA)], {}, 0x1000,
+                          data_dirs={5: (0x2000, len(reloc))}))
+    assert reloc_code_targets(p, [0x401000]) == [0x401000, 0x401040, 0x401060]
+    # a vtable-scan method is taken without the decode probe
+    assert reloc_code_targets(p, [0x401000], vtable={0x401280}) == [0x401000, 0x401040, 0x401060,
+                                                                   0x401280]

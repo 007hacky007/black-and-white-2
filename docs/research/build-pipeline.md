@@ -13,6 +13,7 @@ No game code runs.
 | `white` | `white.exe` `.text` | 47,179 | 95 + 1 cold | 252.9 MB | 100 | 77.8 s |
 | `vm` | `white.exe` `stxt774` + `.name0` | 228 | 1 | 18.8 MB | 0 | 5.1 s |
 | `slr` | `ScriptLibraryR.dll` 1.2 `.text` | 1,876 | 4 | 15.2 MB | 39 | 4.6 s |
+| `d3dx` | disc 1's `d3dx9_25.dll`, rebased to `0x08000000`, `.text` (plan 9) | 5,681 | 11 + 1 cold | 101.3 MB | 13,294 | 29.5 s |
 
 Link set: 49,283 functions, 5 unresolved direct targets. All five are wild
 addresses outside any image (`0x347DB478`, `0x47239E12`, `0x83B279A0`,
@@ -30,6 +31,20 @@ salc 4, aam 3, fldenv 2, fnstenv 2, hlt 2, fbld 1, fbstp 1, into 1, invlpg 1,
 pinsrw 1, sti 1.
 
 `slr`: int 32, fldenv 2, fnstenv 2, ficom 1, hlt 1, iretd 1.
+
+`d3dx`: insb 2867, arpl 2335, insd 2172, pfmul 1273, bound 873, pfadd 719,
+daa 691, invd 405, das 358, outsw 196, pfsub 148, femms 131, popaw 105,
+aas 104, pfacc 99, aaa 73, sldt 68, int 51, iretd 50, into 47, pfrcpit2 43,
+aam 42, int1 42, salc 42, sti 36, pfsubr 27, pfrcp 26, pfrcpit1 24, ljmp 22,
+fcmovne 21, pfcmpge 21, lcall 20, ficom 19, pfrsqit1 19, pfrsqrt 19,
+pswapd 19, aad 16, hlt 13, pfcmpgt 13, pfpnacc 9, pi2fd 9, pfnacc 7, cli 4,
+fisttp 3, pfcmpeq 3, packssdw 2, pf2id 2, pmaxsw 2, ficomp 1, pfmax 1,
+pfmin 1, pmovmskb 1. The DLL keeps its read-only data in `.text`, so far
+more data decodes as code than in `white`; the privileged, BCD and I/O
+mnemonics come from there. The 3DNow! ones (`pf*`, `femms`, `pswapd`,
+`pi2fd`, `pf2id`; about 2,600) are D3DX's AMD code paths, which it takes
+only on a CPU that reports 3DNow!. `pmaxsw`, `pmovmskb` and `packssdw` are
+integer SSE/MMX sites to check when the run first reaches them.
 
 Most of these are privileged, BCD or I/O instructions that only show up when
 data is decoded as code. Three kinds may be real code and need checking when
@@ -150,3 +165,47 @@ pcrecomp's `MEM8`/`MEM16`/`MEM32` cast through `volatile`. That forces every
 guest memory access to be a real load or store, so clang cannot keep values
 in registers or merge accesses. NFSU2 used `restrict` instead. The change
 belongs in the runtime plan, once a running game can measure frame time.
+
+## Plan 9: the disc's `d3dx9_25.dll` as a fourth module
+
+Measured 2026-11-12 on the same machine.
+
+- **Catalog.** `python -m bw2.d3dx --catalog` writes
+  `bw2/catalog/d3dx9_25-apr2005.functions.json` (addresses only; the
+  `sha256` is the rebased image's, `image_base` `0x08000000`). Discovery
+  took 3,670 s wall (2,753 s user, 6.5 GB peak), two `disasm32` rounds of
+  about 28 minutes each. Seeds: 323 exports, 254 relocation targets in
+  `.data`, 149 vtable-scan methods (from `.data`; the scan skips `.text`),
+  0 RTTI, 0 gap seeds, 0 `EXTRA_SEEDS`, and 1,076 code-section relocation
+  targets (402 new after round 1). 14,394 entries, 5,681 starts and 8,713
+  aliases; 92.20% of the 2,162,371 bytes of `.text` covered.
+- **Code-section relocation seeds** (`discover(.., code_reloc_seeds=True)`,
+  `reloc_code_targets`): HIGHLOW sites in `.text` outside every instruction
+  and jump table the first round decoded, whose target is a vtable-scan
+  method or is not inside a decoded instruction and decodes as a function
+  body (`probes_as_function_body`). By their first instructions (157 of the
+  402 new ones load or address `ecx` from an `ebp` frame slot) most look like
+  C++ unwind funclets and SEH blocks that the DLL's own tables name.
+- **Labels folded into their bodies** (`discover(.., cfg_aliases=True)`,
+  `catclean.alias_cfg_labels`). The first lift of the catalog was 1.3 GB of
+  C with 304 cold shards: a single 176 KB function at `0x0808E0C4` (unrolled
+  float code, 38,521 decoded instructions) had 304 of its loop heads in the
+  catalog as starts, and each start lifted as a full copy of the function.
+  In an image that keeps its relocations every address the code can take is
+  a relocation target, a call target or an export, so a start that is none
+  of these and that a trusted body's own control flow reaches is a label of
+  that body; it becomes an alias. 530 starts folded. Off for `white`, `vm`
+  and `slr`, whose catalogs do not change.
+- **Lift:** 5,681 functions, 11 shards and 1 cold shard (`0x0808E0C4`),
+  101.3 MB of C, 29.5 s. A lifter patch (`third_party/pcrecomp.PATCHES`)
+  makes a `loop`/`jecxz` to a target with no label dispatch like a `jcc`,
+  for data decoded as a `loope` at `0x08005C6D`.
+- **Link set:** 55,115 functions, 9 unresolved direct targets. The four new
+  ones (`0x0D088B12`, `0xD80A380D`, `0xE0990182`, `0xE0A90162`) lie outside
+  every image, like `white`'s five, so they come from data decoded as code
+  and stay loud stubs. None is inside `0x08000000`-`0x08253000`.
+- **Build:** lifting the four modules takes about 181 s (`white` 138 s,
+  `vm` 8 s, `slr` 6 s, `d3dx` 30 s). The build after relifting only `d3dx`
+  compiled 116 of 200 objects in 194 s (235 s wall with the lift).
+  `out/bw2` is 143.4 MB (114.8 MB before). Every build copies the rebased
+  DLL to `out/d3dx9_25.dll`, beside the engine.
