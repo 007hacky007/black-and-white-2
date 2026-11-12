@@ -732,18 +732,32 @@ void hle_input_mouse(uint32_t message, int sx, int sy) {
     if (!t) return;
     q_push(t, message, mk_state(), ((uint32_t)(cy & 0xFFFF) << 16) | (uint32_t)(cx & 0xFFFF));
 }
-void hle_input_key(int down, uint32_t vk, uint32_t scan) {
-    vk &= 0xFF;
+/* A key: lParam bit 24 for an extended key, bit 30 for a repeat (a down for a
+ * key already down). The left and right modifiers (VK_LSHIFT .. VK_RMENU)
+ * post the generic VK_SHIFT, VK_CONTROL or VK_MENU, as Windows does; the key
+ * state keeps the side and the generic key, down while either side is. */
+static void set_key(uint32_t vk, int down) {
     if (down) g_keys[vk] = (uint8_t)(0x80 | ((g_keys[vk] & 1) ^ !(g_keys[vk] & 0x80)));
     else g_keys[vk] &= 1;
-    if (vk == 0xA0 || vk == 0xA1) { if (down) g_keys[VK_SHIFT] |= 0x80; else g_keys[VK_SHIFT] &= 1; }
-    if (vk == 0xA2 || vk == 0xA3) { if (down) g_keys[VK_CONTROL] |= 0x80; else g_keys[VK_CONTROL] &= 1; }
-    if (vk == 0xA4 || vk == 0xA5) { if (down) g_keys[VK_MENU] |= 0x80; else g_keys[VK_MENU] &= 1; }
+}
+void hle_input_key_ex(int down, uint32_t vk, uint32_t scan, int extended) {
+    vk &= 0xFF;
+    int was_down = (g_keys[vk] & 0x80) != 0;
+    set_key(vk, down);
+    uint32_t wvk = vk;
+    if (vk >= 0xA0 && vk <= 0xA5) {
+        wvk = vk < 0xA2 ? VK_SHIFT : vk < 0xA4 ? VK_CONTROL : VK_MENU;
+        int either = down || (g_keys[vk ^ 1] & 0x80);    /* vk ^ 1: the other side */
+        if (either && !(g_keys[wvk] & 0x80)) set_key(wvk, 1);
+        else if (!either) set_key(wvk, 0);
+    }
     uint32_t t = hle_focus_window();
     int alt = (g_keys[VK_MENU] & 0x80) != 0;
-    uint32_t l = 1u | (scan & 0xFFu) << 16 | (alt ? 1u << 29 : 0) | (down ? 0 : 3u << 30);
-    if (t) q_push(t, alt || vk == VK_MENU || vk == 0x79 ? (down ? WM_SYSKEYDOWN : WM_SYSKEYUP) : (down ? WM_KEYDOWN : WM_KEYUP), vk, l);
+    uint32_t l = 1u | (scan & 0xFFu) << 16 | (extended ? 1u << 24 : 0) | (alt ? 1u << 29 : 0) |
+                 (down ? (was_down ? 1u << 30 : 0) : 3u << 30);
+    if (t) q_push(t, alt || wvk == VK_MENU || wvk == 0x79 ? (down ? WM_SYSKEYDOWN : WM_SYSKEYUP) : (down ? WM_KEYDOWN : WM_KEYUP), wvk, l);
 }
+void hle_input_key(int down, uint32_t vk, uint32_t scan) { hle_input_key_ex(down, vk, scan, 0); }
 void hle_input_cursor(int sx, int sy) { g_cursor_x = sx, g_cursor_y = sy; }
 void hle_input_key_state(uint32_t vk, int down) { if (down) g_keys[vk & 0xFF] |= 0x80; else g_keys[vk & 0xFF] &= 1; }
 
