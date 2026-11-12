@@ -1892,6 +1892,39 @@ static void group_swapchain2(void) {
     vcall(fs, SF_UnlockRect, 0);
 }
 
+/* Plan 7 Task 5: with BW2_FRAME_LOG=1 each Present prints the back buffer's numbers (tests/test_d3d9.py reads
+ * stderr); the readback leaves the back buffer as it was. */
+static void group_frame_log(void) {
+    uint32_t dev = new_device(64, 64), bb = back_buffer(dev);
+    static uint32_t px[64 * 64];
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFF102030u, f32(1.0f), 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Present, 4, 0u, 0u, 0u, 0u), D3D_OK);                 /* frame 1 */
+    CHECKEQ(vcall(dev, DV_Present, 4, 0u, 0u, 0u, 0u), D3D_OK);                 /* frame 2 */
+    read_rt(dev, bb, 64, 64, px);
+    CHECKEQ(px[0], 0xFF102030u);
+    CHECKEQ(px[63 * 64 + 63], 0xFF102030u);
+    /* 128 pixels of (255, 128, 64) on black: the means truncate */
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFF000000u, f32(1.0f), 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 1u, rect(0, 0, 16, 8), CLEAR_TARGET, 0xFFFF8040u, f32(1.0f), 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Present, 4, 0u, 0u, 0u, 0u), D3D_OK);                 /* frame 3 */
+    /* black with alpha one counts as black */
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFF000000u, f32(1.0f), 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_Present, 4, 0u, 0u, 0u, 0u), D3D_OK);                 /* frame 4 */
+    /* an additional swap chain's Present logs its own back buffer */
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateAdditionalSwapChain, 2, pp_new(32, 16, FMT_X8R8G8B8, 0), out), D3D_OK);
+    uint32_t sc = MEM32(out);
+    CHECKEQ(vcall(sc, SC_GetBackBuffer, 3, 0u, 0u, out), D3D_OK);
+    uint32_t bb2 = MEM32(out);
+    CHECKEQ(vcall(dev, DV_SetRenderTarget, 2, 0u, bb2), D3D_OK);
+    vcall(dev, DV_SetDepthStencilSurface, 1, 0u);
+    CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, 0xFF0000FFu, f32(1.0f), 0u), D3D_OK);
+    CHECKEQ(vcall(sc, SC_Present, 5, 0u, 0u, 0u, 0u, 0u), D3D_OK);              /* frame 5 */
+    static uint32_t px2[32 * 16];
+    read_rt(dev, bb2, 32, 16, px2);
+    CHECKEQ(px2[0], 0xFF0000FFu);
+}
+
 /* Across processes (test_cache_persists): A draws one state, B another, check needs both from disk. */
 static void persist_draw(int which) {
     uint32_t dev = new_device(16, 16);
@@ -1976,6 +2009,7 @@ static void group_vdecl_dupes(void) {
 }
 
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "frame_log", group_frame_log },
     { "vdecl_dupes", group_vdecl_dupes },
     { "autogen_rt", group_autogen_rt },
     { "persist_a", group_persist_a }, { "persist_b", group_persist_b }, { "persist_check", group_persist_check },

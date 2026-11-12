@@ -1,6 +1,8 @@
 """Where the boot stops today: the lifted game boots on the patched tree through Direct3D, its DirectInput
-mouse setup, its shaders and its effects (plan 5) to a later plan's layer."""
+mouse setup, its shaders and effects (plan 5), its sprite and fonts and its loading screen (plan 7) to the
+audio layer (docs/research/startup.md)."""
 import os
+import re
 import subprocess
 
 import pytest
@@ -12,34 +14,47 @@ ENGINE = paths.REPO / "out" / "bw2"
 LOUD = ("TRIPWIRE", "trap:", "unresolved indirect call", "unresolved direct call", "unimplemented import",
         "uncaught C++", "FATAL", "not implemented")
 
-
-# Where the boot stops after plan 5 (Task 7): the game creates its effects, validates and sets their
-# techniques and runs their passes, then calls one of plan 7's names, so the run exits 4 at that layer and
-# never at D3DXCreateEffect (docs/research/shaders.md). Plan 7 answers D3DXCreateSprite (Task 2) and
-# D3DXCreateFontA (Task 4); the boot then goes on through its fonts to the audio layer (measured stop
-# since: DirectSound (CoCreateInstance)). Task 5 replaces this test.
-LATER = ("D3DXCompileShader", "D3DXCompileShaderFromFileA", "D3DXCreateFragmentLinker", "D3DXCreateSphere",
-         "DirectSound (CoCreateInstance)")
+# the Arial Narrow heights the game asks for, in call order: four rounds (docs/research/startup.md)
+ARIAL_NARROW_HEIGHTS = [-10, -8, -13, -10, -15, -12, -20, -16, -31, -24, -46, -36] * 4
+FONT = re.compile(r'^\[bw2\] font "([^"]*)" (-?\d+) weight (\d+): (.*)$')
+FRAME = re.compile(r"^\[bw2\] frame (\d+): (\d+)x(\d+), mean (\d+),(\d+),(\d+), nonblack (\d+) of (\d+)$")
 
 
 @pytest.mark.gamefiles
-def test_boot_after_effects(tmp_path):
+def test_boot_to_audio(tmp_path):
+    # Plan 7: the game makes its sprite and its 49 fonts (the 48 Arial Narrow ones from the face it adds
+    # with AddFontMemResourceEx), loads its script plugin, shows its loading screen and stops at the
+    # audio layer, CoCreateInstance of the DirectSound class.
     assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
-    env = dict(os.environ, BW2_SUPPORT=str(tmp_path / "support"), BW2_HEADLESS="1")
+    env = dict(os.environ, BW2_SUPPORT=str(tmp_path / "support"), BW2_HEADLESS="1", BW2_FRAME_LOG="1",
+               BW2_FONT_LOG="1")
     r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
                        timeout=180, env=env)
     (tmp_path / "stderr.txt").write_text(r.stderr)
     tail = r.stderr[-4000:]
+    lines = r.stderr.splitlines()
     assert r.returncode == 4, f"exit {r.returncode}\n{tail}"
-    assert "reached D3DXCreateEffect" not in r.stderr, tail
     # the loader's own counts ("bound 412 imports, 0 unresolved", "0 unresolved imports") are not stops
-    err = "\n".join(ln for ln in r.stderr.splitlines()
-                     if not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln))
+    err = "\n".join(ln for ln in lines if not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln))
     for word in LOUD + ("unresolved", "unimplemented", "uncaught", "trap"):
         assert word not in err, f"{word!r} in stderr\n{tail}"
-    stop = [ln for ln in r.stderr.splitlines() if "owned by a later plan" in ln]
+    stop = [ln for ln in lines if "owned by a later plan" in ln]
     assert len(stop) == 1, tail
-    assert any(f"reached {name}: owned by a later plan" in stop[0] for name in LATER), stop[0]
+    assert "reached DirectSound (CoCreateInstance): owned by a later plan" in stop[0], stop[0]
+    # the fonts: Courier New from the Mac's file, then all 48 Arial Narrow ones from the game's own face
+    fonts = [m.groups() for m in map(FONT.match, lines) if m]
+    assert len(fonts) == 49, "\n".join(map(str, fonts))
+    face, height, weight, source = fonts[0]
+    assert (face, height, weight) == ("Courier New", "-16", "400") and source.startswith("/"), fonts[0]
+    assert [f[:3] for f in fonts[1:]] == [("Arial Narrow", str(h), "400") for h in ARIAL_NARROW_HEIGHTS], fonts
+    assert all(f[3] == "memory" for f in fonts[1:]), fonts
+    # the script plugin loads as a lifted DLL with every import answered
+    assert "scriptlibraryr.dll: lifted DLL at 0x10000000, 0 imports unanswered" in r.stderr, tail
+    # the loading screen: at least one frame is mostly not black
+    frames = [tuple(map(int, m.groups())) for m in map(FRAME.match, lines) if m]
+    assert frames and [f[0] for f in frames] == list(range(1, len(frames) + 1)), frames
+    assert all(f[7] == f[1] * f[2] for f in frames), frames
+    assert any(2 * f[6] >= f[7] for f in frames), frames
 
 
 def _vm_thunks_called_by_the_game():

@@ -229,9 +229,41 @@ static void dv_Clear(void) {               /* (this, count, D3DRECT*, flags, col
     RET(D3D_OK, 7);
 }
 
+/* The frame log (plan 7 Task 5): with BW2_FRAME_LOG=1 (read once) each Present reads the back buffer back and
+ * prints its size, its mean RGB (0-255, truncated) and how many pixels are not black. No pixels are kept. */
+static int frame_log_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("BW2_FRAME_LOG");
+        on = e && !strcmp(e, "1");
+    }
+    return on;
+}
+static void frame_log(struct d3d_device *d, struct d3d_surface *bb) {
+    static uint32_t n;
+    if (bb->f->store != ST_BGRA8)
+        d3d_fail("frame log: back buffer format %s is not read back", bb->f->name);
+    uint32_t w = bb->w, h = bb->h, pitch = w * 4;
+    uint8_t *px = malloc((size_t)pitch * h);
+    if (!px) d3d_fail("frame log: no memory for a %ux%u readback", w, h);
+    mtl_tex_download(d->mtl, bb->tex, bb->slice, bb->level, 0, 0, w, h, px, pitch);
+    uint64_t sum[3] = { 0, 0, 0 }, nonblack = 0;
+    for (size_t i = 0, end = (size_t)w * h; i < end; i++) {
+        const uint8_t *p = px + 4 * i;                       /* B, G, R, A */
+        sum[0] += p[2], sum[1] += p[1], sum[2] += p[0];
+        nonblack += (p[0] | p[1] | p[2]) != 0;
+    }
+    free(px);
+    uint64_t total = (uint64_t)w * h;
+    fprintf(stderr, "[bw2] frame %u: %ux%u, mean %llu,%llu,%llu, nonblack %llu of %llu\n", ++n, w, h,
+            (unsigned long long)(sum[0] / total), (unsigned long long)(sum[1] / total),
+            (unsigned long long)(sum[2] / total), (unsigned long long)nonblack, (unsigned long long)total);
+}
+
 static void present_bb(struct d3d_device *d, uint32_t bbobj) {
     struct d3d_surface *bb = d3d_surf(bbobj);
     mtl_present(d->mtl, bb->tex);
+    if (frame_log_on()) frame_log(d, bb);
     d3d_bind(&d->last_presented, bbobj);
 }
 static void present(struct d3d_device *d) { present_bb(d, d->backbuffer); }

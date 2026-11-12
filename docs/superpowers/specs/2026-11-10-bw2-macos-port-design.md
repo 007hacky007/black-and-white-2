@@ -235,10 +235,40 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   before it (`docs/research/shaders.md`). Two Win32 answers were fixed on the way:
   `GetFullPathNameA` answers in the guest's folders, and `ReadFileEx` completes at
   the thread's next alertable wait. The game's asset streaming needs both.
+  **Plan 7:** the sprite and the font run natively:
+  - `ID3DXSprite` queues quads and draws them through the device's own methods. In
+    screen space it draws pre-transformed vertices moved by -0.5 pixel, so a 1:1
+    sprite maps texels to pixels exactly;
+  - `ID3DXFont` lays text out by GDI's `DrawText` rules and caches glyphs in
+    `A8R8G8B8` textures. Its metrics come from the font's own tables, as GDI's do
+    (`VDMX` first, then `OS/2`). Its glyph shapes are CoreText's;
+  - `AddFontMemResourceEx` keeps a font private to the process. A memory face wins
+    over a system face of the same name, and a face binds when `D3DXCreateFontA`
+    runs. A missing face stops loudly.
+
+  Phasing (my call, 2026-11-12): the boot reaches only the sprite and the font
+  before audio. HLSL compilation, the fragment linker and `D3DXCreateSphere` stay
+  loud later-plan stops, and the HLSL library choice above waits with them, for the
+  first plan whose boot reaches them. Input stays deferred: the game pumps messages
+  through its loading screen but reads no input before audio. The real boot makes
+  its sprite and 49 fonts (48 of them from the face the game adds from memory),
+  loads its script plugin, shows its loading screen and stops at audio
+  (`docs/research/startup.md`). Five Win32 and COM answers were fixed on the way:
+  `LoadImageA` of a missing file gives NULL, `LoadLibraryA` adds the default
+  `.dll`, and `CoInitializeEx`, `CoFileTimeToDosDateTime` and the two memory-font
+  calls are answered. `BW2_FRAME_LOG=1` prints numbers for each `Present` (size,
+  mean colour and non-black pixels), and no pixels are stored.
 - **Audio:** the game loads OpenAL through `wrap_oal.dll`. We answer the
   OpenAL + EAX API ourselves on top of an open OpenAL implementation or
   CoreAudio (builder's call). EAX effects can be approximated or dropped in a
-  first pass but must not crash.
+  first pass but must not crash. **Measured start (plan 7):** audio init
+  (`sub_008B1400`) first calls `CoInitializeEx` and then `CoCreateInstance` of
+  `CLSID_DirectSound`, which is where the boot stops today (exit 4). The spike
+  behind plan 7 saw `CoUninitialize`, `GetVersion`, `LoadLibraryA("dsound.dll")`
+  (`sub_008B9700`) and `GetProcAddress(DllGetClassObject)` come after it. The exe
+  also names `wrap_oal.dll`, `OpenAL32.dll`, `alcOpenDevice` and `EAXGet`/`EAXSet`.
+  The game tree ships no OpenAL DLL. Plan 8 decides whether to answer DirectSound
+  or to fail it so the game goes to OpenAL (`docs/research/startup.md`).
 - **Input:** DirectInput 8 keyboard and mouse from AppKit events, plus the
   Win32 mouse messages the game reads.
 - **Video:** Bink through pcrecomp's ffmpeg-backed `bink.c`, adapted to D3D9

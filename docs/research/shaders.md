@@ -212,6 +212,9 @@ Two Win32 answers were wrong or missing:
 
 ## For the next plans
 
+- Plan 7 answered the stop. The game makes its sprite and fonts, shows its loading
+  screen and stops at audio. That boot, with its first frames and the audio start for
+  plan 8, is in `startup.md`. These notes are left as plan 5 found them.
 - The stop is `D3DXCreateSprite`, which plan 7 owns. Plan 7 also owns the font,
   the mesh, HLSL compilation and the fragment linker. None of those has been
   reached yet.

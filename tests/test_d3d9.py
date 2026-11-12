@@ -90,3 +90,27 @@ def test_cache_persists_across_runs(selftest, tmp_path):
         r = run_group(selftest, group, tmp_path)
         assert r.returncode == 0 and f"{group}: 0 failed" in r.stdout, r.stdout[-4000:] + r.stderr[-4000:]
         assert "not saved" not in r.stderr, r.stderr[-4000:]
+
+
+# ---- Plan 7 Task 5: the frame log ----
+
+def test_frame_log(selftest, tmp_path, monkeypatch):
+    # with BW2_FRAME_LOG=1 each Present reads the back buffer back and prints one line of numbers
+    monkeypatch.setenv("BW2_FRAME_LOG", "1")
+    r = run_group(selftest, "frame_log", tmp_path)
+    assert r.returncode == 0 and "frame_log: 0 failed" in r.stdout, r.stdout[-4000:] + r.stderr[-4000:]
+    lines = [ln for ln in r.stderr.splitlines() if ln.startswith("[bw2] frame ")]
+    assert lines == ["[bw2] frame 1: 64x64, mean 16,32,48, nonblack 4096 of 4096",
+                     "[bw2] frame 2: 64x64, mean 16,32,48, nonblack 4096 of 4096",
+                     "[bw2] frame 3: 64x64, mean 7,4,2, nonblack 128 of 4096",
+                     "[bw2] frame 4: 64x64, mean 0,0,0, nonblack 0 of 4096",
+                     "[bw2] frame 5: 32x16, mean 0,0,255, nonblack 512 of 512"], r.stderr[-4000:]
+    # without it (or with another value) Present reads nothing back and prints nothing
+    for value in (None, "0"):
+        if value is None:
+            monkeypatch.delenv("BW2_FRAME_LOG")
+        else:
+            monkeypatch.setenv("BW2_FRAME_LOG", value)
+        r = run_group(selftest, "frame_log", tmp_path)
+        assert r.returncode == 0 and "frame_log: 0 failed" in r.stdout, r.stdout[-4000:] + r.stderr[-4000:]
+        assert "[bw2] frame " not in r.stderr, r.stderr[-4000:]

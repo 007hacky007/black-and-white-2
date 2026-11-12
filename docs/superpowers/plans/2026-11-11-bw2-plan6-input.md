@@ -1,6 +1,6 @@
 # Plan 6: Input and the game window Implementation Plan
 
-**Status (user, 2026-11-11): deferred.** The game reads no input before the shader stage, so shaders and effects come first (plan 5). Plan 5 starts with a minimal DirectInput mouse that answers the game's setup and reports no input. Before this plan runs, update it from what the game does once it reads input, and rebase its Task 2 on plan 5's stub. Below, "plan 6's layer" means the shader layer, which is plan 5's.
+**Status (user, 2026-11-11): deferred.** The game reads no input before the shader stage, so shaders and effects come first (plan 5). Plan 5 starts with a minimal DirectInput mouse that answers the game's setup and reports no input. Before this plan runs, update it from what the game does once it reads input, and rebase its Task 2 on plan 5's stub. Below, "plan 6's layer" means the shader layer, which is plan 5's. **Still deferred after plan 7 (2026-11-12):** the game pumps window messages through its loading screen but reads no input before the audio stop (no `GetDeviceData`, `GetDeviceState`, `GetCursorPos`, `GetAsyncKeyState` or `GetKeyState`; `docs/research/startup.md`), so there is still no input read to start from.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
