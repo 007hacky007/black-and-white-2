@@ -1,6 +1,5 @@
 """Where the boot stops today: the lifted game boots on the patched tree through Direct3D, its DirectInput
-mouse setup and its effects (techniques and passes, plan 5 Task 6) to a later plan's layer (Task 7 replaces
-this)."""
+mouse setup, its shaders and its effects (plan 5) to a later plan's layer."""
 import os
 import subprocess
 
@@ -14,25 +13,31 @@ LOUD = ("TRIPWIRE", "trap:", "unresolved indirect call", "unresolved direct call
         "uncaught C++", "FATAL", "not implemented")
 
 
-# Where the boot stops with plan 5's effect techniques and passes (Task 6): the game creates its effects,
-# validates and sets their techniques, runs Begin/BeginPass/EndPass/End on them, and then calls
-# D3DXCreateSprite, which plan 7 owns: the run exits 4 naming it.
-FIRST_STOP = "reached D3DXCreateSprite: owned by a later plan"
+# Where the boot stops after plan 5 (Task 7): the game creates its effects, validates and sets their
+# techniques and runs their passes, then calls one of plan 7's names (measured: D3DXCreateSprite), so the
+# run exits 4 at that layer and never at D3DXCreateEffect (docs/research/shaders.md).
+LATER = ("D3DXCompileShader", "D3DXCompileShaderFromFileA", "D3DXCreateFragmentLinker", "D3DXCreateSprite",
+         "D3DXCreateFontA", "D3DXCreateSphere")
 
 
 @pytest.mark.gamefiles
-def test_boot_reaches_effects(tmp_path):
+def test_boot_after_effects(tmp_path):
     assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
     env = dict(os.environ, BW2_SUPPORT=str(tmp_path / "support"), BW2_HEADLESS="1")
     r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
-                       timeout=120, env=env)
+                       timeout=180, env=env)
     (tmp_path / "stderr.txt").write_text(r.stderr)
     tail = r.stderr[-4000:]
     assert r.returncode == 4, f"exit {r.returncode}\n{tail}"
     assert "reached D3DXCreateEffect" not in r.stderr, tail
-    assert FIRST_STOP in r.stderr, tail
-    for word in LOUD:
-        assert word not in r.stderr, f"{word!r} in stderr\n{tail}"
+    # the loader's own counts ("bound 412 imports, 0 unresolved", "0 unresolved imports") are not stops
+    err = "\n".join(ln for ln in r.stderr.splitlines()
+                     if not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln))
+    for word in LOUD + ("unresolved", "unimplemented", "uncaught", "trap"):
+        assert word not in err, f"{word!r} in stderr\n{tail}"
+    stop = [ln for ln in r.stderr.splitlines() if "owned by a later plan" in ln]
+    assert len(stop) == 1, tail
+    assert any(f"reached {name}: owned by a later plan" in stop[0] for name in LATER), stop[0]
 
 
 def _vm_thunks_called_by_the_game():

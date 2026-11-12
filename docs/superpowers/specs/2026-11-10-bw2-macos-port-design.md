@@ -212,9 +212,29 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
 
   Vertex and index buffers are GPU-visible guest memory with no copies. DirectDraw
   7 answers video memory. D3DX's 30 math functions and its 18 texture and buffer
-  functions are native. Shaders, effects, sprite, font and mesh are plan 5's.
-  The game sets up DirectInput before it creates its device, so the real boot
-  stops there (`docs/research/graphics.md`).
+  functions are native. The game sets up DirectInput before it creates its
+  device, so plan 4's real boot stops there (`docs/research/graphics.md`).
+  **Plan 5:** shaders and effects run natively:
+  - vs 1.1-2.0 and ps 1.1-2.0 bytecode is decoded once and translated to one MSL
+    function per stage. The translated functions share plan 4's `VOut`, so a
+    shader stage pairs with the fixed-function stage of the other kind;
+  - the device advertises shader model 2.0, all the game ships;
+  - `D3DXAssembleShader` turns text assembly into the same bytecode;
+  - the fx_2_0 effect framework covers parameters, pools, the FXLC expressions
+    and preshaders (a float32 interpreter), techniques, passes and states. Passes
+    go through the device's own methods.
+
+  Phasing (user, 2026-11-11): shaders and effects came before input, because the
+  game reads no input before them. Plan 5 answers only DirectInput's mouse setup;
+  full input is plan 6's. HLSL compilation (`D3DXCompileShader`,
+  `D3DXCompileShaderFromFileA`, `D3DXCreateEffect` given HLSL text), the fragment
+  linker, the sprite (`D3DXCreateSprite`), the font (`D3DXCreateFontA`) and the
+  mesh (`D3DXCreateSphere`) are plan 7's. Each of them exits 4 as a later plan's
+  layer. The real boot creates 32 effects (39 with clones) and walks their
+  techniques, and then stops at `D3DXCreateSprite`, with no draw and no input read
+  before it (`docs/research/shaders.md`). Two Win32 answers were fixed on the way:
+  `GetFullPathNameA` answers in the guest's folders, and `ReadFileEx` completes at
+  the thread's next alertable wait. The game's asset streaming needs both.
 - **Audio:** the game loads OpenAL through `wrap_oal.dll`. We answer the
   OpenAL + EAX API ourselves on top of an open OpenAL implementation or
   CoreAudio (builder's call). EAX effects can be approximated or dropped in a
@@ -382,6 +402,38 @@ These are traps NFSU2 hit; the design takes them as requirements.
   vertex function moves positions by (+1/w, -1/h) × w, pinned by a 1:1 texel test.
   A fixed-function stage with no texture reads TEXTURE as white. X8 targets keep
   alpha at one.
+- **Plan 5 (what the translator pins, from the D3D9 shader reference):**
+  - `rcp(0)` and `rsq(0)` give +infinity; `rsq`, `log` and `pow` use `|x|`;
+    `log(0)` gives -infinity; `nrm` of zero gives 0. Translated shaders compile
+    without fast math, so these IEEE results survive.
+  - vs_1_1 `mov a0` floors; vs_2_0 `mova` rounds to nearest, with ties away from
+    zero. A relative constant read outside 0..255 gives zero and never leaves the
+    array.
+  - `def` values override the device's constants for that shader only. ps 1.x
+    constants are clamped to [-1, 1]; ps 2.0 constants are not.
+  - vs < 3.0 `oD0`/`oD1` are clamped to [0,1]. With a vertex shader, the half-pixel
+    move applies to `oPos`, and user clip planes are in clip space.
+  - ps 1.x:
+    - the result is `r0`, saturated;
+    - `texcoord` clamps;
+    - `cnd` tests `r0.a > 0.5` in 1.1-1.3 and each component in 1.4;
+    - `cmp` is `>= 0`;
+    - a co-issued pair reads its sources before either half writes.
+  - Source modifiers, destination shifts and saturate follow the reference.
+    Partial precision and centroid are accepted and ignored.
+  - A sampler's coordinates follow the texture bound to it (2D, cube or volume),
+    not its `dcl`. Every game `dcl` is 2D. A sampler with nothing bound reads
+    (0,0,0,1).
+  - Fog (vertex fog from `oFog`, or table fog) and the alpha test are plan 4's
+    fixed stages, applied after a ps < 3.0 shader to `oC0` only.
+  - Anything else stops loudly, naming the version, the instruction and the token
+    offset: 3.0, the 2_x extensions, predication and flow control.
+
+  Each distinct translation is compiled on a background queue when the shader is
+  created, and cached by its source. A draw that needs another variant (input
+  types, clip planes, point size, flat shading, sampler types, fog, alpha test,
+  sRGB) compiles that variant and waits for it. The game's boot draws nothing
+  before plan 7's stop, so the pipeline archive is first used after it.
 - NFSU2 found that a Windows reference saves weeks: many of its "bugs" were
   measurement artifacts, and real ones went unseen without one. **There is no
   Windows reference for BW2 now** (decided by the user: nothing available).

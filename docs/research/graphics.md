@@ -34,8 +34,9 @@ DirectInput. So plan 4's device, resource, draw and D3DX code is proven by its
 selftests (`tests/test_d3d9.py`, `tests/test_d3dx.py`) and not yet by the game.
 
 **For the next plans:** the game sets up DirectInput before it creates its
-Direct3D device. A plan that has to reach the shader layer (plan 5's) in the real
-boot needs DirectInput answered first, at least as far as the game's setup.
+Direct3D device. Plan 5 answers that setup, and then the game's shaders and
+effects. The boot now runs on to plan 7's `D3DXCreateSprite`. What it does on the
+way (effects, techniques, shaders, compiles, input) is in `shaders.md`.
 
 ## The other imports the boot reached
 
@@ -67,7 +68,7 @@ game carries on.
   - `VendorId == 0x1002` (ATI) sets a flag at `0x933BB0`. With our vendor, the flag
     comes from a `GetVersionExA` check instead.
   - `PixelShaderVersion >= ps_2_0` (`0x933C0D`) raises a texture stage count to 16.
-    Ours is ps_3_0.
+    Ours was ps_3_0 in plan 4 and is ps_2_0 since plan 5.
 - No `Settings.ini` is written before the stop. Its first save comes after input
   setup.
 
