@@ -87,6 +87,18 @@ static void write_file(const char *path, const void *data, size_t n) {
     if (f) fwrite(data, 1, n, f), fclose(f);
 }
 
+/* GetKeyNameTextA, and GetKeyNameTextW (UTF-16) when w: lParam's name in a buffer of n characters
+   is want, and the count copied is its length. The buffer starts filled with 0x55. */
+static void key_name(int w, uint32_t lp, uint32_t n, const char *want) {
+    uint32_t buf = gmem(160);
+    memset(hle_ptr(buf), 0x55, 160);
+    uint32_t got = call(w ? "GetKeyNameTextW" : "GetKeyNameTextA", 3, lp, buf, n);
+    int ok = got == strlen(want);
+    for (size_t i = 0; ok && i <= strlen(want); i++)
+        ok = (w ? MEM16(buf + 2u * (uint32_t)i) : MEM8(buf + (uint32_t)i)) == (uint8_t)want[i];
+    if (!ok) { printf("FAIL GetKeyNameText%c(0x%08X, %u): %u, want \"%s\"\n", w ? 'W' : 'A', lp, n, got, want); fails++; }
+}
+
 /* Run fn in a child (fork) with its stderr captured in out: the child's exit status (fn returning is 0). */
 static int in_child(void (*fn)(void), char *out, size_t n) {
     fflush(stdout), fflush(stderr);
@@ -269,6 +281,64 @@ int main(void) {
         strcpy(hle_ptr(name), "data\\art\\t.dds");
         n = call("GetFullPathNameA", 4, name, 8u, buf, 0u);                        /* too small: the size needed */
         CHECK(n == strlen(BW2_INSTALL_DIR "\\data\\art\\t.dds") + 1);
+    }
+
+    /* CreateFileA: a read-only OPEN_ALWAYS of an existing file opens it in place, as Windows does (the audio
+       library opens its banks so); a missing one is still made in the overlay, a write still copies there */
+    {
+        struct stat st;
+        mkdir("Audio", 0755);
+        write_file("Audio/a.bin", "abc", 3);
+        write_file("Audio/b.bin", "abc", 3);
+        uint32_t name = gmem(64), buf = gmem(16), got = gmem(4);
+        strcpy(hle_ptr(name), "Audio\\a.bin");
+        uint32_t h = call("CreateFileA", 7, name, 0x80000000u, 1u, 0u, 3u, 0x80u, 0u);          /* OPEN_EXISTING */
+        memset(hle_ptr(buf), 0, 16);
+        CHECK(h != 0xFFFFFFFFu && call("ReadFile", 5, h, buf, 8u, got, 0u) == 1 && MEM32(got) == 3
+              && !memcmp(hle_ptr(buf), "abc", 3));
+        CHECK(call("CloseHandle", 1, h) == 1);
+        strcpy(hle_ptr(name), "Audio\\new.bin");
+        h = call("CreateFileA", 7, name, 0x80000000u, 0u, 0u, 4u, 0u, 0u);             /* missing: made in the overlay */
+        CHECK(h != 0xFFFFFFFFu && call("CloseHandle", 1, h) == 1);
+        CHECK(stat("support/Game/Audio/new.bin", &st) == 0 && stat("Audio/new.bin", &st) != 0);
+        strcpy(hle_ptr(name), "Audio\\b.bin");
+        h = call("CreateFileA", 7, name, 0xC0000000u, 0u, 0u, 4u, 0x80u, 0u);          /* read and write: copied */
+        CHECK(h != 0xFFFFFFFFu && call("CloseHandle", 1, h) == 1);
+        char c[8] = "";
+        FILE *f = fopen("support/Game/Audio/b.bin", "rb");
+        CHECK(f && fread(c, 1, sizeof c, f) == 3 && !memcmp(c, "abc", 3));
+        if (f) fclose(f);
+        strcpy(hle_ptr(name), "Audio\\a.bin");
+        h = call("CreateFileA", 7, name, 0x80000000u, 1u, 0u, 4u, 0x80u, 0u);          /* read-only OPEN_ALWAYS */
+        CHECK(h != 0xFFFFFFFFu && call("GetLastError", 0) == 183u);                    /* ERROR_ALREADY_EXISTS */
+        memset(hle_ptr(buf), 0, 16);
+        CHECK(call("ReadFile", 5, h, buf, 8u, got, 0u) == 1 && MEM32(got) == 3 && !memcmp(hle_ptr(buf), "abc", 3));
+        CHECK(call("CloseHandle", 1, h) == 1);
+        CHECK(stat("support/Game/Audio/a.bin", &st) != 0);                             /* no empty copy made */
+    }
+
+    /* GetKeyNameTextA and W: Windows' US English names. Bit 24 is extended, bit 25 "don't care" (merges
+       only Ctrl and Shift). The game asks W first, then A when W gave nothing. */
+    {
+        int have_w = hle_resolve("GetKeyNameTextW") != 0;
+        CHECK(have_w);
+        for (int w = 0; w <= (have_w ? 1 : 0); w++) {
+            key_name(w, 0x02360000u, 64u, "Shift");
+            key_name(w, 0x00360000u, 64u, "Right Shift");
+            key_name(w, 0x031D0000u, 64u, "Ctrl");
+            key_name(w, 0x011D0000u, 64u, "Right Ctrl");
+            key_name(w, 0x03480000u, 64u, "Up");
+            key_name(w, 0x02480000u, 64u, "Num 8");
+            key_name(w, 0x021E0000u, 64u, "A");
+            key_name(w, 0x02390000u, 64u, "Space");
+            key_name(w, 0x020C0000u, 64u, "-");
+            key_name(w, 0x01380000u, 64u, "Right Alt");
+            key_name(w, 0x02000000u, 64u, "");
+            key_name(w, 0x000E0000u, 3u, "Ba");
+            uint32_t buf = gmem(8);
+            memset(hle_ptr(buf), 0x55, 8);
+            CHECK(call(w ? "GetKeyNameTextW" : "GetKeyNameTextA", 3, 0x000E0000u, buf, 0u) == 0 && MEM8(buf) == 0x55);
+        }
     }
 
     /* LoadLibraryA: Windows' default extension. A module already loaded is found with or without ".dll" */

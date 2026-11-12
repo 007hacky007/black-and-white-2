@@ -52,3 +52,12 @@ def test_vm_entries_are_the_push_stubs(tmp_path):
     from bw2.extrastarts import vm_entries
     test_vm_pattern_starts(tmp_path)
     assert vm_entries(tmp_path / "vm.exe") == [0x402020, 0x40202A]
+
+
+def test_boot_start_8b00b0():
+    # the vector-constructor iterator at 0xAD9918 calls 0x8B00B0, which follows a `ret 8` inside the
+    # catalogued sub_008B0080 (plan 8, "Measured" item 7): a boot start, kept by --write
+    from bw2.extrastarts import EXTRA
+    rows = json.loads(EXTRA.read_text())["starts"]
+    assert [0x8B00B0, "boot"] in rows
+    assert 0x8B00B0 in load_extra_starts()
