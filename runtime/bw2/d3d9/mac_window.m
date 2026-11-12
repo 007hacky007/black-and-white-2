@@ -19,7 +19,9 @@
  *   - the close button and Cmd-Q push CLOSE (the game gets WM_CLOSE) and
  *     never close or quit by themselves while a game window exists;
  *   - becoming key pushes ACTIVATE 1, resigning key ACTIVATE 0 (and the
- *     translator forgets what it gave down: input.c gives the game its ups).
+ *     translator forgets what it gave down: input.c gives the game its ups);
+ *   - the cursor follows cursor.c's policy (plan 6 Task 5, bw2_mac_cursor_apply):
+ *     warped, detached and hidden only while the game window is key.
  * Everything here runs on the main thread, except bw2_mac_window_open/mode/
  * close's own first lines, which run on the guest thread and hand the rest
  * over with bw2_main_sync. The main thread never touches guest memory or
@@ -34,6 +36,10 @@
 #include "input.h"
 
 static MtlCtx *ctx_of(struct mtl_ctx *c) { return (__bridge MtlCtx *)(void *)c; }
+
+static NSCursor *cursor_image(void);
+static void cursor_refresh(void);
+static void cursor_release(void);
 
 static void push_kind(enum bw2_in_kind kind, int down) {
     struct bw2_in_event e = { .kind = kind, .down = down };
@@ -75,11 +81,14 @@ static void push_kind(enum bw2_in_kind kind, int down) {
     for (NSTrackingArea *a in [self.trackingAreas copy]) [self removeTrackingArea:a];
     [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect
                                                        options:NSTrackingMouseMoved | NSTrackingCursorUpdate |
+                                                               NSTrackingMouseEnteredAndExited |
                                                                NSTrackingActiveAlways | NSTrackingInVisibleRect
                                                          owner:self userInfo:nil]];
     [super updateTrackingAreas];
 }
-- (void)cursorUpdate:(NSEvent *)e { (void)e; [[NSCursor arrowCursor] set]; }   /* the cursor policy is Task 5's */
+- (void)cursorUpdate:(NSEvent *)e { (void)e; [cursor_image() set]; cursor_refresh(); }
+- (void)mouseEntered:(NSEvent *)e { (void)e; cursor_refresh(); }
+- (void)mouseExited:(NSEvent *)e { (void)e; cursor_refresh(); }
 
 /* An event's point in view points. An event with no window (one made from a CGEvent) carries it on
  * the screen. */
@@ -145,11 +154,12 @@ static NSMutableArray<BW2Game *> *g_games;   /* the live game windows, newest la
 
 @implementation BW2Game
 - (BOOL)windowShouldClose:(NSWindow *)w { (void)w; push_kind(BW2_IN_CLOSE, 0); return NO; }
-- (void)windowDidBecomeKey:(NSNotification *)n { (void)n; push_kind(BW2_IN_ACTIVATE, 1); }
+- (void)windowDidBecomeKey:(NSNotification *)n { (void)n; push_kind(BW2_IN_ACTIVATE, 1); cursor_refresh(); }
 - (void)windowDidResignKey:(NSNotification *)n {
     (void)n;
     push_kind(BW2_IN_ACTIVATE, 0);
     bw2_translate_reset(&self.view->tr);         /* input.c gives the game the ups */
+    cursor_release();                            /* shown and reattached at once, whatever the game says */
 }
 @end
 
@@ -240,7 +250,86 @@ void bw2_mac_window_close(struct mtl_ctx *cc) {
         [win orderOut:nil];
         [win close];
         if (g) [g_games removeObject:g];
+        cursor_refresh();                        /* no game window: the pointer is the user's again */
     });
+}
+
+/* ---- the cursor (plan 6 Task 5): cursor.c's policy, applied ----
+ * The mode comes from the guest thread (bw2_cursor_publish, dispatch_async). Here:
+ *   - while the game window is key: detached as the mode says (warped into the picture first, so the
+ *     frozen pointer is inside the view and AppKit's clicks reach it), hidden while detached, and
+ *     otherwise hidden only while the pointer is inside the view and the mode hides it;
+ *   - while it is not key (resigned, or a mode that raced a Cmd-Tab): shown and attached, no warp;
+ *   - [NSCursor hide]/unhide kept balanced with a flag. */
+static struct bw2_cursor_mode g_cmode;   /* the last mode received, without its warp */
+static NSCursor *g_cimage;               /* the mode's image; nil: the arrow */
+static int g_chidden, g_cdetached;      /* what is applied now */
+
+static NSCursor *cursor_image(void) { return g_cimage ?: NSCursor.arrowCursor; }
+
+static void set_hidden(int h) {
+    if (h == g_chidden) return;
+    g_chidden = h;
+    if (h) [NSCursor hide];
+    else [NSCursor unhide];
+}
+static void set_detached(int d) {
+    if (d == g_cdetached) return;
+    g_cdetached = d;
+    CGAssociateMouseAndMouseCursorPosition(d ? false : true);
+}
+static BW2Game *cursor_game(void) {
+    BW2Game *g = g_games.lastObject;
+    return g && g.window.isKeyWindow ? g : nil;
+}
+static int pointer_inside(BW2Game *g) {
+    NSPoint p = [g.view convertPoint:g.window.mouseLocationOutsideOfEventStream fromView:nil];
+    return NSPointInRect(p, g.view.bounds);
+}
+/* A client point (back-buffer pixels) to the global display (top-left origin), through the letterbox. */
+static void warp_to(BW2Game *g, int cx, int cy) {
+    NSSize s = g.view.bounds.size;
+    struct bw2_geom geom = { s.width, s.height, g.view.bbW, g.view.bbH };
+    double vx, vy;
+    bw2_client_to_view(&geom, cx, cy, &vx, &vy);
+    NSPoint w = [g.view convertPoint:NSMakePoint(vx, vy) toView:nil];
+    NSPoint scr = [g.window convertPointToScreen:w];
+    CGFloat top = NSMaxY(NSScreen.screens.firstObject.frame);
+    CGWarpMouseCursorPosition(CGPointMake(scr.x, top - scr.y));
+    CGAssociateMouseAndMouseCursorPosition(true);   /* no event suppression after the warp */
+    g_cdetached = 0;
+}
+static void cursor_release(void) { set_hidden(0), set_detached(0); }
+/* Apply g_cmode as the window's state allows; warp is the mode's own warp, if any. */
+static void cursor_apply_mode(const struct bw2_cursor_mode *m) {
+    BW2Game *g = cursor_game();
+    if (!g) { cursor_release(); return; }
+    if (m && m->warp) warp_to(g, m->warp_x, m->warp_y);
+    else if (g_cmode.detached && !g_cdetached)       /* a detach whose warp was not applied: the centre */
+        warp_to(g, (int)g.view.bbW / 2, (int)g.view.bbH / 2);
+    set_detached(g_cmode.detached);
+    set_hidden(g_cmode.detached || (g_cmode.hidden && pointer_inside(g)));
+}
+static void cursor_refresh(void) { cursor_apply_mode(NULL); }
+
+void bw2_mac_cursor_apply(const struct bw2_cursor_mode *m, const uint8_t *rgba, int hot_x, int hot_y) {
+    g_cmode = *m;
+    g_cmode.warp = 0;
+    if (!m->image) g_cimage = nil;
+    else if (rgba) {
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:32 pixelsHigh:32
+                                                                     bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES
+                                                                          isPlanar:NO
+                                                                    colorSpaceName:NSDeviceRGBColorSpace
+                                                                       bytesPerRow:32 * 4 bitsPerPixel:32];
+        memcpy(rep.bitmapData, rgba, 32 * 32 * 4);  /* black, white or clear: premultiplied as it is */
+        NSImage *img = [[NSImage alloc] initWithSize:NSMakeSize(32, 32)];
+        [img addRepresentation:rep];
+        g_cimage = [[NSCursor alloc] initWithImage:img hotSpot:NSMakePoint(hot_x, hot_y)];
+    }
+    BW2Game *g = cursor_game();
+    if (g && pointer_inside(g)) [cursor_image() set];
+    cursor_apply_mode(m);
 }
 
 /* ---- the app delegate ---- */
@@ -300,4 +389,63 @@ int bw2_mac_selftest_input(void) {
 /* The close button, as a click on it does it. */
 void bw2_mac_selftest_close(void) {
     bw2_main_sync(^{ [g_games.lastObject.window performClose:nil]; });
+}
+
+/* ---- --selftest-cursor-window (main.c): the cursor policy on a real window ---- */
+static CGPoint g_saved_pointer;
+static CGPoint pointer_now(void) {
+    CGEventRef e = CGEventCreate(NULL);
+    CGPoint p = CGEventGetLocation(e);
+    CFRelease(e);
+    return p;
+}
+/* The pointer to the main display's top-left corner, below the menu bar: outside the window to come. */
+void bw2_mac_selftest_park_pointer(void) {
+    bw2_main_sync(^{
+        g_saved_pointer = pointer_now();
+        CGRect b = CGDisplayBounds(CGMainDisplayID());
+        CGWarpMouseCursorPosition(CGPointMake(b.origin.x + 8, b.origin.y + 60));
+        CGAssociateMouseAndMouseCursorPosition(true);
+    });
+}
+void bw2_mac_selftest_restore_pointer(void) {
+    bw2_main_sync(^{
+        cursor_release();
+        CGWarpMouseCursorPosition(g_saved_pointer);
+        CGAssociateMouseAndMouseCursorPosition(true);
+    });
+}
+/* Hide the app (as Cmd-H or Cmd-Tab away leaves the game) or bring it back. */
+void bw2_mac_selftest_app_active(int active) {
+    bw2_main_sync(^{
+        if (!active) { [NSApp hide:nil]; return; }
+        [NSApp unhide:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+        [g_games.lastObject.window makeKeyAndOrderFront:nil];
+    });
+}
+/* The newest game window's cursor as applied: key, hidden, detached, the pointer inside the view and
+ * its client point. 0 if there is no game window. */
+int bw2_mac_selftest_cursor(int *key, int *hidden, int *detached, int *inside, int *cx, int *cy) {
+    __block int ok = 0;
+    bw2_main_sync(^{
+        BW2Game *g = g_games.lastObject;
+        if (!g) return;
+        CGPoint gp = pointer_now();
+        CGFloat top = NSMaxY(NSScreen.screens.firstObject.frame);
+        NSPoint w = [g.window convertPointFromScreen:NSMakePoint(gp.x, top - gp.y)];
+        NSPoint v = [g.view convertPoint:w fromView:nil];
+        NSSize s = g.view.bounds.size;
+        struct bw2_geom geom = { s.width, s.height, g.view.bbW, g.view.bbH };
+        struct bw2_translator t;
+        memset(&t, 0, sizeof t);
+        struct bw2_mac_ev m = { .type = BW2_MAC_MOVE, .x = v.x, .y = v.y };
+        struct bw2_in_event out[4];
+        int n = bw2_translate(&t, &geom, &m, out, 4);
+        *key = g.window.isKeyWindow, *hidden = g_chidden, *detached = g_cdetached;
+        *inside = NSPointInRect(v, g.view.bounds);
+        *cx = n ? out[0].x : -1, *cy = n ? out[0].y : -1;
+        ok = 1;
+    });
+    return ok;
 }

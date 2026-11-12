@@ -2,6 +2,7 @@
 Plan 6 Task 1: the host input queue, the Windows messages it makes and IMM32.
 Plan 6 Task 2: the DirectInput mouse fed from the host input queue.
 Plan 6 Task 3: Mac events translated into the game's terms (translate.c).
+Plan 6 Task 5: the cursor policy (cursor.c) and the cursor shims.
 
 Each test runs one group of the selftest headless and expects "<group>: 0 failed"."""
 import os
@@ -156,3 +157,10 @@ def test_translate(selftest, tmp_path, group):
 
 def test_window_size(selftest, tmp_path):
     check(selftest, "window_size", tmp_path)
+
+
+# ---- plan 6 Task 5: the cursor ----
+
+@pytest.mark.parametrize("group", ["cursor_policy", "mode_switch", "cursor_warp", "clip", "cursor_image"])
+def test_cursor(selftest, tmp_path, group):
+    check(selftest, group, tmp_path)

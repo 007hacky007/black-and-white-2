@@ -99,11 +99,13 @@ static uint32_t g_sequence;              /* DirectInput's sequence numbers are g
 
 static void destroy_didevice(struct d3d_obj *o) {
     struct didevice *d = (struct didevice *)o;
+    int was_acquired = d->acquired;
     for (struct didevice **p = &g_devices; *p; p = &(*p)->next)
         if (*p == d) { *p = d->next; break; }
     if (d->di && d3d_alive(d->di)) d3d_release(d->di);
     free(d->ring);
     free(d);
+    if (was_acquired) bw2_cursor_update();   /* released while acquired: maybe no exclusive mouse left */
 }
 static void destroy_dinput(struct d3d_obj *o) { free(o); }
 
@@ -220,6 +222,7 @@ static void dd_SetCooperativeLevel(void) {        /* (this, hwnd, flags) */
     if (!hle_is_window(hwnd) || (hle_window_style(hwnd) & WS_CHILD)) RET(E_HANDLE, 3);
     if (d->acquired) RET(DIERR_ACQUIRED, 3);
     d->coop = flags;
+    bw2_cursor_update();
     RET(DI_OK, 3);
 }
 
@@ -246,6 +249,7 @@ static void dd_Acquire(void) {                    /* (this) */
     if (d->acquired) RET(DI_NOEFFECT, 1);
     empty(d);
     d->acquired = 1, d->lost = 0;
+    bw2_cursor_update();                 /* an exclusive mouse detaches the pointer (cursor.c) */
     RET(DI_OK, 1);
 }
 
@@ -254,6 +258,7 @@ static void dd_Unacquire(void) {                  /* (this) */
     d->lost = 0;
     if (!d->acquired) RET(DI_NOEFFECT, 1);
     d->acquired = 0;
+    bw2_cursor_update();
     RET(DI_OK, 1);
 }
 
@@ -310,6 +315,7 @@ void bw2_dinput8_sink(const struct bw2_in_event *e) {
 void bw2_in_mouse_lost(void) {
     for (struct didevice *d = g_devices; d; d = d->next)
         if (d->acquired && (d->coop & DISCL_FOREGROUND)) d->acquired = 0, d->lost = 1;
+    bw2_cursor_update();                 /* inactive: shown and reattached at once */
 }
 
 /* An exclusive mouse is acquired and the window is active: no Windows mouse messages. */

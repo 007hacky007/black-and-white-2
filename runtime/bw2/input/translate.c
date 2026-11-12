@@ -123,6 +123,13 @@ void bw2_window_fit(double vis_w, double vis_h, uint32_t bb_w, uint32_t bb_h, do
 static double to_pixels(const struct bw2_geom *g, double d) {
     return width_bound(g) ? d * g->bb_w / g->view_w : d * g->bb_h / g->view_h;
 }
+void bw2_client_to_view(const struct bw2_geom *g, int cx, int cy, double *x, double *y) {
+    double x0, y0, s;
+    bw2_letterbox(g, &x0, &y0, &s);
+    *x = x0 + (cx + 0.5) * s;
+    *y = g->view_h - y0 - (cy + 0.5) * s;
+}
+
 static int clamp_floor(double v, uint32_t n) {
     if (!(v >= 0)) return 0;                             /* NaN included */
     if (v >= (double)n) return (int)n - 1;

@@ -1308,3 +1308,28 @@ def test_window_input(tmp_path):
     it = iter(lines)
     missing = [w for w in want if not any(ln == w for ln in it)]
     assert not missing, f"missing (in order) {missing}:\n" + r.stdout + r.stderr[-2000:]
+
+
+# ---- Plan 6 Task 5: the cursor on a real window (opens one and moves the pointer; opt in with BW2_GUI=1) ----
+
+@pytest.mark.skipif(os.environ.get("BW2_GUI") != "1", reason="opens a window: set BW2_GUI=1")
+def test_window_cursor(tmp_path):
+    # the pointer parked outside the window before it opens; the game's DirectInput setup and mode switch
+    # with no cursor call after them: the pointer is warped into the picture (to its centre, 320,240),
+    # detached and hidden. Hidden away, it is shown and attached; back (the game's loop acquires again),
+    # parked again. The exact point is printed, not asserted: a hand on the mouse moves the pointer in the
+    # moment between the warp and the detach. macOS may refuse to bring a terminal-started app back to the
+    # front; then the window is not key and the pointer must stay shown and attached.
+    b = _engine(tmp_path, "ret", {K32: ["ExitProcess"]})
+    r = _run(tmp_path, b, "--selftest-cursor-window")
+    out = r.stdout + r.stderr[-2000:]
+    assert r.returncode == 0 and "cursor window ok" in r.stdout, out
+    assert "dinput setup 0x0" in r.stdout, out
+    state = {ln.split(":")[0][len("cursor "):]: ln.split(": ", 1)[1] for ln in r.stdout.splitlines()
+             if ln.startswith("cursor ") and ": key" in ln}
+    assert state["exclusive"].startswith("key 1 hidden 1 detached 1 inside 1 at "), out
+    assert state["hidden"].startswith("key 0 hidden 0 detached 0 "), out
+    if state["back"].startswith("key 1"):
+        assert state["back"].startswith("key 1 hidden 1 detached 1 inside 1 at "), out
+    else:
+        assert state["back"].startswith("key 0 hidden 0 detached 0 "), out

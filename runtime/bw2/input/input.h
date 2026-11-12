@@ -38,6 +38,7 @@ void bw2_in_drain_input(void);       /* the partial drain: the reads, GetCursorP
 unsigned bw2_in_losses(void);        /* bw2_in_mouse_lost() calls made by a drain so far */
 
 void bw2_in_set_window(uint32_t hwnd);   /* the game window; until set, hle_first_hwnd() */
+uint32_t bw2_in_window(void);            /* that window */
 int  bw2_in_active(void);
 void bw2_in_set_mouse_sink(void (*fn)(const struct bw2_in_event *e));
 void bw2_in_clip(const int *rect_or_null);   /* screen {l, t, r, b}; empty or inverted clears */
@@ -50,6 +51,24 @@ void bw2_dinput8_register(void);
 
 void bw2_input_register(void);
 extern const win32hle_shim bw2_input_shims[];
+
+/* ---- cursor.c: the cursor policy (plan 6 Task 5) ---- */
+struct bw2_cursor_mode {
+    int hidden;                          /* the Mac pointer hidden over the game */
+    int detached;                        /* the pointer detached from the mouse (the exclusive mouse) */
+    uint32_t image;                      /* 0: the system arrow; else a win32hle cursor handle with an image */
+    int warp;                            /* a pending warp, in client coordinates (back-buffer pixels) */
+    int warp_x, warp_y;
+};
+void bw2_cursor_policy(struct bw2_cursor_mode *out);   /* pure: the state now, and the last published mode */
+void bw2_cursor_update(void);                          /* guest thread: the policy, then publish */
+void bw2_cursor_publish(const struct bw2_cursor_mode *m);   /* record; then, with a window, the main thread */
+void bw2_cursor_last(struct bw2_cursor_mode *out);     /* the last published mode */
+void bw2_cursor_rgba(const hle_cursor_image_t *img, uint8_t out[32 * 32 * 4]);   /* pure */
+void bw2_cursor_note_set(void);                        /* the SetCursor shim: the game set a cursor */
+void bw2_cursor_note_pos(int screen_x, int screen_y);  /* the SetCursorPos shim: the next update may warp */
+/* mac_window.m, main thread: applies a published mode (rgba: the image's pixels, or NULL for the arrow). */
+void bw2_mac_cursor_apply(const struct bw2_cursor_mode *m, const uint8_t *rgba, int hot_x, int hot_y);
 
 /* ---- translate.c: Mac events in the game's terms (pure C, any one thread) ---- */
 enum { BW2_MAC_DOWN, BW2_MAC_UP, BW2_MAC_MOVE, BW2_MAC_SCROLL, BW2_MAC_KEYDOWN, BW2_MAC_KEYUP, BW2_MAC_FLAGS };
@@ -96,6 +115,9 @@ void bw2_translate_reset(struct bw2_translator *t);     /* on deactivation: forg
 int  bw2_keymap(unsigned mac_keycode, uint32_t *vk, uint32_t *scan, int *extended);   /* 0: not sent */
 void bw2_letterbox(const struct bw2_geom *g, double *x0, double *y0, double *scale);  /* the picture's
                                          top-left from the view's top-left, in points, and points per pixel */
+/* A client pixel's centre in view points (bottom-left origin), through the letterbox; points off the
+ * picture map off it. The inverse of the translator's client point. */
+void bw2_client_to_view(const struct bw2_geom *g, int cx, int cy, double *x, double *y);
 /* The first windowed size, in points: the back buffer (a pixel as a point) scaled down, never up, to fit
  * 90% of the screen's visible frame, the aspect kept. No visible frame: the back buffer. */
 void bw2_window_fit(double vis_w, double vis_h, uint32_t bb_w, uint32_t bb_h, double *w, double *h);

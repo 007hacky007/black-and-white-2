@@ -14,6 +14,9 @@
  * An inactive activation first posts an up for every key and button the
  * game was given down, and lets the pump hand those out before it sends
  * WM_ACTIVATE, WM_KILLFOCUS and WM_ACTIVATEAPP.
+ * The cursor calls (ShowCursor, SetCursor, SetCursorPos, ClipCursor) answer
+ * as win32hle does, then recompute the cursor policy (cursor.c), as each
+ * activation the full drain delivers does.
  */
 #include <pthread.h>
 #include <stdlib.h>
@@ -91,7 +94,8 @@ static int g_held_set, g_held_lost, g_held_ups;
 static int g_draining;
 
 void bw2_in_set_window(uint32_t hwnd) { g_window = hwnd; }
-static uint32_t window(void) { return g_window ? g_window : hle_first_hwnd(); }
+uint32_t bw2_in_window(void) { return g_window ? g_window : hle_first_hwnd(); }
+static uint32_t window(void) { return bw2_in_window(); }
 int bw2_in_active(void) { return g_active; }
 unsigned bw2_in_losses(void) { return g_losses; }
 void bw2_in_set_mouse_sink(void (*fn)(const struct bw2_in_event *e)) { g_sink = fn; }
@@ -101,17 +105,20 @@ void bw2_in_clip(const int *r) {
     if (g_clip_on) memcpy(g_clip, r, sizeof g_clip);
 }
 
+/* A screen point clamped to the clip while active. */
+static void clamp(int *x, int *y) {
+    if (!g_clip_on || !g_active) return;
+    if (*x < g_clip[0]) *x = g_clip[0];
+    if (*x > g_clip[2] - 1) *x = g_clip[2] - 1;
+    if (*y < g_clip[1]) *y = g_clip[1];
+    if (*y > g_clip[3] - 1) *y = g_clip[3] - 1;
+}
 /* The event's client point on the screen, clamped to the clip while active;
  * 0 when there is no window to place it in. */
 static int screen_point(const struct bw2_in_event *e, int *sx, int *sy) {
     int x = e->x, y = e->y;
     if (!hle_client_to_screen(window(), &x, &y)) return 0;
-    if (g_clip_on && g_active) {
-        if (x < g_clip[0]) x = g_clip[0];
-        if (x > g_clip[2] - 1) x = g_clip[2] - 1;
-        if (y < g_clip[1]) y = g_clip[1];
-        if (y > g_clip[3] - 1) y = g_clip[3] - 1;
-    }
+    clamp(&x, &y);
     *sx = x, *sy = y;
     return 1;
 }
@@ -205,6 +212,7 @@ static void drain(int partial) {
         send_activation(e.down);
         g_held_set = 0;
         if (g_sink) g_sink(&e);
+        bw2_cursor_update();             /* shown and reattached while inactive */
     }
     g_draining = 0;
 }
@@ -221,6 +229,36 @@ static void u_GetAsyncKeyState(void) {
     bw2_in_drain_input();
     bw2_hle_shim("GetAsyncKeyState")();
 }
+/* The cursor calls: win32hle's answer, then the cursor policy (cursor.c). */
+static void u_ShowCursor(void) {
+    bw2_hle_shim("ShowCursor")();
+    bw2_cursor_update();
+}
+static void u_SetCursor(void) {
+    bw2_cursor_note_set();
+    bw2_hle_shim("SetCursor")();
+    bw2_cursor_update();
+}
+/* SetCursorPos: kept inside the clip while active, as Windows keeps it; the pointer follows unless
+ * detached. */
+static void u_SetCursorPos(void) {
+    int x = (int)A32(0), y = (int)A32(1);
+    bw2_hle_shim("SetCursorPos")();
+    clamp(&x, &y);
+    hle_input_cursor(x, y);
+    bw2_cursor_note_pos(x, y);
+    bw2_cursor_update();
+}
+/* ClipCursor(rect): the reported points are clamped to it while active (the real pointer is never
+ * trapped); NULL, an empty or an inverted rect clears it. TRUE always. */
+static void u_ClipCursor(void) {
+    uint32_t p = A32(0);
+    int r[4];
+    if (p) for (int i = 0; i < 4; i++) r[i] = (int)MEM32(p + 4u * (uint32_t)i);
+    bw2_hle_shim("ClipCursor")();
+    bw2_in_clip(p ? r : NULL);
+    bw2_cursor_update();
+}
 
 /* imm32.c */
 void bw2_ImmCreateContext(void), bw2_ImmDestroyContext(void), bw2_ImmGetOpenStatus(void),
@@ -230,6 +268,10 @@ void bw2_ImmCreateContext(void), bw2_ImmDestroyContext(void), bw2_ImmGetOpenStat
 const win32hle_shim bw2_input_shims[] = {
     { "GetCursorPos", u_GetCursorPos },
     { "GetAsyncKeyState", u_GetAsyncKeyState },
+    { "ShowCursor", u_ShowCursor },
+    { "SetCursor", u_SetCursor },
+    { "SetCursorPos", u_SetCursorPos },
+    { "ClipCursor", u_ClipCursor },
     { "ImmCreateContext", bw2_ImmCreateContext },
     { "ImmDestroyContext", bw2_ImmDestroyContext },
     { "ImmGetOpenStatus", bw2_ImmGetOpenStatus },

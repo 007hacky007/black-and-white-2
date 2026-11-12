@@ -156,6 +156,109 @@ static uint32_t input_window_selftest(void) {
     return pass ? 0 : 1;
 }
 
+/* --selftest-cursor-window: the cursor on a real window (plan 6 Task 5). The pointer is parked outside
+ * the window before it opens; a windowed 640x480 device; the game's DirectInput setup and mode switch
+ * (coop 6, Acquire, Unacquire, coop 5, Acquire), with no cursor call after them; then the app hidden
+ * and brought back, with the game's read-and-reacquire loop running. Prints the cursor as applied
+ * after each step. Opens a window and moves the pointer (put back at the end). */
+void bw2_mac_selftest_park_pointer(void);
+void bw2_mac_selftest_restore_pointer(void);
+void bw2_mac_selftest_app_active(int active);
+int bw2_mac_selftest_cursor(int *key, int *hidden, int *detached, int *inside, int *cx, int *cy);
+static int cw_state(const char *step) {
+    int key = 0, hidden = 0, detached = 0, inside = 0, cx = -1, cy = -1;
+    if (!bw2_mac_selftest_cursor(&key, &hidden, &detached, &inside, &cx, &cy)) return 0;
+    printf("cursor %s: key %d hidden %d detached %d inside %d at %d,%d\n", step, key, hidden, detached, inside, cx, cy);
+    fflush(stdout);
+    return 1;
+}
+/* The game's frame: pump, one buffered read, and Acquire again after a loss. */
+static void cw_frames(uint32_t msg, uint32_t dev, uint32_t buf, uint32_t pn, int ms) {
+    for (int t = 0; t < ms; t += 10) {
+        uint32_t peek[5] = { msg, 0, 0, 0, 1 };
+        while (gcall("PeekMessageA", 5, peek)) {
+            gcall("TranslateMessage", 1, &msg);
+            gcall("DispatchMessageA", 1, &msg);
+        }
+        if (dev) {                                        /* slot 10 GetDeviceData, 7 Acquire */
+            MEM32(pn) = 64;
+            uint32_t rd[4] = { 20, buf, pn, 0 };
+            uint32_t hr = vm(dev, 10, 4, rd);
+            if (hr == 0x8007001Eu || hr == 0x8007000Cu) vm(dev, 7, 0, NULL);   /* INPUTLOST, NOTACQUIRED */
+        }
+        mach_leave();
+        usleep(10000);
+        mach_enter();
+    }
+}
+static uint32_t cursor_window_selftest(void) {
+    bw2_mac_selftest_park_pointer();
+    mach_enter();
+    uint32_t wc = hle_va(hle_alloc(40)), nm = hle_va(hle_alloc(16)), msg = hle_va(hle_alloc(28));
+    memset(hle_ptr(wc), 0, 40);
+    strcpy(hle_ptr(nm), "bw2cw");
+    MEM32(wc + 4) = hle_resolve("DefWindowProcA"), MEM32(wc + 16) = 0x00400000u, MEM32(wc + 36) = nm;
+    uint32_t ok = gcall("RegisterClassA", 1, &wc) != 0;
+    uint32_t cw[12] = { 0, nm, nm, 0x90000000u, 0, 0, 640, 480, 0, 0, 0x00400000u, 0 };   /* WS_POPUP|WS_VISIBLE */
+    uint32_t hwnd = ok ? gcall("CreateWindowExA", 12, cw) : 0;
+    uint32_t v = 32, d3d = hle_call_guest(hle_resolve("Direct3DCreate9"), 1, &v);
+    uint32_t pp = hle_va(hle_alloc(56)), out = hle_va(hle_alloc(4)), dev = 0;
+    memset(hle_ptr(pp), 0, 56);
+    MEM32(pp) = 640, MEM32(pp + 4) = 480, MEM32(pp + 8) = 22, MEM32(pp + 12) = 1, MEM32(pp + 24) = 1;
+    MEM32(pp + 28) = hwnd, MEM32(pp + 32) = 1;
+    uint32_t cd[6] = { 0, 1, hwnd, 0x40u, pp, out };
+    if (hwnd && d3d && !vm(d3d, 16, 6, cd)) dev = MEM32(out);
+    int pass = 0;
+    if (dev) {
+        static const uint8_t iid[16] = { 0x30, 0x80, 0x79, 0xBF, 0x3A, 0x48, 0xA2, 0x4D,
+                                         0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00 };   /* IID_IDirectInput8A */
+        static const uint8_t mouse[16] = { 0x60, 0x2B, 0x1D, 0x6F, 0xA0, 0xD5, 0xCF, 0x11,
+                                           0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 };   /* GUID_SysMouse */
+        uint32_t g = hle_va(hle_alloc(32)), di_out = hle_va(hle_alloc(4)), m_out = hle_va(hle_alloc(4));
+        memcpy(hle_ptr(g), iid, 16), memcpy(hle_ptr(g + 16), mouse, 16);
+        /* three axes and four buttons, any instance, as the game's format names them */
+        uint32_t objs = hle_va(hle_alloc(7 * 16)), f = hle_va(hle_alloc(24)), prop = hle_va(hle_alloc(20));
+        for (uint32_t i = 0; i < 7; i++)
+            MEM32(objs + 16 * i) = 0, MEM32(objs + 16 * i + 4) = i < 3 ? 4 * i : 12 + (i - 3),
+            MEM32(objs + 16 * i + 8) = i < 3 ? 0x00FFFF03u : 0x00FFFF0Cu, MEM32(objs + 16 * i + 12) = 0;
+        MEM32(f) = 24, MEM32(f + 4) = 16, MEM32(f + 8) = 2, MEM32(f + 12) = 16, MEM32(f + 16) = 7, MEM32(f + 20) = objs;
+        MEM32(prop) = 20, MEM32(prop + 4) = 16, MEM32(prop + 8) = 0, MEM32(prop + 12) = 0, MEM32(prop + 16) = 64;
+        uint32_t a[5] = { 0x00400000u, 0x800u, g, di_out, 0 }, di = 0, mdev = 0;
+        if (!gcall("DirectInput8Create", 5, a)) di = MEM32(di_out);
+        uint32_t c[3] = { g + 16, m_out, 0 };
+        if (di && !vm(di, 3, 3, c)) mdev = MEM32(m_out);
+        uint32_t buf = hle_va(hle_alloc(20 * 64)), pn = hle_va(hle_alloc(4));
+        if (mdev) {
+            uint32_t sf[1] = { f }, c6[2] = { hwnd, 6 }, c5[2] = { hwnd, 5 }, sp[2] = { 1, prop };
+            cw_frames(msg, 0, 0, 0, 300);                /* the window opens */
+            bw2_mac_selftest_app_active(1);              /* started from a terminal: the app comes to the front */
+            cw_frames(msg, 0, 0, 0, 500);
+            cw_state("open");
+            /* slots: 6 SetProperty, 7 Acquire, 8 Unacquire, 11 SetDataFormat, 13 SetCooperativeLevel */
+            uint32_t hr = vm(mdev, 11, 1, sf) | vm(mdev, 13, 2, c6) | vm(mdev, 6, 2, sp) | vm(mdev, 7, 0, NULL) |
+                          vm(mdev, 8, 0, NULL) | vm(mdev, 13, 2, c5) | vm(mdev, 7, 0, NULL);
+            printf("dinput setup 0x%X\n", hr);
+            cw_frames(msg, mdev, buf, pn, 300);
+            pass = hr == 0 && cw_state("exclusive");
+            bw2_mac_selftest_app_active(0);
+            cw_frames(msg, mdev, buf, pn, 700);
+            pass = pass && cw_state("hidden");
+            bw2_mac_selftest_app_active(1);
+            cw_frames(msg, mdev, buf, pn, 1000);
+            pass = pass && cw_state("back");
+            vm(mdev, 2, 0, NULL);
+        }
+        if (di) vm(di, 2, 0, NULL);
+    }
+    if (dev) vm(dev, 2, 0, NULL);
+    if (d3d) vm(d3d, 2, 0, NULL);
+    mach_leave();
+    bw2_mac_selftest_restore_pointer();
+    printf("%s\n", pass ? "cursor window ok" : "cursor window FAILED");
+    fflush(stdout);
+    return pass ? 0 : 1;
+}
+
 /* --selftest-mainsync: a block sent from the guest's thread runs on the process main thread. */
 static uint32_t mainsync_selftest(void) {
     __block int on_main = 0;
@@ -167,7 +270,8 @@ static uint32_t mainsync_selftest(void) {
 
 int main(int argc, char **argv) {
     const char *game = NULL, *exe = "white.exe";
-    int strict = 0, st_dispatch = 0, st_mem = 0, st_mainsync = 0, st_window = 0, st_input_window = 0, nlifted = 0, ncall = -1;
+    int strict = 0, st_dispatch = 0, st_mem = 0, st_mainsync = 0, st_window = 0, st_input_window = 0, st_cursor_window = 0;
+    int nlifted = 0, ncall = -1;
     uint32_t call_args[8];
     struct { const char *name; uint32_t base; } lifted[8];
     for (int i = 1; i < argc; i++) {
@@ -193,6 +297,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--selftest-mainsync")) st_mainsync = 1;
         else if (!strcmp(argv[i], "--selftest-window")) st_window = 1;
         else if (!strcmp(argv[i], "--selftest-input-window")) st_input_window = 1;
+        else if (!strcmp(argv[i], "--selftest-cursor-window")) st_cursor_window = 1;
         else { fprintf(stderr, "bw2: unknown argument %s\n", argv[i]); return usage(); }
     }
     if (getenv("BW2_TRACE_IMPORTS")) win32hle_trace = 1;   /* one line per import call, with its caller */
@@ -204,9 +309,10 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (st_mainsync) return (int)bw2_run_on_main_stack(mainsync_selftest);
-    if (st_window || st_input_window) {
+    if (st_window || st_input_window || st_cursor_window) {
         bw2_register_shims();
-        return (int)bw2_run_on_main_stack(st_window ? window_selftest : input_window_selftest);
+        return (int)bw2_run_on_main_stack(st_window ? window_selftest
+                                          : st_input_window ? input_window_selftest : cursor_window_selftest);
     }
     if (!game) return usage();
     char support[PATH_MAX];

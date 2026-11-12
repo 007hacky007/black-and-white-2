@@ -1840,6 +1840,326 @@ static void group_window_size(void) {
     CHECK(near(w, 800) && near(h, 600));
 }
 
+/* ---- plan 6 Task 5: the cursor ---- */
+
+#define IDC_ARROW 32512u
+static struct bw2_cursor_mode last_mode(void) { struct bw2_cursor_mode m; bw2_cursor_last(&m); return m; }
+#define EXPECT_MODE(hid, det, img) do { struct bw2_cursor_mode _m = last_mode(); CHECKEQ(_m.hidden, hid); \
+    CHECKEQ(_m.detached, det); CHECKEQ(_m.image, img); } while (0)
+#define EXPECT_WARP(px, py) do { struct bw2_cursor_mode _m = last_mode(); CHECKEQ(_m.warp, 1); \
+    CHECKEQ(_m.warp_x, px); CHECKEQ(_m.warp_y, py); } while (0)
+#define EXPECT_NO_WARP() CHECKEQ(last_mode().warp, 0)
+
+/* cursor_policy: the game's ShowCursor, focus, the exclusive mouse and SetCursor. */
+static void group_cursor_policy(void) {
+    uint32_t a = make_window(0, 0, 0, 1024, 768);
+    bw2_in_set_window(a);
+    pump_all();
+    struct bw2_cursor_mode m;
+    bw2_cursor_policy(&m);
+    CHECKEQ(m.hidden, 0);
+    CHECKEQ(m.detached, 0);
+    CHECKEQ(m.image, 0);
+    CHECKEQ(m.warp, 0);
+    /* the game's one ShowCursor(FALSE) ("Measured" item 5) */
+    CHECKEQ(call("ShowCursor", 1, 0u), (uint32_t)-1);
+    EXPECT_MODE(1, 0, 0);
+    EXPECT_NO_WARP();
+    /* inactive: shown whatever the count; back: hidden again */
+    ev_activate(0);
+    pump_all();
+    EXPECT_MODE(0, 0, 0);
+    ev_activate(1);
+    pump_all();
+    EXPECT_MODE(1, 0, 0);
+    CHECKEQ(call("ShowCursor", 1, 1u), 0u);
+    EXPECT_MODE(0, 0, 0);
+    /* the exclusive mouse (coop 5), acquired and active: detached and hidden */
+    uint32_t di = new_di(), dev = game_mouse(di, 512);
+    EXPECT_MODE(1, 1, 0);
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    EXPECT_MODE(0, 0, 0);
+    /* SetCursor(NULL) hides; the system arrow with the count at 0 shows the arrow */
+    call("SetCursor", 1, 0u);
+    EXPECT_MODE(1, 0, 0);
+    uint32_t arrow = call("LoadCursorA", 2, 0u, IDC_ARROW);
+    CHECK(arrow != 0);
+    call("SetCursor", 1, arrow);
+    EXPECT_MODE(0, 0, 0);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    CHECKEQ(vcall(di, 2, 0), 0);
+}
+
+static uint32_t g_ms_dev;
+static int g_ms_seen;
+static struct bw2_cursor_mode g_ms_mode;
+static void acquire_on_activate(uint32_t h, uint32_t m, uint32_t w, uint32_t l) {
+    (void)h, (void)l;
+    if (m != WM_ACTIVATE || w != 1u) return;
+    CHECKEQ(vcall(g_ms_dev, DD_Acquire, 0), DI_OK);
+    bw2_cursor_last(&g_ms_mode);
+    g_ms_seen++;
+}
+/* mode_switch: the game's setup and mode switch on a 640x480 game window, with no cursor shim called
+ * after the DirectInput calls: DirectInput alone detaches the pointer, parked at the window's centre. */
+static void group_mode_switch(void) {
+    uint32_t a = make_window(0, 50, 50, 640, 480);
+    bw2_in_set_window(a);
+    pump_all();
+    uint32_t di = new_di(), dev = new_mouse(di);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, mouse_format(16)), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, a, 6u), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetProperty, 2, DIPROP_BUFFERSIZE, bufsize_prop(512)), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    EXPECT_MODE(0, 0, 0);                                /* non-exclusive: the pointer stays */
+    EXPECT_NO_WARP();
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, a, 5u), DI_OK);
+    EXPECT_MODE(0, 0, 0);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    EXPECT_MODE(1, 1, 0);
+    EXPECT_WARP(320, 240);
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    EXPECT_MODE(0, 0, 0);
+    EXPECT_NO_WARP();
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    EXPECT_MODE(1, 1, 0);
+    EXPECT_WARP(320, 240);
+    /* Cmd-Tab away: reattached and shown */
+    ev_activate(0);
+    pump_all();
+    EXPECT_MODE(0, 0, 0);
+    EXPECT_NO_WARP();
+    /* back: the foreground device was lost, so the pointer stays until the game's retry acquires it */
+    ev_activate(1);
+    pump_all();
+    EXPECT_MODE(0, 0, 0);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    EXPECT_MODE(1, 1, 0);
+    EXPECT_WARP(320, 240);
+    /* nothing changed: no warp */
+    bw2_cursor_update();
+    EXPECT_MODE(1, 1, 0);
+    EXPECT_NO_WARP();
+    /* a partial drain that meets an inactive activation (the loss) reattaches at once */
+    ev_activate(0);
+    uint32_t buf = gmem(20 * 512), n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DIERR_INPUTLOST);
+    EXPECT_MODE(0, 0, 0);
+    pump_all();
+    ev_activate(1);
+    pump_all();
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    EXPECT_MODE(1, 1, 0);
+    EXPECT_WARP(320, 240);
+    /* a window procedure that acquires in WM_ACTIVATE: the detach is published from its Acquire, with
+     * the warp, and the drain's own update after the activation adds no second warp */
+    ev_activate(0);
+    pump_all();
+    EXPECT_MODE(0, 0, 0);
+    g_ms_dev = dev, g_ms_seen = 0;
+    hle_proc_hook = acquire_on_activate;
+    ev_activate(1);
+    pump_all();
+    hle_proc_hook = NULL;
+    CHECKEQ(g_ms_seen, 1);
+    CHECKEQ(g_ms_mode.detached, 1);
+    CHECKEQ(g_ms_mode.hidden, 1);
+    CHECKEQ(g_ms_mode.warp, 1);
+    CHECKEQ(g_ms_mode.warp_x, 320);
+    CHECKEQ(g_ms_mode.warp_y, 240);
+    EXPECT_MODE(1, 1, 0);
+    EXPECT_NO_WARP();
+    /* released while acquired: no exclusive mouse left */
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    EXPECT_MODE(0, 0, 0);
+    CHECKEQ(vcall(di, 2, 0), 0);
+}
+
+/* cursor_warp: SetCursorPos warps the pointer to the client point while active and not detached. */
+static void group_cursor_warp(void) {
+    uint32_t a = make_window(0, 100, 50, 640, 480), pt = gmem(8);
+    bw2_in_set_window(a);
+    pump_all();
+    CHECKEQ(call("SetCursorPos", 2, 150u, 90u), 1u);
+    EXPECT_MODE(0, 0, 0);
+    EXPECT_WARP(50, 40);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 150);
+    CHECKEQ(MEM32(pt + 4), 90);
+    /* outside the client area: still the client point */
+    CHECKEQ(call("SetCursorPos", 2, 20u, 10u), 1u);
+    EXPECT_WARP(-80, -40);
+    /* another cursor call: no warp of its own */
+    call("ShowCursor", 1, 1u);
+    EXPECT_NO_WARP();
+    call("ShowCursor", 1, 0u);
+    /* inactive: the position is kept, the pointer is not moved */
+    ev_activate(0);
+    pump_all();
+    CHECKEQ(call("SetCursorPos", 2, 200u, 100u), 1u);
+    EXPECT_NO_WARP();
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 200);
+    ev_activate(1);
+    pump_all();
+    EXPECT_NO_WARP();                                    /* a SetCursorPos made while inactive is not kept */
+    /* detached: the detach's own centre warp, then SetCursorPos warps nothing */
+    uint32_t di = new_di(), dev = new_mouse(di);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, mouse_format(16)), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, a, 5u), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    EXPECT_MODE(1, 1, 0);
+    EXPECT_WARP(320, 240);
+    CHECKEQ(call("SetCursorPos", 2, 150u, 90u), 1u);
+    EXPECT_MODE(1, 1, 0);
+    EXPECT_NO_WARP();
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 150);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    CHECKEQ(vcall(di, 2, 0), 0);
+    /* with a clip: the position, and so the warp, kept inside it */
+    int clip[4] = { 100, 50, 300, 200 };
+    bw2_in_clip(clip);
+    CHECKEQ(call("SetCursorPos", 2, 500u, 10u), 1u);
+    EXPECT_WARP(199, 0);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 299);
+    CHECKEQ(MEM32(pt + 4), 50);
+    bw2_in_clip(NULL);
+    /* the Mac side's warp target: a client pixel's centre in view points (bottom-left origin), through
+     * the letterbox; a move there translates back to the same pixel */
+    struct bw2_geom g = { 1512, 982, 1024, 768 };
+    double vx, vy, x0, y0, sc;
+    bw2_letterbox(&g, &x0, &y0, &sc);
+    bw2_client_to_view(&g, 512, 384, &vx, &vy);
+    CHECK(fabs(vx - (x0 + 512.5 * sc)) < 1e-9 && fabs(vy - (982 - y0 - 384.5 * sc)) < 1e-9);
+    CHECK(fabs(x0 - (1512 - 1024 * 982.0 / 768) / 2) < 1e-9 && fabs(y0) < 1e-9);
+    static const int pts[5][2] = { { 0, 0 }, { 1023, 767 }, { 512, 384 }, { 1, 766 }, { 700, 3 } };
+    for (int i = 0; i < 5; i++) {
+        struct bw2_translator t;
+        memset(&t, 0, sizeof t);
+        bw2_client_to_view(&g, pts[i][0], pts[i][1], &vx, &vy);
+        int n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = vx, .y = vy));
+        CHECKEQ(n, 1);
+        if (n == 1) { CHECKEQ(g_tr[0].x, pts[i][0]); CHECKEQ(g_tr[0].y, pts[i][1]); }
+    }
+    /* a point off the picture maps off it, linearly */
+    bw2_client_to_view(&g, -80, -40, &vx, &vy);
+    CHECK(fabs(vx - (x0 - 79.5 * sc)) < 1e-9 && fabs(vy - (982 - y0 + 39.5 * sc)) < 1e-9);
+}
+
+static uint32_t grect(int l, int t, int r, int b) {
+    uint32_t p = gmem(16);
+    MEM32(p) = (uint32_t)l, MEM32(p + 4) = (uint32_t)t, MEM32(p + 8) = (uint32_t)r, MEM32(p + 12) = (uint32_t)b;
+    return p;
+}
+/* clip: ClipCursor clamps the reported point while active; NULL, empty and inverted clear it. */
+static void group_clip(void) {
+    uint32_t a = make_window(0, 0, 0, 640, 480), pt = gmem(8);
+    hle_proc_hook = recorder;
+    bw2_in_set_window(a);
+    pump_all();
+    CHECKEQ(call("ClipCursor", 1, grect(0, 0, 640, 480)), 1u);
+    rec_reset();
+    ev_move(700, 10);
+    pump_all();
+    EXPECT(1, WM_MOUSEMOVE, ANY, (10u << 16) | 639u);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 639);
+    CHECKEQ(MEM32(pt + 4), 10);
+    /* inactive: not clamped */
+    ev_activate(0);
+    pump_all();
+    ev_move(700, 10);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 700);
+    ev_activate(1);
+    pump_all();
+    ev_move(700, 10);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 639);
+    /* NULL unclamps */
+    CHECKEQ(call("ClipCursor", 1, 0u), 1u);
+    ev_move(700, 10);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 700);
+    /* the game's garbage rect ("Measured" item 10): TRUE, and no clip */
+    CHECKEQ(call("ClipCursor", 1, grect(0, 0, 640, 480)), 1u);
+    CHECKEQ(call("ClipCursor", 1, grect(11883128, -1, -559087616, 13098988)), 1u);
+    ev_move(700, 10);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 700);
+    /* an empty rect clears it too */
+    CHECKEQ(call("ClipCursor", 1, grect(0, 0, 640, 480)), 1u);
+    CHECKEQ(call("ClipCursor", 1, grect(10, 10, 10, 400)), 1u);
+    ev_move(700, 10);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 700);
+    /* then the game's window rect: a MOVE to screen (2000, 2000) stops at (1073, 817), outside this
+     * window (no message) and at the bottom-right pixel of the game's own 1024x768 window at (50, 50) */
+    CHECKEQ(call("ClipCursor", 1, grect(50, 50, 1074, 818)), 1u);
+    pump_all();
+    rec_reset();
+    ev_move(2000, 2000);
+    pump_all();
+    CHECKEQ(g_nrec, 0);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 1073);
+    CHECKEQ(MEM32(pt + 4), 817);
+    uint32_t game = make_window(0, 50, 50, 1024, 768);
+    bw2_in_set_window(game);
+    rec_reset();
+    ev_move(1950, 1950);
+    pump_all();
+    EXPECT(1, WM_MOUSEMOVE, ANY, (767u << 16) | 1023u);
+    if (g_nrec) CHECKEQ(g_rec[0].h, game);
+    ev_move(-10, -10);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1u);
+    CHECKEQ(MEM32(pt), 50);
+    CHECKEQ(MEM32(pt + 4), 50);
+    hle_proc_hook = NULL;
+}
+
+/* cursor_image: a 32x32 monochrome cursor's AND/XOR masks as RGBA. */
+static void group_cursor_image(void) {
+    hle_cursor_image_t img;
+    memset(&img, 0, sizeof img);
+    img.handle = 0x1C100000u;
+    /* row r, pixel x: the bit (7 - x % 8) of byte r * 4 + x / 8 (rows top-down, MSB first) */
+    for (int r = 0; r < 32; r++)
+        for (int x = 0; x < 32; x++) {
+            int kind = (r + x) % 4;                      /* 0 transparent, 1 black, 2 white, 3 inverted */
+            int and_bit = kind == 0 || kind == 3, xor_bit = kind == 2 || kind == 3;
+            if (and_bit) img.and_mask[r * 4 + x / 8] |= (uint8_t)(0x80u >> (x % 8));
+            if (xor_bit) img.xor_mask[r * 4 + x / 8] |= (uint8_t)(0x80u >> (x % 8));
+        }
+    static uint8_t rgba[32 * 32 * 4];
+    memset(rgba, 0xAB, sizeof rgba);
+    bw2_cursor_rgba(&img, rgba);
+    static const uint8_t want[4][4] = { { 0, 0, 0, 0 }, { 0, 0, 0, 255 }, { 255, 255, 255, 255 }, { 0, 0, 0, 255 } };
+    int bad = 0;
+    for (int r = 0; r < 32; r++)
+        for (int x = 0; x < 32; x++) {
+            const uint8_t *p = rgba + (r * 32 + x) * 4, *w = want[(r + x) % 4];
+            if (memcmp(p, w, 4)) {
+                if (bad++ < 8)
+                    printf("FAIL cursor_image: pixel (%d,%d) %u,%u,%u,%u want %u,%u,%u,%u\n", x, r, p[0], p[1], p[2],
+                           p[3], w[0], w[1], w[2], w[3]);
+            }
+        }
+    fails += bad;
+    /* the corners, with a hand-made pattern: only the top-left pixel is white */
+    memset(img.and_mask, 0xFF, sizeof img.and_mask);
+    memset(img.xor_mask, 0, sizeof img.xor_mask);
+    img.and_mask[0] = 0x7F, img.xor_mask[0] = 0x80;
+    bw2_cursor_rgba(&img, rgba);
+    CHECKEQ(rgba[0], 255);
+    CHECKEQ(rgba[3], 255);
+    CHECKEQ(rgba[4 + 3], 0);
+    CHECKEQ(rgba[(31 * 32 + 31) * 4 + 3], 0);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: input_selftest <group> [arg]\n"); return 2; }
     hle_mem_init();
@@ -1875,6 +2195,11 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "mouse_events")) group_mouse_events();
     else if (!strcmp(argv[1], "translate_reset")) group_translate_reset();
     else if (!strcmp(argv[1], "window_size")) group_window_size();
+    else if (!strcmp(argv[1], "cursor_policy")) group_cursor_policy();
+    else if (!strcmp(argv[1], "mode_switch")) group_mode_switch();
+    else if (!strcmp(argv[1], "cursor_warp")) group_cursor_warp();
+    else if (!strcmp(argv[1], "clip")) group_clip();
+    else if (!strcmp(argv[1], "cursor_image")) group_cursor_image();
     else { fprintf(stderr, "input_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);
