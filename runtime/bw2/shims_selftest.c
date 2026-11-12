@@ -41,6 +41,16 @@ static uint32_t call(const char *name, int n, ...) {
 
 static uint32_t gmem(uint32_t n) { return hle_va(hle_alloc(n)); }
 
+/* A completion routine for ReadFileEx, as a guest function: (error, bytes, overlapped), stdcall. */
+static uint32_t g_done[8][3];
+static int g_ndone;
+static void t_completion(void) {
+    if (g_ndone < 8) g_done[g_ndone][0] = A32(0), g_done[g_ndone][1] = A32(1), g_done[g_ndone][2] = A32(2);
+    g_ndone++;
+    RET(0, 3);
+}
+static const win32hle_shim t_shims[] = { { "selftest_completion", t_completion }, { NULL, NULL } };
+
 int main(void) {
     hle_mem_init();
     bw2_register_shims();
@@ -124,6 +134,68 @@ int main(void) {
         CHECK(call("ws2_32.dll#115", 2, 0x202u, wsa) == 10091u);                    /* WSAStartup: WSASYSNOTREADY */
         CHECK(call("ws2_32.dll#111", 0) == 10093u);                                 /* WSAGetLastError: not initialised */
         CHECK(call("ws2_32.dll#116", 0) == 0xFFFFFFFFu);                            /* WSACleanup: SOCKET_ERROR */
+    }
+
+    /* ReadFileEx: the read is done at once, its completion routine runs at the thread's next alertable wait
+       (SleepEx or WaitForSingleObjectEx with alertable TRUE), which then gives WAIT_IO_COMPLETION */
+    {
+        win32hle_register(t_shims);
+        uint32_t routine = hle_resolve("selftest_completion");
+        FILE *f = fopen("rfx.bin", "wb");
+        for (int i = 0; i < 10000; i++) fputc(i * 7 & 0xFF, f);
+        fclose(f);
+        uint32_t name = gmem(16), buf = gmem(8192), ovl = gmem(20), ovl2 = gmem(20);
+        strcpy(hle_ptr(name), "rfx.bin");
+        uint32_t h = call("CreateFileA", 7, name, 0x80000000u, 1u, 0u, 3u, 0x48000000u, 0u);
+        CHECK(h != 0xFFFFFFFFu);
+        MEM32(ovl + 8) = 4096, MEM32(ovl + 12) = 0;
+        CHECK(call("ReadFileEx", 5, h, buf, 4096u, ovl, routine) == 1 && g_ndone == 0);
+        CHECK(call("SleepEx", 2, 0u, 0u) == 0 && g_ndone == 0);                      /* not alertable: nothing runs */
+        CHECK(call("SleepEx", 2, 0u, 1u) == 0xC0u && g_ndone == 1);                  /* WAIT_IO_COMPLETION */
+        CHECK(g_done[0][0] == 0 && g_done[0][1] == 4096 && g_done[0][2] == ovl);
+        CHECK(MEM32(ovl) == 0 && MEM32(ovl + 4) == 4096);                              /* Internal, InternalHigh */
+        int same = 1;
+        for (int i = 0; i < 4096; i++) same &= MEM8(buf + (uint32_t)i) == ((4096 + i) * 7 & 0xFF);
+        CHECK(same);
+        CHECK(call("SleepEx", 2, 0u, 1u) == 0 && g_ndone == 1);                      /* nothing queued */
+        MEM32(ovl + 8) = 0, MEM32(ovl2 + 8) = 8192;
+        CHECK(call("ReadFileEx", 5, h, buf, 4096u, ovl, routine) == 1);
+        CHECK(call("ReadFileEx", 5, h, buf + 4096, 4096u, ovl2, routine) == 1 && g_ndone == 1);
+        uint32_t ev = call("CreateEventA", 4, 0u, 1u, 1u, 0u);
+        CHECK(call("WaitForSingleObjectEx", 3, ev, 0u, 0u) == 0 && g_ndone == 1);    /* signalled, not alertable */
+        CHECK(call("WaitForSingleObjectEx", 3, ev, 0xFFFFFFFFu, 1u) == 0xC0u && g_ndone == 3);
+        CHECK(g_done[1][1] == 4096 && g_done[1][2] == ovl && g_done[2][1] == 10000 - 8192 && g_done[2][2] == ovl2);
+        CHECK(MEM8(buf) == 0 && MEM8(buf + 4096) == (8192 * 7 & 0xFF));
+        MEM32(ovl + 8) = 20000;
+        CHECK(call("ReadFileEx", 5, h, buf, 4096u, ovl, routine) == 0 && call("GetLastError", 0) == 38);  /* ERROR_HANDLE_EOF */
+        CHECK(call("ReadFileEx", 5, 0x7777u, buf, 4096u, ovl, routine) == 0 && call("GetLastError", 0) == 6);
+        CHECK(call("SleepEx", 2, 0u, 1u) == 0 && g_ndone == 3);
+        CHECK(call("CloseHandle", 1, h) == 1 && call("CloseHandle", 1, ev) == 1);
+    }
+
+    /* paths: GetFullPathNameA answers in the guest's own folders, as GetCurrentDirectoryA does (the game
+       turns a full path back into one relative to its folder, so a host folder here breaks the name) */
+    {
+        CHECK(bw2_mount(".", "support") == 0);
+        uint32_t name = gmem(64), buf = gmem(512), part = gmem(4), cwd = gmem(512);
+        uint32_t n = call("GetCurrentDirectoryA", 2, 512u, cwd);
+        CHECK(n == strlen(BW2_INSTALL_DIR) && !strcmp(hle_ptr(cwd), BW2_INSTALL_DIR));
+        strcpy(hle_ptr(name), "data\\art\\t.dds");
+        n = call("GetFullPathNameA", 4, name, 512u, buf, part);
+        CHECK(!strcmp(hle_ptr(buf), BW2_INSTALL_DIR "\\data\\art\\t.dds") && n == strlen(hle_ptr(buf)));
+        CHECK(MEM32(part) == buf + n - 5);                                          /* "t.dds" */
+        strcpy(hle_ptr(name), ".\\data/./x\\..\\t.dds");
+        call("GetFullPathNameA", 4, name, 512u, buf, 0u);
+        CHECK(!strcmp(hle_ptr(buf), BW2_INSTALL_DIR "\\data\\t.dds"));
+        strcpy(hle_ptr(name), "\\Temp\\a.txt");
+        call("GetFullPathNameA", 4, name, 512u, buf, 0u);
+        CHECK(!strcmp(hle_ptr(buf), "C:\\Temp\\a.txt"));
+        strcpy(hle_ptr(name), "D:/x/../y.txt");
+        call("GetFullPathNameA", 4, name, 512u, buf, 0u);
+        CHECK(!strcmp(hle_ptr(buf), "D:\\y.txt"));
+        strcpy(hle_ptr(name), "data\\art\\t.dds");
+        n = call("GetFullPathNameA", 4, name, 8u, buf, 0u);                        /* too small: the size needed */
+        CHECK(n == strlen(BW2_INSTALL_DIR "\\data\\art\\t.dds") + 1);
     }
 
     printf("shims selftest: %d failed\n", fails);
