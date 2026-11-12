@@ -1,6 +1,7 @@
 """Plan 5 Task 1: a minimal DirectInput mouse, driven as lifted code drives it (runtime/bw2/input/input_selftest.c).
 Plan 6 Task 1: the host input queue, the Windows messages it makes and IMM32.
 Plan 6 Task 2: the DirectInput mouse fed from the host input queue.
+Plan 6 Task 3: Mac events translated into the game's terms (translate.c).
 
 Each test runs one group of the selftest headless and expects "<group>: 0 failed"."""
 import os
@@ -140,4 +141,12 @@ def test_imm(selftest, tmp_path):
 
 @pytest.mark.parametrize("group", ["di_format", "di_data", "di_state", "di_overflow", "focus_loss", "di_exclusive"])
 def test_di_input(selftest, tmp_path, group):
+    check(selftest, group, tmp_path)
+
+
+# ---- plan 6 Task 3: Mac events in the game's terms ----
+
+@pytest.mark.parametrize("group", ["keymap", "geom_letterbox", "deltas", "scroll_precise", "option_middle", "cmd_keys",
+                                   "caps", "mouse_events", "translate_reset"])
+def test_translate(selftest, tmp_path, group):
     check(selftest, group, tmp_path)

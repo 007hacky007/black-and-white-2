@@ -51,4 +51,50 @@ void bw2_dinput8_register(void);
 void bw2_input_register(void);
 extern const win32hle_shim bw2_input_shims[];
 
+/* ---- translate.c: Mac events in the game's terms (pure C, any one thread) ---- */
+enum { BW2_MAC_DOWN, BW2_MAC_UP, BW2_MAC_MOVE, BW2_MAC_SCROLL, BW2_MAC_KEYDOWN, BW2_MAC_KEYUP, BW2_MAC_FLAGS };
+
+/* NSEventModifierFlags bits (device-independent), as the Mac side passes them. */
+#define BW2_MOD_CAPS    (1ull << 16)
+#define BW2_MOD_SHIFT   (1ull << 17)
+#define BW2_MOD_CONTROL (1ull << 18)
+#define BW2_MOD_OPTION  (1ull << 19)
+#define BW2_MOD_COMMAND (1ull << 20)
+
+#define BW2_SCROLL_POINTS 10.0           /* precise scroll points per wheel notch */
+
+struct bw2_mac_ev {
+    int type;                            /* BW2_MAC_* */
+    double x, y;                         /* view points, bottom-left origin (AppKit's) */
+    double dx, dy;                       /* deltaX/deltaY in points, down positive */
+    int button;                          /* NSEvent.buttonNumber */
+    unsigned keycode;                    /* kVK_* */
+    uint64_t mods;                       /* NSEventModifierFlags */
+    int precise;                         /* hasPreciseScrollingDeltas */
+    int momentum;                        /* momentumPhase != 0 */
+    int repeat;                          /* isARepeat */
+    double scroll_dy;                    /* scrollingDeltaY */
+};
+
+struct bw2_geom { double view_w, view_h; uint32_t bb_w, bb_h; };   /* view in points, back buffer in pixels */
+
+/* The carried state. All zero is the start. */
+struct bw2_translator {
+    double scroll_rem;                   /* precise points not yet a notch */
+    double frac_x, frac_y;               /* delta fractions in back-buffer pixels */
+    int have_point, cx, cy;              /* the last client point given */
+    unsigned buttons;                    /* bit b: button b given down */
+    int middle;                          /* the left button is down as the middle one */
+    int option_held;                     /* Option's events held back until it is released */
+    uint8_t keys[128];                   /* by kVK_* code: given down (Alt as the game sees it included) */
+    int caps;                            /* Caps Lock as the game was last told */
+};
+
+int  bw2_translate(struct bw2_translator *t, const struct bw2_geom *g, const struct bw2_mac_ev *m,
+                   struct bw2_in_event *out, int max);   /* events written, 0..4 */
+void bw2_translate_reset(struct bw2_translator *t);     /* on deactivation: forget what was given down */
+int  bw2_keymap(unsigned mac_keycode, uint32_t *vk, uint32_t *scan, int *extended);   /* 0: not sent */
+void bw2_letterbox(const struct bw2_geom *g, double *x0, double *y0, double *scale);  /* the picture's
+                                         top-left from the view's top-left, in points, and points per pixel */
+
 #endif

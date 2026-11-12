@@ -7,7 +7,9 @@
  * DispatchMessageA), recording what the window procedures are given.
  * Built with the engine (minus main.c) by tests/test_input.py;
  * `input_selftest <group> [arg]` runs one group and prints "<group>: <n> failed".
+ * The translator groups (plan 6 Task 3) call translate.c directly.
  */
+#include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -1337,6 +1339,488 @@ static void group_imm(void) {
     CHECKEQ(call("ImmDestroyContext", 1, c2), 1);
 }
 
+/* ---- plan 6 Task 3: Mac events in the game's terms (translate.c, pure) ---- */
+#define MAC(...) (&(struct bw2_mac_ev){ __VA_ARGS__ })
+static struct bw2_in_event g_tr[8];
+static int tr(struct bw2_translator *t, const struct bw2_geom *g, const struct bw2_mac_ev *m) {
+    memset(g_tr, 0xA5, sizeof g_tr);
+    int n = bw2_translate(t, g, m, g_tr, 4);
+    CHECK(n >= 0 && n <= 4);
+    return n;
+}
+#define EXPECT_KEY(e, dn, v, s, x) do { CHECKEQ((e).kind, BW2_IN_KEY); CHECKEQ((e).down, dn); \
+    CHECKEQ((e).vk, v); CHECKEQ((e).scan, s); CHECKEQ((e).extended, x); } while (0)
+#define EXPECT_BUTTON(e, b, dn, px, py) do { CHECKEQ((e).kind, BW2_IN_BUTTON); CHECKEQ((e).button, b); \
+    CHECKEQ((e).down, dn); CHECKEQ((e).x, px); CHECKEQ((e).y, py); } while (0)
+#define EXPECT_MOVE(e, px, py) do { CHECKEQ((e).kind, BW2_IN_MOVE); CHECKEQ((e).x, px); CHECKEQ((e).y, py); } while (0)
+#define NEAR(a, b) (fabs((double)(a) - (double)(b)) < 1e-9)
+
+static int g_mapped_seen[128];
+static void expect_map(int line, unsigned mac, uint32_t vk, uint32_t scan, int ext) {
+    uint32_t v = 0xDEAD, s = 0xDEAD;
+    int x = -1;
+    int ok = bw2_keymap(mac, &v, &s, &x);
+    if (!ok || v != vk || s != scan || x != ext) {
+        printf("FAIL keymap line %d: mac 0x%02X gave %d vk 0x%X scan 0x%X ext %d, want vk 0x%X scan 0x%X ext %d\n",
+               line, mac, ok, v, s, x, vk, scan, ext);
+        fails++;
+    }
+    if (mac < 128) {
+        if (g_mapped_seen[mac]) { printf("FAIL keymap line %d: mac 0x%02X listed twice\n", line, mac); fails++; }
+        g_mapped_seen[mac] = 1;
+    }
+}
+#define MAP(mac, vk, scan, ext) expect_map(__LINE__, mac, vk, scan, ext)
+
+/* "X1E Y2F ..." -> the hex value after letter c, or -1 */
+static int find_code(const char *list, char c) {
+    for (const char *p = list; *p; p++)
+        if (*p == c && (p == list || p[-1] == ' ')) return (int)strtol(p + 1, NULL, 16);
+    return -1;
+}
+
+static void group_keymap(void) {
+    static const char scans[] = "Q10 W11 E12 R13 T14 Y15 U16 I17 O18 P19 A1E S1F D20 F21 G22 H23 J24 K25 L26 "
+                                "Z2C X2D C2E V2F B30 N31 M32";
+    static const char macs[] = "A00 S01 D02 F03 H04 G05 Z06 X07 C08 V09 B0B Q0C W0D E0E R0F Y10 T11 O1F U20 "
+                               "I22 P23 L25 J26 K28 N2D M2E";
+    for (char c = 'A'; c <= 'Z'; c++) {
+        int mac = find_code(macs, c), scan = find_code(scans, c);
+        CHECK(mac >= 0 && scan >= 0);
+        if (mac >= 0 && scan >= 0) MAP((unsigned)mac, (uint32_t)c, (uint32_t)scan, 0);
+    }
+    static const unsigned digit_mac[10] = { 0x1D, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1A, 0x1C, 0x19 };
+    for (int d = 0; d < 10; d++) MAP(digit_mac[d], '0' + (uint32_t)d, d ? 1u + (uint32_t)d : 0x0Bu, 0);
+    /* punctuation */
+    MAP(0x1B, 0xBD, 0x0C, 0); MAP(0x18, 0xBB, 0x0D, 0); MAP(0x21, 0xDB, 0x1A, 0); MAP(0x1E, 0xDD, 0x1B, 0);
+    MAP(0x29, 0xBA, 0x27, 0); MAP(0x27, 0xDE, 0x28, 0); MAP(0x32, 0xC0, 0x29, 0); MAP(0x2A, 0xDC, 0x2B, 0);
+    MAP(0x2B, 0xBC, 0x33, 0); MAP(0x2F, 0xBE, 0x34, 0); MAP(0x2C, 0xBF, 0x35, 0); MAP(0x0A, 0xE2, 0x56, 0);
+    /* Return, Tab, Space, Delete, Escape */
+    MAP(0x24, 0x0D, 0x1C, 0); MAP(0x30, 0x09, 0x0F, 0); MAP(0x31, 0x20, 0x39, 0); MAP(0x33, 0x08, 0x0E, 0);
+    MAP(0x35, 0x1B, 0x01, 0);
+    /* modifiers */
+    MAP(0x38, 0xA0, 0x2A, 0); MAP(0x3C, 0xA1, 0x36, 0); MAP(0x3B, 0xA2, 0x1D, 0); MAP(0x3E, 0xA3, 0x1D, 1);
+    MAP(0x3A, 0xA4, 0x38, 0); MAP(0x3D, 0xA5, 0x38, 1); MAP(0x39, 0x14, 0x3A, 0);
+    /* function keys */
+    static const unsigned f_mac[10] = { 0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D };
+    for (int i = 0; i < 10; i++) MAP(f_mac[i], 0x70u + (uint32_t)i, 0x3Bu + (uint32_t)i, 0);
+    MAP(0x67, 0x7A, 0x57, 0); MAP(0x6F, 0x7B, 0x58, 0);
+    MAP(0x69, 0x7C, 0x64, 0); MAP(0x6B, 0x7D, 0x65, 0); MAP(0x71, 0x7E, 0x66, 0);
+    /* keypad */
+    static const unsigned kp_mac[10] = { 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5B, 0x5C };
+    static const uint32_t kp_scan[10] = { 0x52, 0x4F, 0x50, 0x51, 0x4B, 0x4C, 0x4D, 0x47, 0x48, 0x49 };
+    for (int i = 0; i < 10; i++) MAP(kp_mac[i], 0x60u + (uint32_t)i, kp_scan[i], 0);
+    MAP(0x41, 0x6E, 0x53, 0); MAP(0x43, 0x6A, 0x37, 0); MAP(0x45, 0x6B, 0x4E, 0); MAP(0x4E, 0x6D, 0x4A, 0);
+    MAP(0x4B, 0x6F, 0x35, 1); MAP(0x4C, 0x0D, 0x1C, 1);
+    /* navigation, all extended */
+    MAP(0x73, 0x24, 0x47, 1); MAP(0x77, 0x23, 0x4F, 1); MAP(0x74, 0x21, 0x49, 1); MAP(0x79, 0x22, 0x51, 1);
+    MAP(0x75, 0x2E, 0x53, 1); MAP(0x72, 0x2D, 0x52, 1);
+    MAP(0x7B, 0x25, 0x4B, 1); MAP(0x7C, 0x27, 0x4D, 1); MAP(0x7D, 0x28, 0x50, 1); MAP(0x7E, 0x26, 0x48, 1);
+    int listed = 0;
+    for (int i = 0; i < 128; i++) listed += g_mapped_seen[i];
+    CHECKEQ(listed, 101);
+    /* not sent: Command (both), Function, keypad Clear, keypad =, F16-F20 */
+    static const unsigned not_sent[] = { 0x37, 0x36, 0x3F, 0x47, 0x51, 0x6A, 0x40, 0x4F, 0x50, 0x5A };
+    for (size_t i = 0; i < sizeof not_sent / sizeof not_sent[0]; i++) {
+        uint32_t v, s;
+        int x;
+        CHECK(!g_mapped_seen[not_sent[i]]);
+        CHECKEQ(bw2_keymap(not_sent[i], &v, &s, &x), 0);
+    }
+    /* and nothing else is mapped */
+    int extra = 0;
+    for (unsigned k = 0; k < 0x200; k++) {
+        uint32_t v, s;
+        int x;
+        if ((k >= 128 || !g_mapped_seen[k]) && bw2_keymap(k, &v, &s, &x)) {
+            printf("FAIL keymap: unlisted mac 0x%X is mapped\n", k);
+            extra++;
+        }
+    }
+    CHECKEQ(extra, 0);
+    CHECKEQ(bw2_keymap(0xFFFFFFFFu, &(uint32_t){ 0 }, &(uint32_t){ 0 }, &(int){ 0 }), 0);
+}
+
+static void group_geom_letterbox(void) {
+    struct bw2_geom g = { 1512, 982, 1024, 768 };
+    double x0 = -1, y0 = -1, s = -1;
+    bw2_letterbox(&g, &x0, &y0, &s);
+    CHECK(NEAR(s, 982.0 / 768.0));
+    CHECK(s > 1.27864 && s < 1.27865);
+    CHECK(NEAR(x0, (1512.0 - 1024.0 * s) / 2));
+    CHECK(x0 > 101.33 && x0 < 101.34);
+    CHECK(NEAR(y0, 0));
+    struct bw2_translator t = { 0 };
+    int n;
+    double right = x0 + 1024.0 * s;
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = x0, .y = 982)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 0, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = right, .y = 0)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 1023, 767);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = right - 0.01, .y = 0.01)); CHECKEQ(n, 1);
+    EXPECT_MOVE(g_tr[0], 1023, 767);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 0, .y = 490)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 0, 384);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 1512, .y = 982)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 1023, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = -50, .y = -50)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 0, 767);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = x0 + 512 * s + 0.25, .y = 982 - 384 * s - 0.25)); CHECKEQ(n, 1);
+    EXPECT_MOVE(g_tr[0], 512, 384);
+    /* a view the back buffer's size: client = point, y flipped */
+    struct bw2_geom g1 = { 1024, 768, 1024, 768 };
+    bw2_letterbox(&g1, &x0, &y0, &s);
+    CHECK(NEAR(s, 1) && NEAR(x0, 0) && NEAR(y0, 0));
+    n = tr(&t, &g1, MAC(.type = BW2_MAC_MOVE, .x = 100.5, .y = 700.25)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 100, 67);
+    n = tr(&t, &g1, MAC(.type = BW2_MAC_MOVE, .x = 0, .y = 768)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 0, 0);
+    n = tr(&t, &g1, MAC(.type = BW2_MAC_MOVE, .x = 1023.9, .y = 0.1)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 1023, 767);
+    /* bars above and below */
+    struct bw2_geom g2 = { 1024, 1000, 1024, 768 };
+    bw2_letterbox(&g2, &x0, &y0, &s);
+    CHECK(NEAR(s, 1) && NEAR(x0, 0) && NEAR(y0, 116));
+    n = tr(&t, &g2, MAC(.type = BW2_MAC_MOVE, .x = 10, .y = 1000 - 116)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 10, 0);
+    n = tr(&t, &g2, MAC(.type = BW2_MAC_MOVE, .x = 10, .y = 990)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 10, 0);
+    n = tr(&t, &g2, MAC(.type = BW2_MAC_MOVE, .x = 10, .y = 116.5)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 10, 767);
+    n = tr(&t, &g2, MAC(.type = BW2_MAC_MOVE, .x = 10, .y = 5)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 10, 767);
+    /* a retina-sized view of a small buffer: 2 points a pixel */
+    struct bw2_geom g3 = { 1280, 960, 640, 480 };
+    bw2_letterbox(&g3, &x0, &y0, &s);
+    CHECK(NEAR(s, 2) && NEAR(x0, 0) && NEAR(y0, 0));
+    n = tr(&t, &g3, MAC(.type = BW2_MAC_MOVE, .x = 641, .y = 479)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 320, 240);
+}
+
+static void group_deltas(void) {
+    struct bw2_geom g = { 2048, 1536, 1024, 768 };   /* 2 points a pixel */
+    struct bw2_translator t = { 0 };
+    int n;
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 100, .y = 100, .dx = 1.0)); CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].kind, BW2_IN_MOVE); CHECKEQ(g_tr[0].dx, 0); CHECKEQ(g_tr[0].dy, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 100, .y = 100, .dx = 1.0)); CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].dx, 1); CHECKEQ(g_tr[0].dy, 0);
+    /* down positive in AppKit and in DirectInput */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 100, .y = 100, .dy = 4.0)); CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].dx, 0); CHECKEQ(g_tr[0].dy, 2);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 100, .y = 100, .dy = -6.0)); CHECKEQ(n, 1);
+    CHECKEQ((int32_t)g_tr[0].dy, -3);
+    /* negative fractions carry too */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 100, .y = 100, .dx = -1.0)); CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].dx, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 100, .y = 100, .dx = -1.0)); CHECKEQ(n, 1);
+    CHECKEQ((int32_t)g_tr[0].dx, -1);
+    /* a large one, and many small ones adding up */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 100, .y = 100, .dx = 1024.0, .dy = 600.0)); CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].dx, 512); CHECKEQ(g_tr[0].dy, 300);
+    int sum = 0;
+    for (int i = 0; i < 100; i++) {
+        n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 100, .y = 100, .dx = 0.25));
+        CHECKEQ(n, 1);
+        sum += g_tr[0].dx;
+    }
+    CHECKEQ(sum, 12);                    /* 25 points, half a pixel left over */
+    /* the point and the delta are independent (a detached pointer keeps its point) */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 1000, .y = 1000, .dx = 3.0)); CHECKEQ(n, 1);
+    EXPECT_MOVE(g_tr[0], 500, 268); CHECKEQ(g_tr[0].dx, 2);
+    /* at the 1512x982 letterbox, 1.27864 points a pixel */
+    struct bw2_geom gl = { 1512, 982, 1024, 768 };
+    struct bw2_translator t2 = { 0 };
+    n = tr(&t2, &gl, MAC(.type = BW2_MAC_MOVE, .x = 700, .y = 500, .dx = 982.0, .dy = -982.0)); CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].dx, 768); CHECKEQ((int32_t)g_tr[0].dy, -768);
+}
+
+static void group_scroll_precise(void) {
+    struct bw2_geom g = { 1024, 768, 1024, 768 };
+    struct bw2_translator t = { 0 };
+    int n;
+    for (int i = 0; i < 3; i++) {
+        n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .precise = 1, .scroll_dy = 3));
+        CHECKEQ(n, 0);
+    }
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .precise = 1, .scroll_dy = 3));
+    CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].kind, BW2_IN_WHEEL); CHECKEQ(g_tr[0].wheel, 120); CHECKEQ(g_tr[0].x, 10); CHECKEQ(g_tr[0].y, 10);
+    CHECK(NEAR(t.scroll_rem, 2));
+    /* momentum: nothing, remainder kept */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .precise = 1, .momentum = 1, .scroll_dy = 50)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .precise = 1, .momentum = 1, .scroll_dy = -50)); CHECKEQ(n, 0);
+    CHECK(NEAR(t.scroll_rem, 2));
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .precise = 1, .scroll_dy = -25)); CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].kind, BW2_IN_WHEEL); CHECKEQ((int32_t)g_tr[0].wheel, -240);
+    CHECK(NEAR(t.scroll_rem, -3));
+    /* a wheel mouse: 120 a line; the precise remainder is left alone */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .scroll_dy = 1.0)); CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].kind, BW2_IN_WHEEL); CHECKEQ(g_tr[0].wheel, 120);
+    CHECK(NEAR(t.scroll_rem, -3));
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .scroll_dy = -3.0)); CHECKEQ(n, 1);
+    CHECKEQ((int32_t)g_tr[0].wheel, -360);
+    /* a fractional line is still one notch (each wheel event is a detent) */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .scroll_dy = 0.3)); CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].wheel, 120);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .scroll_dy = -0.1)); CHECKEQ(n, 1);
+    CHECKEQ((int32_t)g_tr[0].wheel, -120);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .scroll_dy = 2.6)); CHECKEQ(n, 1);
+    CHECKEQ(g_tr[0].wheel, 360);
+    /* no vertical scroll: nothing */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .scroll_dy = 0)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .precise = 1, .scroll_dy = 0)); CHECKEQ(n, 0);
+    /* the remainder reaches a notch from -3: -7 more */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .precise = 1, .scroll_dy = -6.5)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 10, .y = 758, .precise = 1, .scroll_dy = -0.5)); CHECKEQ(n, 1);
+    CHECKEQ((int32_t)g_tr[0].wheel, -120);
+    CHECK(NEAR(t.scroll_rem, 0));
+}
+
+static void group_option_middle(void) {
+    struct bw2_geom g = { 1024, 768, 1024, 768 };
+    struct bw2_translator t = { 0 };
+    const uint64_t OPT = BW2_MOD_OPTION;
+    int n;
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 100, .y = 668)); CHECKEQ(n, 1); EXPECT_MOVE(g_tr[0], 100, 100);
+    /* Option down: the game sees Alt down */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = OPT)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA4, 0x38, 0);
+    /* Option + left: Alt up, then the middle button */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 100, .y = 668, .button = 0, .mods = OPT)); CHECKEQ(n, 2);
+    EXPECT_KEY(g_tr[0], 0, 0xA4, 0x38, 0);
+    EXPECT_BUTTON(g_tr[1], 2, 1, 100, 100);
+    /* Option released first: dropped */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = 0)); CHECKEQ(n, 0);
+    /* the left up ends the middle, whatever the modifiers */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 100, .y = 668, .button = 0)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 2, 0, 100, 100);
+    /* a later plain left is the left */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 100, .y = 668, .button = 0)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 0, 1, 100, 100);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 100, .y = 668, .button = 0)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 0, 0, 100, 100);
+    /* and Option is no longer held back */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = OPT)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA4, 0x38, 0);
+
+    /* Option released after the button: the middle goes up at the left up, Option's release is dropped */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 200, .y = 568, .button = 0, .mods = OPT)); CHECKEQ(n, 3);
+    EXPECT_MOVE(g_tr[0], 200, 200);
+    EXPECT_KEY(g_tr[1], 0, 0xA4, 0x38, 0);
+    EXPECT_BUTTON(g_tr[2], 2, 1, 200, 200);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_MOVE, .x = 210, .y = 568, .mods = OPT)); CHECKEQ(n, 1);
+    EXPECT_MOVE(g_tr[0], 210, 200);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 210, .y = 568, .button = 0, .mods = OPT)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 2, 0, 210, 200);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = 0)); CHECKEQ(n, 0);
+    CHECKEQ(t.keys[0x3A], 0); CHECKEQ(t.option_held, 0);
+
+    /* the right Option, with the device bits macOS adds (NX_DEVICERALTKEYMASK 0x40, left 0x20) */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3D, .mods = OPT | 0x40)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA5, 0x38, 1);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 210, .y = 568, .button = 0, .mods = OPT | 0x40)); CHECKEQ(n, 2);
+    EXPECT_KEY(g_tr[0], 0, 0xA5, 0x38, 1);
+    EXPECT_BUTTON(g_tr[1], 2, 1, 210, 200);
+    /* held back: the other Option down, this one up, that one up */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = OPT | 0x60)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3D, .mods = OPT | 0x20)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 210, .y = 568, .button = 0, .mods = OPT | 0x20)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 2, 0, 210, 200);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = 0)); CHECKEQ(n, 0);
+    /* both Options: an Alt down only once released and pressed again */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = OPT | 0x20)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA4, 0x38, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3D, .mods = OPT | 0x60)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA5, 0x38, 1);
+    /* Option + left with both Alts down: both go up first */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 300, .y = 468, .button = 0, .mods = OPT | 0x60)); CHECKEQ(n, 4);
+    EXPECT_MOVE(g_tr[0], 300, 300);
+    EXPECT_KEY(g_tr[1], 0, 0xA4, 0x38, 0);
+    EXPECT_KEY(g_tr[2], 0, 0xA5, 0x38, 1);
+    EXPECT_BUTTON(g_tr[3], 2, 1, 300, 300);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 300, .y = 468, .button = 0, .mods = OPT | 0x60)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 2, 0, 300, 300);
+    /* still held: Option + left again is the middle again, with no Alt to release */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 300, .y = 468, .button = 0, .mods = OPT | 0x60)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 2, 1, 300, 300);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 300, .y = 468, .button = 0)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 2, 0, 300, 300);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3D, .mods = OPT | 0x20)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = 0)); CHECKEQ(n, 0);
+
+    /* Option + right is the right button, and Alt stays down */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = OPT)); CHECKEQ(n, 1);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 300, .y = 468, .button = 1, .mods = OPT)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 1, 1, 300, 300);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 300, .y = 468, .button = 1, .mods = OPT)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 1, 0, 300, 300);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = 0)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 0, 0xA4, 0x38, 0);
+}
+
+static void group_cmd_keys(void) {
+    struct bw2_geom g = { 1024, 768, 1024, 768 };
+    struct bw2_translator t = { 0 };
+    const uint64_t CMD = BW2_MOD_COMMAND;
+    int n;
+    /* Command down (left, right): nothing; Cmd+Q: nothing, its up: nothing */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x37, .mods = CMD | 0x08)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x0C, .mods = CMD | 0x08)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYUP, .keycode = 0x0C, .mods = CMD | 0x08)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x36, .mods = CMD | 0x18)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x36, .mods = CMD | 0x08)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x37, .mods = 0)); CHECKEQ(n, 0);
+    /* Q after Command: the key */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYUP, .keycode = 0x0C)); CHECKEQ(n, 0);   /* never given down */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x0C)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 'Q', 0x10, 0); CHECKEQ(g_tr[0].repeat, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x0C, .repeat = 1)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 'Q', 0x10, 0); CHECKEQ(g_tr[0].repeat, 1);
+    /* Command pressed while Q is held: Q's up still reaches the game */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x37, .mods = CMD)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x0C, .mods = CMD, .repeat = 1)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYUP, .keycode = 0x0C, .mods = CMD)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 0, 'Q', 0x10, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x37, .mods = 0)); CHECKEQ(n, 0);
+    /* Control+A and Shift+A are keys; Control is a key too */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3B, .mods = BW2_MOD_CONTROL)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA2, 0x1D, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x00, .mods = BW2_MOD_CONTROL)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 'A', 0x1E, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYUP, .keycode = 0x00, .mods = BW2_MOD_CONTROL)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 0, 'A', 0x1E, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3B, .mods = 0)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 0, 0xA2, 0x1D, 0);
+    /* right Control and right Shift */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3E, .mods = BW2_MOD_CONTROL | 0x2000)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA3, 0x1D, 1);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3E, .mods = 0)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 0, 0xA3, 0x1D, 1);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3C, .mods = BW2_MOD_SHIFT | 0x04)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA1, 0x36, 0);
+    /* left Shift too, then the right one up: the left stays */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x38, .mods = BW2_MOD_SHIFT | 0x06)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA0, 0x2A, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3C, .mods = BW2_MOD_SHIFT | 0x02)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 0, 0xA1, 0x36, 0);
+    /* a flags event with no change: nothing */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x38, .mods = BW2_MOD_SHIFT | 0x02)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x38, .mods = 0)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 0, 0xA0, 0x2A, 0);
+    /* with no device bits: both sides of a family go up when its bit clears */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x38, .mods = BW2_MOD_SHIFT)); CHECKEQ(n, 1);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3C, .mods = BW2_MOD_SHIFT)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA1, 0x36, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3C, .mods = 0)); CHECKEQ(n, 2);
+    EXPECT_KEY(g_tr[0], 0, 0xA0, 0x2A, 0);
+    EXPECT_KEY(g_tr[1], 0, 0xA1, 0x36, 0);
+    /* Fn, keypad Clear, keypad =, F16: nothing */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3F, .mods = 1ull << 23)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3F, .mods = 0)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x47)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x51)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x6A)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYUP, .keycode = 0x6A)); CHECKEQ(n, 0);
+    /* an extended key: the arrows */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x7B, .mods = 1ull << 23)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0x25, 0x4B, 1);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYUP, .keycode = 0x7B, .mods = 1ull << 23)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 0, 0x25, 0x4B, 1);
+}
+
+static void group_caps(void) {
+    struct bw2_geom g = { 1024, 768, 1024, 768 };
+    struct bw2_translator t = { 0 };
+    int n;
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x39, .mods = BW2_MOD_CAPS)); CHECKEQ(n, 2);
+    EXPECT_KEY(g_tr[0], 1, 0x14, 0x3A, 0);
+    EXPECT_KEY(g_tr[1], 0, 0x14, 0x3A, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x39, .mods = 0)); CHECKEQ(n, 2);
+    EXPECT_KEY(g_tr[0], 1, 0x14, 0x3A, 0);
+    EXPECT_KEY(g_tr[1], 0, 0x14, 0x3A, 0);
+    /* no change: nothing */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x39, .mods = 0)); CHECKEQ(n, 0);
+    /* toggled while away, seen on the next flags change: the toggle first, then the modifier */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x38, .mods = BW2_MOD_CAPS | BW2_MOD_SHIFT)); CHECKEQ(n, 3);
+    EXPECT_KEY(g_tr[0], 1, 0x14, 0x3A, 0);
+    EXPECT_KEY(g_tr[1], 0, 0x14, 0x3A, 0);
+    EXPECT_KEY(g_tr[2], 1, 0xA0, 0x2A, 0);
+    /* a key with the lock on is only the key */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x00, .mods = BW2_MOD_CAPS | BW2_MOD_SHIFT)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 'A', 0x1E, 0);
+}
+
+/* Additions: buttons, the MOVE before them, and what is not sent. */
+static void group_mouse_events(void) {
+    struct bw2_geom g = { 1024, 768, 1024, 768 };
+    struct bw2_translator t = { 0 };
+    int n;
+    /* the first event has no point before it: a MOVE first */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 5, .y = 763, .button = 0)); CHECKEQ(n, 2);
+    EXPECT_MOVE(g_tr[0], 5, 5); CHECKEQ(g_tr[0].dx, 0); CHECKEQ(g_tr[0].dy, 0);
+    EXPECT_BUTTON(g_tr[1], 0, 1, 5, 5);
+    /* same point: the button only */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 5.5, .y = 762.5, .button = 0)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 0, 0, 5, 5);
+    /* buttons 1, 2, 3, 4 */
+    for (int b = 1; b <= 4; b++) {
+        n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 5, .y = 763, .button = b)); CHECKEQ(n, 1);
+        EXPECT_BUTTON(g_tr[0], b, 1, 5, 5);
+        n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 5, .y = 763, .button = b)); CHECKEQ(n, 1);
+        EXPECT_BUTTON(g_tr[0], b, 0, 5, 5);
+    }
+    /* button 5 and up: nothing; an up of a button never given down: nothing */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 5, .y = 763, .button = 5)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 5, .y = 763, .button = 5)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 5, .y = 763, .button = 1)); CHECKEQ(n, 0);
+    /* moved: the MOVE first, even with nothing else to send */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 9, .y = 763, .button = 1)); CHECKEQ(n, 1);
+    EXPECT_MOVE(g_tr[0], 9, 5);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 20, .y = 748, .button = 1, .dx = 4, .dy = 6)); CHECKEQ(n, 2);
+    EXPECT_MOVE(g_tr[0], 20, 20); CHECKEQ(g_tr[0].dx, 4); CHECKEQ(g_tr[0].dy, 6);
+    EXPECT_BUTTON(g_tr[1], 1, 1, 20, 20);
+    /* a delta with no new point still moves first (a detached pointer) */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 20, .y = 748, .button = 1, .dx = 2)); CHECKEQ(n, 2);
+    EXPECT_MOVE(g_tr[0], 20, 20); CHECKEQ(g_tr[0].dx, 2);
+    EXPECT_BUTTON(g_tr[1], 1, 0, 20, 20);
+    /* Control + left is the left button, not the right */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 20, .y = 748, .button = 0, .mods = BW2_MOD_CONTROL)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 0, 1, 20, 20);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 20, .y = 748, .button = 0, .mods = BW2_MOD_CONTROL)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 0, 0, 20, 20);
+    /* Command + click still clicks (only keys go to the menus) */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 20, .y = 748, .button = 0, .mods = BW2_MOD_COMMAND)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 0, 1, 20, 20);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 20, .y = 748, .button = 0)); CHECKEQ(n, 1);
+    /* a view with no size has no picture to point at: no mouse events, keys still go */
+    struct bw2_geom g0 = { 0, 0, 1024, 768 };
+    n = tr(&t, &g0, MAC(.type = BW2_MAC_MOVE, .x = 1, .y = 1, .dx = 5)); CHECKEQ(n, 0);
+    n = tr(&t, &g0, MAC(.type = BW2_MAC_DOWN, .x = 1, .y = 1, .button = 0)); CHECKEQ(n, 0);
+    n = tr(&t, &g0, MAC(.type = BW2_MAC_SCROLL, .x = 1, .y = 1, .scroll_dy = 1)); CHECKEQ(n, 0);
+    n = tr(&t, &g0, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x31)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0x20, 0x39, 0);
+    n = tr(&t, &g0, MAC(.type = BW2_MAC_KEYUP, .keycode = 0x31)); CHECKEQ(n, 1);
+}
+
+/* Addition: on deactivation the queue gives the game its ups; the translator forgets its downs. */
+static void group_translate_reset(void) {
+    struct bw2_geom g = { 1024, 768, 1024, 768 };
+    struct bw2_translator t = { 0 };
+    int n;
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x39, .mods = BW2_MOD_CAPS)); CHECKEQ(n, 2);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x38, .mods = BW2_MOD_CAPS | BW2_MOD_SHIFT)); CHECKEQ(n, 1);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYDOWN, .keycode = 0x00, .mods = BW2_MOD_CAPS | BW2_MOD_SHIFT)); CHECKEQ(n, 1);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 5, .y = 763, .button = 0)); CHECKEQ(n, 2);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = BW2_MOD_CAPS | BW2_MOD_SHIFT | BW2_MOD_OPTION));
+    CHECKEQ(n, 1);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 5, .y = 763, .button = 1, .mods = BW2_MOD_OPTION)); CHECKEQ(n, 1);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 5, .y = 763, .precise = 1, .scroll_dy = 7)); CHECKEQ(n, 0);
+    bw2_translate_reset(&t);
+    /* the ups after it are not sent again */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 5, .y = 763, .button = 0)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_UP, .x = 5, .y = 763, .button = 1)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_KEYUP, .keycode = 0x00, .mods = BW2_MOD_CAPS | BW2_MOD_SHIFT)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x3A, .mods = BW2_MOD_CAPS | BW2_MOD_SHIFT)); CHECKEQ(n, 0);
+    /* a key still held when the window comes back is pressed afresh */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x38, .mods = BW2_MOD_CAPS)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x38, .mods = BW2_MOD_CAPS | BW2_MOD_SHIFT)); CHECKEQ(n, 1);
+    EXPECT_KEY(g_tr[0], 1, 0xA0, 0x2A, 0);
+    /* the lock state and the point are kept; the scroll remainder is not */
+    n = tr(&t, &g, MAC(.type = BW2_MAC_FLAGS, .keycode = 0x39, .mods = BW2_MOD_CAPS | BW2_MOD_SHIFT)); CHECKEQ(n, 0);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_DOWN, .x = 5, .y = 763, .button = 0)); CHECKEQ(n, 1);
+    EXPECT_BUTTON(g_tr[0], 0, 1, 5, 5);
+    n = tr(&t, &g, MAC(.type = BW2_MAC_SCROLL, .x = 5, .y = 763, .precise = 1, .scroll_dy = 3)); CHECKEQ(n, 0);
+    CHECK(NEAR(t.scroll_rem, 3));
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: input_selftest <group> [arg]\n"); return 2; }
     hle_mem_init();
@@ -1362,6 +1846,15 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "di_overflow")) group_di_overflow();
     else if (!strcmp(argv[1], "focus_loss")) group_focus_loss();
     else if (!strcmp(argv[1], "di_exclusive")) group_di_exclusive();
+    else if (!strcmp(argv[1], "keymap")) group_keymap();
+    else if (!strcmp(argv[1], "geom_letterbox")) group_geom_letterbox();
+    else if (!strcmp(argv[1], "deltas")) group_deltas();
+    else if (!strcmp(argv[1], "scroll_precise")) group_scroll_precise();
+    else if (!strcmp(argv[1], "option_middle")) group_option_middle();
+    else if (!strcmp(argv[1], "cmd_keys")) group_cmd_keys();
+    else if (!strcmp(argv[1], "caps")) group_caps();
+    else if (!strcmp(argv[1], "mouse_events")) group_mouse_events();
+    else if (!strcmp(argv[1], "translate_reset")) group_translate_reset();
     else { fprintf(stderr, "input_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);
