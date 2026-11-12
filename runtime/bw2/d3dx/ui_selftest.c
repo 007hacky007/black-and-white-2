@@ -1,9 +1,11 @@
 /*
- * ui_selftest.c - D3DX's 2D layer (plan 7): d3d_call and ID3DXSprite, called
- * as lifted code calls them, on a headless device. Built with the engine
- * (minus main.c) by tests/test_ui.py; `ui_selftest <group>` runs one group
- * and prints "<group>: <n> failed". Pixel groups draw into a 64x64 A8R8G8B8
- * target and read it back.
+ * ui_selftest.c - D3DX's 2D layer (plan 7): d3d_call, ID3DXSprite and the
+ * fonts (font.h), called as lifted code calls them, on a headless device.
+ * Built with the engine (minus main.c) by tests/test_ui.py;
+ * `ui_selftest <group> [args]` runs one group and prints "<group>: <n>
+ * failed". Pixel groups draw into a 64x64 A8R8G8B8 target and read it back.
+ * Font groups take their files (the Mac's fonts or renamed copies in the
+ * test's tmp_path) and expectations from the test as arguments.
  */
 #include <signal.h>
 #include <stdarg.h>
@@ -17,6 +19,8 @@
 #include "d3d_com.h"
 #include "sm.h"
 #include "ui.h"
+#include "font.h"
+#include <math.h>
 
 const recomp_dispatch_entry_t recomp_dispatch_table[1] = { { 0, 0 } };
 const uint32_t recomp_dispatch_count = 0;
@@ -670,8 +674,286 @@ static void group_sprite_lost(void) {
     release(s), release(t), release(rt);
 }
 
+/* ---- fonts (font.h): the files and expectations come from tests/test_ui.py ---- */
+
+static char **g_arg;                                   /* argv + 2: the group's arguments */
+static void print_tm(const char *label, const struct bw2_tm *t) {
+    printf("tm %s height=%d ascent=%d descent=%d internal_leading=%d external_leading=%d ave_char_width=%d "
+           "max_char_width=%d weight=%d overhang=%d aspect_x=%d aspect_y=%d first=%u last=%u deflt=%u brk=%u "
+           "italic=%u underlined=%u struck_out=%u pitch_family=%u charset=%u ppem=%u\n", label, t->height,
+           t->ascent, t->descent, t->internal_leading, t->external_leading, t->ave_char_width, t->max_char_width,
+           t->weight, t->overhang, t->aspect_x, t->aspect_y, t->first, t->last, t->deflt, t->brk, t->italic,
+           t->underlined, t->struck_out, t->pitch_family, t->charset, t->ppem);
+}
+static struct bw2_font *open_at(const char *face, int32_t h, uint32_t w, int it, int line) {
+    char err[256] = "";
+    struct bw2_font *f = bw2_font_open(face, h, w, it, err, sizeof err);
+    if (!f) printf("FAIL %s:%d open \"%s\" %d weight %u italic %d: %s\n", __FILE__, line, face, h, w, it, err), fails++;
+    return f;
+}
+#define OPEN(face, h, w, it) open_at(face, h, w, it, __LINE__)
+static void refused_at(const char *face, int32_t h, uint32_t w, int it, const char *want, int line) {
+    char err[256] = "";
+    struct bw2_font *f = bw2_font_open(face, h, w, it, err, sizeof err);
+    if (f || !strstr(err, want)) {
+        printf("FAIL %s:%d open \"%s\" %d weight %u italic %d: %s, message \"%s\", want \"%s\"\n", __FILE__, line,
+               face, h, w, it, f ? "opened" : "refused", err, want);
+        fails++;
+    }
+    if (f) bw2_font_close(f);
+}
+#define REFUSED(face, h, w, it, want) refused_at(face, h, w, it, want, __LINE__)
+/* a host file into guest memory */
+static uint32_t gfile(const char *path, uint32_t *len) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) { printf("FAIL cannot read %s\n", path); fails++; *len = 0; return 0; }
+    fseek(fp, 0, SEEK_END);
+    long n = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    uint32_t p = gmem((uint32_t)n + 1);
+    CHECKEQ(fread(hle_ptr(p), 1, (size_t)n, fp), (size_t)n);
+    fclose(fp);
+    *len = (uint32_t)n;
+    return p;
+}
+/* a gdi32 export as the game finds it: GetProcAddress(LoadLibraryA("gdi32.dll"), name) */
+static uint32_t gdi_call(const char *name, int n, ...) {
+    uint32_t mod = call("LoadLibraryA", 1, gbytes("gdi32.dll", 9));
+    uint32_t va = call("GetProcAddress", 2, mod, gbytes(name, (uint32_t)strlen(name)));
+    recomp_func_t f = va ? recomp_lookup_import(va) : NULL;
+    if (!f) { printf("FAIL GetProcAddress(gdi32.dll, %s): not answered\n", name); fails++; return 0xDEADBEEFu; }
+    uint32_t a[8];
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) a[i] = va_arg(ap, uint32_t);
+    va_end(ap);
+    return run(f, name, n, a);
+}
+static uint32_t add_file(const char *path, uint32_t *count) {
+    uint32_t len, p = gfile(path, &len), pc = gmem(4);
+    MEM32(pc) = 0xCCCCCCCCu;
+    uint32_t h = gdi_call("AddFontMemResourceEx", 4, p, len, 0u, pc);
+    *count = MEM32(pc);
+    return h;
+}
+static uint32_t add_ok(const char *path) {
+    uint32_t n, h = add_file(path, &n);
+    CHECK(h != 0);
+    CHECKEQ(n, 1);
+    return h;
+}
+static int is_memory(const struct bw2_font *f) { return f && !strcmp(bw2_font_source(f), "memory"); }
+static uint32_t glyph_of(const struct bw2_font *f, char c) { return bw2_font_glyph(f, (uint8_t)c); }
+
+/* argv: the Arial Narrow file, the Courier New file, Arial Narrow without VDMX renamed "BW2 No VDMX" */
+static void group_font_metrics(void) {
+    static const int32_t hs[] = { -8, -16, -46, 20 };
+    for (int i = 0; i < 4; i++) {
+        struct bw2_font *f = OPEN("Arial Narrow", hs[i], 400, 0);
+        if (!f) continue;
+        char label[32];
+        snprintf(label, sizeof label, "arial%d", hs[i]);
+        print_tm(label, bw2_font_metrics(f));
+        if (i == 0) printf("source arial %s\n", bw2_font_source(f));
+        if (hs[i] == -16) {                                     /* its VDMX entry, not OS/2's 18 */
+            CHECKEQ(bw2_font_metrics(f)->height, 20);
+            CHECKEQ(bw2_font_metrics(f)->ascent, 16);
+            CHECKEQ(bw2_font_metrics(f)->descent, 4);
+        }
+        bw2_font_close(f);
+    }
+    struct bw2_font *f = OPEN("Courier New", -16, 400, 0);
+    if (f) {
+        print_tm("courier-16", bw2_font_metrics(f));
+        printf("source courier %s\n", bw2_font_source(f));
+        CHECKEQ(bw2_font_metrics(f)->pitch_family, 0x36);
+        bw2_font_close(f);
+    }
+    f = OPEN("Arial Narrow", -16, 0, 0);                         /* weight 0 reads as 400 */
+    if (f) CHECKEQ(bw2_font_metrics(f)->weight, 400), bw2_font_close(f);
+    f = OPEN("Arial Narrow", -16, 700, 0);
+    if (f) CHECKEQ(bw2_font_metrics(f)->weight, 700), bw2_font_close(f);
+    add_ok(g_arg[2]);
+    f = OPEN("BW2 No VDMX", -16, 400, 0);                        /* the OS/2 rule */
+    if (f) {
+        print_tm("novdmx-16", bw2_font_metrics(f));
+        CHECK(is_memory(f));
+        CHECKEQ(bw2_font_metrics(f)->height, 18);
+        CHECKEQ(bw2_font_metrics(f)->ascent, 15);
+        CHECKEQ(bw2_font_metrics(f)->descent, 3);
+        bw2_font_close(f);
+    }
+}
+
+/* argv: Arial Narrow without hdmx renamed "BW2 No HDMX". Prints glyphs and advances for Python. */
+static void group_font_advance(void) {
+    add_ok(g_arg[0]);
+    static const char *const faces[2] = { "Arial Narrow", "BW2 No HDMX" };
+    for (int k = 0; k < 2; k++) {
+        struct bw2_font *f = OPEN(faces[k], -16, 400, 0);
+        if (!f) continue;
+        CHECKEQ(is_memory(f), k == 1);
+        for (const char *c = "AWi "; *c; c++) {
+            uint32_t g = glyph_of(f, *c);
+            CHECK(g != 0);
+            printf("adv %d %d glyph=%u advance=%d\n", k, *c, g, bw2_font_advance(f, g));
+        }
+        bw2_font_close(f);
+    }
+}
+
+/* argv: Arial Narrow renamed "BW2 Test Face", Arial Narrow renamed "Courier New", Arial Narrow's maxp
+ * count, Courier New's maxp count, a collection of "BW2 TTC One" (Arial Narrow) and "BW2 TTC Two"
+ * (Courier New), Arial Narrow Bold renamed "BW2 Bold Face" */
+static void group_font_memory(void) {
+    uint32_t arial_n = (uint32_t)atoi(g_arg[2]), courier_n = (uint32_t)atoi(g_arg[3]);
+    /* 1-2: added through gdi32, then opened by family, case-insensitively */
+    uint32_t h = add_ok(g_arg[0]);
+    struct bw2_font *f = OPEN("BW2 Test Face", -16, 400, 0), *f2 = OPEN("bw2 TEST face", -16, 400, 0);
+    CHECK(is_memory(f) && is_memory(f2));
+    if (f2) bw2_font_close(f2);
+    struct bw2_glyph before = { 0 }, after = { 0 };
+    if (f) CHECKEQ(bw2_font_raster(f, glyph_of(f, 'A'), &before), 1);
+    CHECK(before.w > 0 && before.h > 0 && before.alpha);
+    /* 3: removed, it is no longer found; an unknown handle is FALSE */
+    CHECKEQ(gdi_call("RemoveFontMemResourceEx", 1, h), 1);
+    REFUSED("BW2 Test Face", -16, 400, 0, "no font named \"BW2 Test Face\"");
+    CHECKEQ(gdi_call("RemoveFontMemResourceEx", 1, h), 0);
+    CHECKEQ(bw2_font_remove_memory(0x12345u), 0);
+    /* 5: a face opened before still rasterizes, to the same coverage */
+    if (f) {
+        CHECKEQ(bw2_font_raster(f, glyph_of(f, 'A'), &after), 1);
+        CHECK(after.w == before.w && after.h == before.h && after.left == before.left && after.top == before.top);
+        CHECK(after.alpha && before.alpha && !memcmp(after.alpha, before.alpha, (size_t)before.w * before.h));
+        bw2_font_close(f);
+    }
+    free(before.alpha), free(after.alpha);
+    /* 4: a memory face wins over the system's of the same name */
+    h = add_ok(g_arg[1]);
+    f = OPEN("Courier New", -16, 400, 0);
+    if (f) CHECKEQ(bw2_font_glyph_count(f), arial_n), CHECK(is_memory(f)), bw2_font_close(f);
+    CHECKEQ(bw2_font_remove_memory(h), 1);
+    f = OPEN("Courier New", -16, 400, 0);
+    if (f) CHECKEQ(bw2_font_glyph_count(f), courier_n), CHECK(!is_memory(f)), bw2_font_close(f);
+    /* a collection: one handle, two faces, each its own */
+    uint32_t n;
+    h = add_file(g_arg[4], &n);
+    CHECK(h != 0);
+    CHECKEQ(n, 2);
+    f = OPEN("BW2 TTC One", -16, 400, 0), f2 = OPEN("BW2 TTC Two", -16, 400, 0);
+    if (f) CHECKEQ(bw2_font_glyph_count(f), arial_n), CHECK(is_memory(f)), bw2_font_close(f);
+    if (f2) CHECKEQ(bw2_font_glyph_count(f2), courier_n), CHECK(is_memory(f2)), bw2_font_close(f2);
+    CHECKEQ(bw2_font_remove_memory(h), 1);
+    /* by full name (name ID 4): the bold face's full name has its style in it */
+    h = add_ok(g_arg[5]);
+    f = OPEN("BW2 Bold Face Bold", -16, 700, 0), f2 = OPEN("BW2 Bold Face", -16, 700, 0);
+    CHECK(is_memory(f) && is_memory(f2));
+    if (f) bw2_font_close(f);
+    if (f2) bw2_font_close(f2);
+    REFUSED("BW2 Bold Face", -16, 400, 0, "regular");
+    CHECKEQ(bw2_font_remove_memory(h), 1);
+}
+
+/* argv: Arial Narrow renamed "BW2 Test Face" */
+static void group_font_errors(void) {
+    REFUSED("No Such Face", -16, 400, 0, "no font named \"No Such Face\"");
+    struct bw2_font *f = OPEN("Arial Narrow", -16, 700, 0);       /* macOS has the bold face */
+    if (f) {
+        printf("source arial-bold %s\n", bw2_font_source(f));
+        CHECK(!is_memory(f));
+        bw2_font_close(f);
+    }
+    add_ok(g_arg[0]);
+    REFUSED("BW2 Test Face", -16, 700, 0, "bold");               /* memory only, Regular */
+    REFUSED("BW2 Test Face", -16, 400, 1, "italic");
+    REFUSED("BW2 Test Face", 0, 400, 0, "height 0");
+    REFUSED("Arial Narrow", 0, 400, 0, "height 0");
+    /* not a font: NULL, with a reason on stderr */
+    uint32_t pc = gmem(4), zeros = gmem(16);
+    MEM32(pc) = 0xCCCCCCCCu;
+    CHECKEQ(gdi_call("AddFontMemResourceEx", 4, zeros, 16u, 0u, pc), 0);
+    CHECKEQ(MEM32(pc), 0);
+    /* reserved not NULL, no count pointer, no data: NULL with ERROR_INVALID_PARAMETER */
+    uint32_t len, p = gfile(g_arg[0], &len);
+    call("SetLastError", 1, 0u);
+    CHECKEQ(gdi_call("AddFontMemResourceEx", 4, p, len, pc, pc), 0);
+    CHECKEQ(call("GetLastError", 0), 87);
+    call("SetLastError", 1, 0u);
+    CHECKEQ(gdi_call("AddFontMemResourceEx", 4, p, len, 0u, 0u), 0);
+    CHECKEQ(call("GetLastError", 0), 87);
+    call("SetLastError", 1, 0u);
+    CHECKEQ(gdi_call("AddFontMemResourceEx", 4, 0u, len, 0u, pc), 0);
+    CHECKEQ(call("GetLastError", 0), 87);
+}
+
+/* argv: the Arial Narrow file, Courier New renamed "Arial Narrow" with Arial Narrow's PostScript name,
+ * Courier New's maxp count */
+static void group_font_fallthrough(void) {
+    /* a memory face with a system face's PostScript name still draws from its own data */
+    uint32_t h = add_ok(g_arg[1]);
+    struct bw2_font *f = OPEN("Arial Narrow", -16, 400, 0);
+    if (f) CHECKEQ(bw2_font_glyph_count(f), (uint32_t)atoi(g_arg[2])), CHECK(is_memory(f)), bw2_font_close(f);
+    CHECKEQ(bw2_font_remove_memory(h), 1);
+    /* the game's case: the Regular face from memory, the other styles from the system */
+    add_ok(g_arg[0]);
+    static const struct { uint32_t w; int it; const char *label; } st[] = {
+        { 400, 0, "regular" }, { 700, 0, "bold" }, { 400, 1, "italic" }, { 700, 1, "bolditalic" },
+    };
+    for (int i = 0; i < 4; i++) {
+        f = OPEN("Arial Narrow", -16, st[i].w, st[i].it);
+        if (!f) continue;
+        printf("source %s %s\n", st[i].label, bw2_font_source(f));
+        CHECKEQ(is_memory(f), i == 0);
+        CHECKEQ(bw2_font_metrics(f)->italic, st[i].it ? 255 : 0);
+        bw2_font_close(f);
+    }
+}
+
+/* argv: the cap height and the glyf box of 'I' (x0 y0 x1 y1), in pixels at ppem 46 */
+static void group_font_raster(void) {
+    double cap = atof(g_arg[0]), bx0 = atof(g_arg[1]), by0 = atof(g_arg[2]), bx1 = atof(g_arg[3]), by1 = atof(g_arg[4]);
+    struct bw2_font *f = OPEN("Arial Narrow", -46, 400, 0);
+    if (!f) return;
+    CHECKEQ(bw2_font_metrics(f)->ppem, 46);
+    struct bw2_glyph g = { 0 };
+    CHECKEQ(bw2_font_raster(f, glyph_of(f, 'I'), &g), 1);
+    printf("raster I left=%d top=%d w=%u h=%u\n", g.left, g.top, g.w, g.h);
+    CHECK(g.h >= 0.6 * 46 && g.h <= 0.8 * 46);
+    CHECK(abs(g.top - (int)lround(cap)) <= 2);
+    CHECK(abs(g.left - (int)floor(bx0)) <= 1);                   /* one stem wide: the glyf box rounded out */
+    CHECK(abs((int)g.w - ((int)ceil(bx1) - (int)floor(bx0))) <= 1);
+    CHECK(abs(g.top - (int)ceil(by1)) <= 1 && abs(g.top - (int)g.h - (int)floor(by0)) <= 1);
+    int full = 0;
+    if (g.alpha)
+        for (uint32_t x = 0; x < g.w; x++) full += g.alpha[(g.h / 2) * g.w + x] == 255;
+    CHECK(full >= 2);                                            /* the stem is solid */
+    free(g.alpha);
+    struct bw2_glyph sp = { 1, 1, 1, 1, (uint8_t *)1 };
+    CHECKEQ(bw2_font_raster(f, glyph_of(f, ' '), &sp), 1);
+    CHECK(sp.w == 0 && sp.h == 0 && sp.alpha == NULL);
+    struct bw2_glyph gg = { 0 };
+    CHECKEQ(bw2_font_raster(f, glyph_of(f, 'g'), &gg), 1);
+    printf("raster g left=%d top=%d w=%u h=%u\n", gg.left, gg.top, gg.w, gg.h);
+    CHECK(gg.top - (int32_t)gg.h < 0);
+    free(gg.alpha);
+    bw2_font_close(f);
+}
+
+static void group_font_cp1252(void) {
+    CHECKEQ(bw2_cp1252(0x41), 0x41);
+    CHECKEQ(bw2_cp1252(0x80), 0x20AC);
+    CHECKEQ(bw2_cp1252(0x92), 0x2019);
+    CHECKEQ(bw2_cp1252(0x9F), 0x0178);
+    CHECKEQ(bw2_cp1252(0xE9), 0xE9);
+    CHECKEQ(bw2_cp1252(0x81), 0x81);
+    CHECKEQ(bw2_cp1252(0x8D), 0x8D), CHECKEQ(bw2_cp1252(0x8F), 0x8F), CHECKEQ(bw2_cp1252(0x90), 0x90);
+    CHECKEQ(bw2_cp1252(0x9D), 0x9D);
+    CHECKEQ(bw2_cp1252(0x7F), 0x7F), CHECKEQ(bw2_cp1252(0xA0), 0xA0), CHECKEQ(bw2_cp1252(0xFF), 0xFF);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: ui_selftest <group>\n"); return 2; }
+    g_arg = argv + 2;
     hle_mem_init();
     bw2_register_shims();
     mach_enter();
@@ -685,6 +967,13 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "sprite_objectspace")) group_sprite_objectspace();
     else if (!strcmp(argv[1], "sprite_rules")) group_sprite_rules();
     else if (!strcmp(argv[1], "sprite_lost")) group_sprite_lost();
+    else if (!strcmp(argv[1], "font_metrics")) group_font_metrics();
+    else if (!strcmp(argv[1], "font_advance")) group_font_advance();
+    else if (!strcmp(argv[1], "font_memory")) group_font_memory();
+    else if (!strcmp(argv[1], "font_errors")) group_font_errors();
+    else if (!strcmp(argv[1], "font_fallthrough")) group_font_fallthrough();
+    else if (!strcmp(argv[1], "font_raster")) group_font_raster();
+    else if (!strcmp(argv[1], "font_cp1252")) group_font_cp1252();
     else { fprintf(stderr, "ui_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

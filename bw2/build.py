@@ -27,7 +27,7 @@ WIN32HLE_CORE = ("host.c", "host_lite.c", "guest_mem.c", "pe_loader.c", "module.
 
 # Plan 4: the graphics layers, C and Objective-C (ARC); plan 5: the DirectInput mouse.
 BW2_SUBDIRS = ("d3d9", "d3dx", "input")
-FRAMEWORKS = ("Metal", "QuartzCore", "AppKit", "Foundation", "ImageIO", "CoreGraphics")
+FRAMEWORKS = ("Metal", "QuartzCore", "AppKit", "Foundation", "ImageIO", "CoreGraphics", "CoreText")
 
 
 def engine_sources() -> list[Path]:
