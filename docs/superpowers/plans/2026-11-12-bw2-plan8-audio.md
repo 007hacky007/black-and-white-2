@@ -42,7 +42,7 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
    - `GetVersion`, then `LoadLibraryA("dsound.dll")` and `GetProcAddress(.., "DllGetClassObject")`. Neither result is checked: a NULL module or a NULL entry falls through into the call (`0x8B9718`, `0x8B9734`). So `dsound.dll` and its `DllGetClassObject` must exist;
    - `DllGetClassObject(CLSID_DirectSoundPrivate {11AB3EC0-25EC-11D1-A4D8-00C04FC28ACA}, IID_IClassFactory)`, then `CreateInstance(NULL, IID_IKsPropertySet {31EFAC30-515C-11D0-A9AA-00AA0061BE93})`. A failed `CreateInstance` also falls through into a call on the unset pointer;
    - `IKsPropertySet::Get(DSPROPSETID_DirectSoundDevice {84624F82-25EC-11D1-A4D8-00C04FC28ACA}, 7, NULL, 0, &data, 8, &ret)`. Property 7 is the device enumeration with narrow strings. `data` is `{callback 0x8B9670, context}`;
-   - the callback reads DataFlow at +4 (render is 0), DeviceId at +8 and the interface string pointer at +0x20, and copies at most 0x103 bytes of that string;
+   - the callback reads DataFlow at +4 (render is 0), DeviceId at +8 and the interface string pointer at +0x20, and copies at most 0x103 bytes of that string (`0x8B96BF`-`0x8B96CC`). It does not check the pointer, so a NULL there crashes the game: +0x18, +0x1C and +0x20 must each point to a valid guest string;
    - `sub_008B9640` then tests four Windows 9x flags (set by `sub_008DF6B0` from `GetVersionExA`; all 0 on NT);
    - `sub_008B9800` builds a registry path from the interface string only if it begins with the 4 bytes of the Win32 device prefix `\\?\`; otherwise it gives -1. With -1, or with no registry key, the probe returns 3.
    The spike's device had an interface string without that prefix, so the probe returned 3 and the game made the DirectSound output. No registry key was opened and no device path was touched.
@@ -60,13 +60,15 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
 5. **Threads.** After the buffer, the audio library starts 5 guest threads through `sub_00899460` (one `SetThreadPriority`) and makes semaphores through `sub_008808B0`. The streaming calls run on those threads.
 6. **OpenAL is not used.** An OpenAL loader exists (object at `0x1D67C00`, vtable `0xCFA634`): `sub_008B3150` and `sub_008B2D90` try `OpenAL32.dll` from the current folder, then `wrap_oal.dll`, then the system folder. No run called it, and the shipped discs carry no OpenAL (disc 1's only redistributable is DirectX 9). The type-2 output may use it (a settings choice), not seen.
 7. **A missed function start.** After `Play`, `sub_00AD9918` (the vector-constructor iterator) calls `0x8B00B0`, which the catalog lacks: `unresolved indirect call at 0x008B00B0`. The catalogued `sub_008B0080` ends at `0x8B00D6`, over it, and `0x8B00B0` follows a `ret 8`, not padding, so `extrastarts` cannot see it. Of the 91 callbacks pushed before the vector iterators (`0xAD9918`, `0xAD98B8`), it is the only one missing. With it added the boot goes on.
+
+   A neighbouring catalog entry is a bad decode: `sub_008B00D6` (`0x8B00D6`-`0x8B0110`) starts inside the 8-byte instruction at `0x8B00D5` of the new function. A byte search of the exe finds no rel32 `call` or `jmp` to `0x8B00D6` and one 4-byte literal of it, in `_PDATA` (`0x2407368`, data, not code). The new start's own lift is unaffected, because `disassemble_function` follows flow on its own. Task 5 records this in `frontend.md` for later catalog work and confirms that no run dispatches to `0x8B00D6`.
 8. **Empty sound banks.** The audio library opens 59 files under `Audio/` with `GENERIC_READ` and `OPEN_ALWAYS`. win32hle sends every `OPEN_ALWAYS` to the support folder's overlay without copying, so each opened as a new empty file in `<support>/Game/Audio/`. The game read empty banks and mixed silence. With a read-only `OPEN_ALWAYS` of an existing file opened in place, the buffer gets non-silent samples about 22 frames after the first input read (two runs: 22 and 22). After 90 s the support folder held no file at all.
-9. **`GetKeyNameTextW`** (not answered: `unimplemented import GetKeyNameTextW`) is called 78 times from `sub_0064A8E0` (call sites `0x64A86C`, `0x64A963`, `0x64A9CA`), with buffer size 64. Every lParam has bit 25 set (left and right not told apart):
+9. **`GetKeyNameTextW`** (not answered: `unimplemented import GetKeyNameTextW`) is called 78 times, with buffer size 64. The call instructions are at `0x64A86A` (in `sub_0064A850`), `0x64A961` and `0x64A9C8` (in `sub_0064A8E0`). Every lParam has bit 25 set (left and right not told apart):
    - 38 have scan code 0;
    - the rest are scan codes 0x0C-0x0F, 0x12-0x14, 0x18, 0x1A-0x1D, 0x1F-0x21, 0x23, 0x26, 0x2C-0x2E, 0x31-0x36, 0x38 and 0x39;
    - extended (bit 24) codes 0x1D, 0x48, 0x49, 0x4B, 0x4D, 0x50 and 0x51.
 
-   `GetKeyNameTextA` is imported (`0x64A8AF`) but was not called. win32hle's A version ignores bits 24 and 25.
+   Each site zeroes the first wchar, calls W, and if the result is still empty falls back to `GetKeyNameTextA` with a 32-byte buffer. The A call sites are `0x64A8AF`, `0x64A99C`, `0x64AA02`, `0x64AA30` and `0x64AA58`. The spike saw no A call, but its stand-in W answer was not this plan's. Under this plan W answers an unknown code (scan 0, 38 of the 78 calls) with an empty string, so A will run, at least for those 38; Task 5 counts the A calls. win32hle's A version today ignores bits 24 and 25.
 10. **The front end.** With the answers above the boot reaches the front end:
     - its init comes about 1.8-2.1 s after start, and the first `GetDeviceData` (plan 5's stub, `sub_009AFD20`) about 3.0-3.4 s after start, at frame 794-1065 (two runs);
     - after that the game reads the mouse about once per frame (4,118 reads in 4,881 frames) and pumps messages (`PeekMessageA`, `sub_009B10D0`). There is no `GetCursorPos`, `GetAsyncKeyState` or `GetKeyState` in 150 s;
@@ -80,7 +82,8 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
 - Docs (this plan, `frontend.md`, the spec) never quote the game's own output: no debug log lines or strings. They describe such a line in neutral words with the address that prints it. Test sources never contain the game's strings either; they assert on the engine's own lines.
 - **Standing rule (user):** if the VM or the code it runs asks for a disc or driver check, stop and ask the user. The tripwire stays on, and its allow list (`runtime/bw2/guard.c` `g_allowed`) stays empty. The device enumeration answered here gives no `\\?\` device path, so the game opens no device and no device registry key. Winsock keeps answering "no network".
 - Fail loudly, never return 0 silently:
-  - An unimplemented method stops with `d3d9: <Interface>::<Method> not implemented (from guest 0x%08X)`, as plan 4's do.
+  - Every stop in this plan goes through plan 4's `d3d_fail` with the bare text only, for example `d3d_fail("IDirectSoundBuffer::GetCaps not implemented")`, `d3d_fail("waveOutOpen: the waveOut output is not answered")` or `d3d_fail("dsound: DirectSoundCreate not implemented")`. `d3d_fail` itself adds the `[bw2] FATAL: d3d9: ` prefix and the ` (from guest 0x..., sub_...)` suffix, so the text never repeats the address. Tests match the bare text as a substring.
+  - An unimplemented method stops with `<Interface>::<Method> not implemented`, as plan 4's do.
   - A buffer flag, format, lock flag, play flag, cooperative level, property set or id this plan does not handle stops loudly, naming the value. The exact lists are in Tasks 3 and 4.
 - **Later plans' layers** each exit 4 with `[bw2] reached <name>: owned by a later plan`:
   - `LoadLibraryA` of `openal32.dll` or `wrap_oal.dll`, Bink, and plan 7's D3DX stops stay as they are;
@@ -92,14 +95,17 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
 - Exit codes are unchanged: 0 normal (including `BW2_QUIT_AFTER_READS`), 2 boot failure, 3 tripwire, 4 later plan's layer, `abort()` otherwise.
 - Headless (`BW2_HEADLESS=1`) for every test, which uses the null sink. Only `test_ds_device` (Task 2) touches the real output, and only when `BW2_AUDIO_DEVICE=1`.
 - Generated documents use only the ASCII hyphen-minus. Commit subjects are short and imperative, with no body or trailers. Identity is 007hacky007. Never push. Work on branch `plan8`.
+- Never add a remote, never change git config, and never write the user's real name or email anywhere (code, docs, commits, logs).
 
 ## Review Focus
 
-- **Release while the mixer reads.** The output thread may be inside `ds_mix` when the game's thread releases a buffer. The voice must leave the mixer under its mutex before its guest memory is freed. Nothing may read the freed block afterwards, and nothing may crash. (Task 2, group `ds_mix_free`.)
-- **Quitting while sound plays.** `hle_exit` from a guest thread while the unit or the null sink is running must leave with the asked exit code, not a crash in a render callback reading unmapped memory. (Task 2, group `ds_out_exit`; Task 5's boot test exits 0 with audio playing.)
+- **Release while the mixer reads.** The output thread may be inside `ds_mix` when the game's thread releases a buffer. The voice must leave the mixer under its mutex before its guest memory is freed. Nothing may read the freed block afterwards, and nothing may crash. (Task 2, group `ds_mix_free`, which poisons each block between `ds_voice_free` and `hle_free` and fails if the poison value ever reaches the output.)
+- **Quitting while sound plays.** On macOS `hle_exit` ends with `_exit` (`third_party/pcrecomp/runtime/win32hle/kernel32.c`, `HLE_LEAVE`), so `hle_exit`, `ExitProcess` and `BW2_QUIT_AFTER_READS` tear the process down at once: no `atexit` handler or destructor runs, and nothing is unmapped while a render callback still reads. The `atexit` stop covers only `exit()` paths, such as a selftest's `main` returning or a plain `exit(0)` from another thread. `hle_on_exit` is a single pointer that `main.c` already uses for `--selftest-eh-depth`; this plan does not take it over. (Task 2, group `ds_out_exit`, both paths; Task 5's boot test exits 0 with audio playing.)
+- **COM objects on several guest threads.** This is the first time `d3d_com` objects are used from several guest threads: the 5 audio threads alongside the render thread. That is safe only while every `d3d_com` touch (refcounts, `d3d_host`, the live count) stays under the machine lock, and no DirectSound method holds the mixer mutex or any `d3d_com` state across `hle_block_begin`. The mixer mutex is a leaf: nothing takes the machine lock while holding it. (Tasks 3 and 4.)
+- **The null sink after a stall.** If the null sink's thread itself is descheduled, it must not burst ahead on waking: each wake mixes at most 2,048 frames (well under the 5,376-frame buffer), and a backlog above that is dropped by moving its clock forward. A lap caused by the game's own threads stalling for more than one buffer (122 ms) is accepted DirectSound behaviour: a real device keeps playing too, and the game's free-space count wraps as it would on Windows. (Task 2, groups `ds_out_null` and `ds_out_stall`.)
 - **Cursor and data agree.** The play cursor is exactly the bytes the mixer has consumed (mod size, whole blocks). Bytes the game writes between its write offset and the reported play cursor have not been read yet, and bytes at or after the play cursor have not been played. A mixer that consumes ahead of what it reports makes the game overwrite data still to be played: a click every 122 ms. (Task 2, group `ds_mix_cursor`.)
 - **A lock that wraps.** `Lock(21000, 1024)` on the 21,504-byte buffer gives two parts, 504 bytes at the end and 520 at the start. A lock past the end or larger than the buffer is `DSERR_INVALIDPARAM`, never a pointer outside the buffer. (Task 3, group `ds_buffer_lock`.)
-- **The probe's unchecked calls.** The game does not check `LoadLibraryA("dsound.dll")`, `DllGetClassObject` or `CreateInstance` before calling through them ("Measured" item 3). Each must succeed for the game's own GUIDs and leave a valid pointer, or the game calls address 0. (Task 4, group `ds_private`.)
+- **The probe's unchecked calls.** The game does not check `LoadLibraryA("dsound.dll")`, `DllGetClassObject` or `CreateInstance` before calling through them, nor the string pointers in the device description ("Measured" item 3). Each must succeed for the game's own GUIDs and leave a valid pointer, or the game calls or reads address 0. (Task 4, group `ds_private`.)
 - **No output device.** On a Mac whose unit cannot start, audio goes to the null sink with one notice line. The game's cursors keep moving at the real rate, and the boot is unchanged. (Task 2, group `ds_out_null`, which forces the failure.)
 
 ---
@@ -124,6 +130,7 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
     - with bit 25, `Right Shift` gives `Shift` and `Right Ctrl` gives `Ctrl` (the documentation: bit 25 merges only Ctrl and Shift);
     - an unknown code gives 0 and an empty string. A buffer of n characters takes at most n - 1 and the terminator; the return is the count copied. n = 0 gives 0 and writes nothing;
     - `GetKeyNameTextW` writes the same names as UTF-16.
+    - The game calls W first and A only when W gave an empty string ("Measured" item 9), so the unknown codes reach A too, which answers them the same way (0, empty).
 
 - [ ] **Step 1: Write the failing checks** in `runtime/bw2/shims_selftest.c` (run by `tests/test_engine.py::test_shims_selftest`) and in `tests/test_extrastarts.py`:
   - After `bw2_mount(".", "support")` with a file `Audio/a.bin` of 3 bytes `"abc"` written by the check into the mounted game folder:
@@ -132,7 +139,7 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
     - the same with `OPEN_EXISTING` reads `"abc"` (guard: passes today);
     - `CreateFileA("Audio\\new.bin", GENERIC_READ, 0, 0, OPEN_ALWAYS, 0, 0)` creates `support/Game/Audio/new.bin` (guard);
     - `GENERIC_READ | GENERIC_WRITE` with `OPEN_ALWAYS` on `Audio\\a.bin` makes `support/Game/Audio/a.bin` holding `"abc"` (guard: the existing copy rule).
-  - Key names (A and W; for W the buffer is read as UTF-16):
+  - Key names (A and W; for W the buffer is read as UTF-16). The W checks first CHECK that `hle_resolve("GetKeyNameTextW")` is nonzero and call it only then. (Review note: the selftest's `call()` already counts an unregistered name as one `not answered` failure, because `hle_resolve` gives 0 and only the game's IAT bind, `hle_resolve_or_stub`, makes the stopping stub; the explicit CHECK keeps that true if a later change binds stubs in the selftest.) So today W fails as one CHECK and does not stop the selftest:
     - lParam `0x02360000` gives `Shift`, `0x00360000` gives `Right Shift`;
     - `0x031D0000` gives `Ctrl`, `0x011D0000` gives `Right Ctrl`;
     - `0x03480000` gives `Up`, `0x02480000` gives `Num 8`;
@@ -140,7 +147,7 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
     - `0x02000000` gives 0 and an empty string;
     - `0x000E0000` with n 3 gives 2 and `Ba`.
   - `test_extrastarts.py::test_boot_start_8b00b0`: the committed `white-1.42.extra-starts.json` holds `[0x8B00B0, "boot"]`, and `load_extra_starts()` includes `0x8B00B0`.
-- [ ] **Step 2: Run them.** `.venv/bin/pytest tests/test_engine.py -k shims tests/test_extrastarts.py -v`. Expected: FAIL on each new check; the guards pass.
+- [ ] **Step 2: Run them.** `.venv/bin/pytest tests/test_engine.py -k shims tests/test_extrastarts.py -v`. Expected: FAIL on each new check (the W part as its one failed resolve CHECK); the guards pass.
 - [ ] **Step 3: Implement the `CreateFileA` rule.** Commit: `git commit -m "Open existing files in place for read-only OPEN_ALWAYS"`.
 - [ ] **Step 4: Implement the key names.** Commit: `git commit -m "Answer GetKeyNameTextW and the extended key names"`.
 - [ ] **Step 5: Add the start** to `white-1.42.extra-starts.json` (keep its format: `python -m bw2.extrastarts --write` keeps "boot" rows). Run the full pipeline: `.venv/bin/python -m bw2.pipeline` (about 3.5 minutes). Expected: `[link]` reports one function more than before (49,434).
@@ -164,9 +171,10 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
   - `int ds_voice_playing(int id);`
   - `void ds_mix(float *out, uint32_t frames);`: `out` gets `frames` interleaved stereo frames at `DS_OUT_RATE`, the clamped sum of the playing voices. Each voice's consumed count rises by the source frames read.
   - `uint64_t ds_frames_mixed(void);`
-  - `void ds_out_start(void);`: starts the output once, at the first voice. Headless (`BW2_HEADLESS=1`) uses the null sink. Otherwise it uses the `AudioUnit`; if a step fails it prints `[bw2] audio: no output device (OSStatus <n>), mixing to the null sink` once and uses the null sink. An `atexit` handler stops the unit (`AudioOutputUnitStop`, which waits for the callback) or joins the null sink before memory goes away.
+  - `void ds_out_start(void);`: starts the output once, at the first voice. Headless (`BW2_HEADLESS=1`) uses the null sink. Otherwise it uses the `AudioUnit`; if a step fails it prints `[bw2] audio: no output device (OSStatus <n>), mixing to the null sink` once and uses the null sink. Exit: `hle_exit` (and so `ExitProcess` and `BW2_QUIT_AFTER_READS`) ends in `_exit` on macOS, which tears the whole process down at once with no `atexit` handler or destructor running, so there is no race with the render callback on that path. For `exit()` paths only (a selftest's `main` returning, a plain `exit(0)` from another thread), an `atexit` handler stops the unit (`AudioOutputUnitStop`, which waits for the callback) or sets the null sink's stop flag and joins it. The handler takes no machine lock. With `BW2_AUDIO_LOG=1` it prints `[bw2] audio: output stopped at exit`. `hle_on_exit` is not used: it is one pointer, and `main.c` already owns it for `--selftest-eh-depth`.
   - `void ds_out_force_null_for_test(void);`: makes the next `ds_out_start` behave as if the unit failed (the notice included).
   - `void ds_out_manual_for_test(void);`: makes `ds_out_start` start nothing, so a test drives `ds_mix` itself.
+  - `void ds_out_stall_for_test(uint32_t ms);` and `uint64_t ds_out_skipped_frames_for_test(void);`: make the null sink's next wake sleep `ms` first, and give the frames it has dropped.
 - **Mixing rules:**
   - 16-bit samples are s/32768; 8-bit are (s - 128)/128. Mono goes to both channels.
   - Source position advances by rate/44,100 per output frame. The sample is linear interpolation between frame k and k+1 (k+1 wraps to 0, as the buffer loops). At rate 44,100 the output equals the source samples exactly.
@@ -174,17 +182,20 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
   - The sum is clamped to [-1, 1] per sample.
 - **Output details:**
   - **The unit:** `kAudioUnitType_Output` / `kAudioUnitSubType_DefaultOutput`, with input format Float32 interleaved stereo at 44,100 Hz. The render callback calls `ds_mix`. It allocates nothing, never enters guest code, and takes no lock but the mixer's.
-  - **The null sink:** a host thread that every 5 ms mixes floor(elapsed x 44,100) - `ds_frames_mixed()` frames, at most 4,096 at a time, into a scratch block.
-- **`BW2_AUDIO_LOG=1`** (read once): after each 44,100 mixed frames `ds_mix` prints `[bw2] audio second <k>: <v> playing, peak <p>, nonsilent <m> of 44100`. Here k counts from 1, v is the number of playing voices, p is the largest |sample| x 32767 (truncated), and m is the frames with any channel nonzero. The print happens after the mutex is released. Task 3 adds the buffer line.
+  - **The null sink:** a host thread that every 5 ms mixes due = floor((elapsed - skipped) x 44,100) - `ds_frames_mixed()` frames into a scratch block, at most 2,048 frames per wake (under half the game's 5,376-frame buffer). When due exceeds 2,048 (the sink's own thread was stalled), the excess is dropped by adding it to `skipped`, so the sink never bursts past the game's write offset by itself. A lap caused by the game's threads stalling for more than one buffer is accepted: a real DirectSound device keeps playing, and the game's free-space count wraps as on Windows. `ds_out_skipped_frames_for_test()` gives the dropped count.
+- **`BW2_AUDIO_LOG=1`** (read once): after each 44,100 mixed frames `ds_mix` prints `[bw2] audio second <k>: <v> playing, peak <p>, nonsilent <m> of 44100`. Here k counts from 1, v is the number of playing voices, p is the largest |sample| x 32767 (truncated), and m is the frames with any channel nonzero. The print happens after the mutex is released. On the CoreAudio unit that print runs on the render thread, which real-time audio code should not do; it is accepted because the switch is for debugging only and prints once a second (a dropout while it is on is not a bug). Task 3 adds the buffer line.
 
 - [ ] **Step 1: Write the failing tests.** `tests/test_audio.py` builds `audio_selftest` as `tests/test_input.py` builds its selftest and runs groups (`audio_selftest <group>`, output `<group>: 0 failed`). The groups put their data in `hle_alloc` blocks:
-  - `ds_mix_exact`: a 16-bit stereo 44,100 voice of 64 frames with distinct samples, played. `ds_mix` of 100 frames gives frames 0-63 then 0-35 again, each sample exactly s/32768. The play cursor is 36 x 4 bytes, and the write cursor is (36 + 512) mod 64 frames, x 4.
+  - `ds_mix_exact`: a 16-bit stereo 44,100 voice of 1,000 frames with distinct samples, played. `ds_mix` of 1,100 frames gives frames 0-999 then 0-99 again, each sample exactly s/32768. The play cursor is 100 x 4 bytes, and the write cursor is (100 + 512) mod 1,000 = 612 frames, x 4 (a buffer that is not a divisor of 512, so the lead shows).
   - `ds_mix_formats`: an 8-bit mono voice at 22,050 Hz with samples 128, 192 gives output frames 0, 0.25, 0.5, 0.25, 0 (linear, both channels) for its first five. A 16-bit mono voice puts the same value in both channels.
   - `ds_mix_sum`: two playing voices of 0.75 sum to a clamped 1.0. Stopping one gives 0.75, and its cursor stays where it stopped.
   - `ds_mix_cursor`: after `ds_mix` of n frames from a fresh voice, the play cursor is exactly n frames (mod size) for n in 1, 511, 512, 5,375, 5,376 and 5,377 on a 5,376-frame buffer.
-  - `ds_mix_free`: a thread calls `ds_mix` in a loop while the main thread makes, plays and frees 1,000 voices. Each block is filled with 0x7F7F after its free. 0 crashes, and no output sample after the last free is nonzero.
+  - `ds_mix_free`: a thread calls `ds_mix` in a loop while the main thread makes, plays and frees 1,000 voices, keeping at most two alive at a time. Each voice's block holds a small known value (16-bit samples of 0x0100). After `ds_voice_free` returns and before `hle_free`, the main thread fills the block with the poison 0x7F7F. The mixing thread checks every output sample of the whole run: no sample may exceed 2 x 0x0100/32768, so neither the poison 0x7F7F/32768 nor any sum that includes it ever appears, and the run has 0 crashes. Writing the poison before `hle_free` keeps it out of the guest heap's quarantine ring (`guest_mem.c` `quarantine`/`really_free`), so a block that is really freed or reused is never clobbered.
   - `ds_out_null`: with `ds_out_force_null_for_test`, `ds_out_start` prints the notice once. A playing voice's consumed frames after 500 ms of wall time are within 10% of 22,050.
-  - `ds_out_exit`: in a child, a voice plays on the null sink and the child calls `hle_exit(0)` from another thread after 100 ms. Its status is 0.
+  - `ds_out_stall`: on the null sink, `ds_out_stall_for_test(300)`; after the stall the sink's next wake mixes at most 2,048 frames, `ds_out_skipped_frames_for_test()` is above 0, and the voice's consumed count never rises by more than 2,048 between two wakes.
+  - `ds_out_exit`, two children, each with a voice playing on the null sink and `BW2_AUDIO_LOG=1`:
+    - one calls `hle_exit(0)` from another thread after 100 ms. Its status is 0, and the `output stopped at exit` line is absent (the `_exit` path runs no handler);
+    - one calls plain `exit(0)` from another thread after 100 ms. Its status is 0, and the `output stopped at exit` line appears once (the `atexit` path).
   - `ds_audio_log`: with `BW2_AUDIO_LOG=1` and a constant voice of 0.5, mixing 88,200 frames prints `audio second 1: 1 playing, peak 16383, nonsilent 44100 of 44100` and then `second 2`.
   - `test_ds_device` (skipped unless `BW2_AUDIO_DEVICE=1`; not headless): `ds_out_start` with no notice line. A 440 Hz voice plays 1 s, and the consumed frames come out between 39,690 and 48,510.
 - [ ] **Step 2: Run them.** `.venv/bin/pytest tests/test_audio.py -v`. Expected: FAIL (no sources).
@@ -201,7 +212,8 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
   - `runtime/bw2/d3d9/d3d9_methods.c`: interfaces `IDirectSound`, `IDirectSoundBuffer`, and Task 4's two;
   - `runtime/bw2/register.c`: `bw2_audio_register()`, called where `bw2_input_register()` is;
   - `runtime/bw2/later.c`: drop `dsound.dll`, the DirectSound class stops and the three `DirectSound*` names;
-  - `runtime/bw2/audio/audio_selftest.c`, `tests/test_audio.py`.
+  - `runtime/bw2/audio/audio_selftest.c`, `tests/test_audio.py`;
+  - `tests/test_boot.py`: the `xfail` mark on `test_boot_to_audio` (Step 4).
 
 **Interfaces:**
 - Consumes: Task 2's `ds_voice_*` and `ds_out_start`. Plan 4's `d3d_new`, `d3d_host`, `d3d_impls`, `d3d_fail`; `hle_com_register_class`, `hle_alloc`.
@@ -210,6 +222,7 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
   - `IDirectSound`, IID {279AFA83-4981-11CE-A521-0020AF0BE560}. Methods in order: `QueryInterface`, `AddRef`, `Release`, `CreateSoundBuffer`, `GetCaps`, `DuplicateSoundBuffer`, `SetCooperativeLevel`, `Compact`, `GetSpeakerConfig`, `SetSpeakerConfig`, `Initialize`.
   - `IDirectSoundBuffer`, IID {279AFA85-4981-11CE-A521-0020AF0BE560}. Methods in order: `QueryInterface`, `AddRef`, `Release`, `GetCaps`, `GetCurrentPosition`, `GetFormat`, `GetVolume`, `GetPan`, `GetFrequency`, `GetStatus`, `Initialize`, `Lock`, `Play`, `SetCurrentPosition`, `SetFormat`, `SetVolume`, `SetPan`, `SetFrequency`, `Stop`, `Unlock`, `Restore`.
   - Implemented here: `CreateSoundBuffer`, `SetCooperativeLevel`, `GetSpeakerConfig`, `Initialize`; and on buffers `GetCurrentPosition`, `GetStatus`, `Lock`, `Play`, `Stop`, `Unlock`. All other methods stop as not implemented.
+- **Threads:** every method runs under the machine lock, as all shims do. No method holds the mixer mutex or any `d3d_com` state across `hle_block_begin`, and the mixer mutex is a leaf (taken last, held briefly, never while asking for the machine lock). The game calls these methods from its 5 audio threads while the render thread uses Direct3D ("Measured" item 5); this is the first plan whose `d3d_com` objects are touched from more than one guest thread.
 - **Classes and creation:**
   - `CoCreateInstance` of `CLSID_DirectSound` {47D4D946-62E8-11CF-93BC-444553540000}, with IID `IDirectSound` or `IUnknown`, gives an object that is not yet initialized. `CLSID_DirectSound8`, and any other IID, stop loudly naming the class or IID (`IDirectSound8` is not implemented).
   - The capture classes and `CLSID_DirectSoundFullDuplex` stop loudly (`dsound: DirectSoundCapture not implemented`). So do `DirectSoundCreate`, `DirectSoundCreate8` and `DirectSoundEnumerateA`.
@@ -256,7 +269,7 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
     - `LoadLibraryA("OpenAL32.dll")` prints `reached openal32.dll: owned by a later plan` with exit 4.
 - [ ] **Step 2: Run them.** `.venv/bin/pytest tests/test_audio.py -v`. Expected: the new groups FAIL.
 - [ ] **Step 3: Implement** `dsound.c`, the tables and the `later.c` changes.
-- [ ] **Step 4: Run** `.venv/bin/python -m bw2.pipeline --build-only && .venv/bin/pytest tests/test_audio.py tests/test_engine.py tests/test_input.py -q`. Expected: all pass. Then `BW2_GAMEFILES=1 .venv/bin/pytest tests/test_boot.py -v`. Expected: `test_boot_to_audio` now fails, at the `dsound.dll` probe's `GetProcAddress` (a call to address 0). Task 4 answers it and Task 5 rewrites that test.
+- [ ] **Step 4: Run** `.venv/bin/python -m bw2.pipeline --build-only && .venv/bin/pytest tests/test_audio.py tests/test_engine.py tests/test_input.py -q`. Expected: all pass. Then `BW2_GAMEFILES=1 .venv/bin/pytest tests/test_boot.py -v`. Expected: `test_boot_to_audio` now fails, at the `dsound.dll` probe's `GetProcAddress` (a call to address 0). Task 4 answers it and Task 5 rewrites that test. So that no committed task leaves a red test, mark `test_boot_to_audio` `@pytest.mark.xfail(strict=True, reason="plan 8: the boot passes DirectSound; Task 5 rewrites this test")` in this step and confirm it reports `XFAIL`. Task 5 removes the mark when it rewrites the test. (Under Task 4 it stays `XFAIL`: the boot no longer stops at audio.)
 - [ ] **Step 5: Commit.** `git commit -m "Add IDirectSound and its streaming buffers"`
 
 ### Task 4: dsound.dll's device enumeration and the waveOut guard
@@ -269,27 +282,28 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
 - Produces:
   - Shim `DllGetClassObject(rclsid, riid, ppv)`, registered by `bw2_audio_register`:
     - `CLSID_DirectSoundPrivate` with `IID_IClassFactory` gives `S_OK` and a class factory;
-    - another class or IID stops loudly, naming the GUID.
+    - another class or IID stops loudly, naming the GUID (`dsound: DllGetClassObject of class {...} not answered`).
+    - The shim goes into the global shim registry, and win32hle's `GetProcAddress` answers every system module by name from that registry. So `GetProcAddress` of `ole32.dll` or any other system module for `"DllGetClassObject"` also gets this shim. That is acceptable because the shim answers only `CLSID_DirectSoundPrivate` and stops loudly, naming the class, for anything else; nothing is answered wrongly in silence.
   - `IClassFactory` (private), IID {00000001-0000-0000-C000-000000000046}. Methods: `QueryInterface`, `AddRef`, `Release`, `CreateInstance`, `LockServer`.
     - `CreateInstance(outer, riid, ppv)`: outer must be NULL (`CLASS_E_NOAGGREGATION` 0x80040110), and riid `IID_IKsPropertySet` gives the property set. Another IID gives `E_NOINTERFACE`.
     - `LockServer` gives `S_OK`.
   - `IKsPropertySet`, IID {31EFAC30-515C-11D0-A9AA-00AA0061BE93}. Methods: `QueryInterface`, `AddRef`, `Release`, `Get`, `Set`, `QuerySupport`. `Set` and `QuerySupport` stop as not implemented.
   - **`Get(set, id, inst, cbinst, data, cbdata, &ret)`:** only `DSPROPSETID_DirectSoundDevice` {84624F82-25EC-11D1-A4D8-00C04FC28ACA} with id 7 (enumerate, narrow strings), cbdata >= 8. It calls the guest `callback(desc, context)` (stdcall, `hle_call_guest`) once, for the one render device, then sets *ret = 8 and gives `S_OK`. Any other set or id stops loudly, naming both.
-  - **The device description** (40 bytes in guest memory, laid out as the game reads it, "Measured" item 3):
+  - **The device description** (40 bytes in guest memory, laid out as the game reads it, "Measured" item 3). The three string pointers (+0x18, +0x1C, +0x20) each point to a valid NUL-terminated string in guest memory (`hle_alloc`'d once, kept for the run); the game copies the +0x20 string without checking the pointer:
     - +0 Type 2 (`WDM`), +4 DataFlow 0 (render);
     - +8 DeviceId {B5D2D6A1-6E0B-4C1F-9A3E-0DA5B0C0A801}, a fixed GUID of my choosing for the Mac's default output. My call;
     - +0x18 Description `"Default output"`, +0x1C Module `"coreaudio"`;
-    - +0x20 Interface `""` (my call: no `\\?\` device path, so the game's acceleration lookup finds nothing and it keeps its default, the DirectSound output; Ruling 3);
+    - +0x20 Interface: a nonzero pointer to a one-byte string holding only the NUL, `""` (my call: no `\\?\` device path, so the game's acceleration lookup finds nothing and it keeps its default, the DirectSound output; Ruling 3);
     - +0x24 WaveDeviceId 0.
-  - **The waveOut guard:** a BW2 `waveOutOpen` shim, registered before win32hle's, stops loudly with `waveOutOpen: the waveOut output is not answered (from guest 0x%08X)`. win32hle's silent device would let the game's other output run with no sound, which is silent wrongness. `waveOutGetNumDevs`, `waveOutGetDevCapsA` and the rest stay win32hle's.
+  - **The waveOut guard:** a BW2 `waveOutOpen` shim, registered before win32hle's, stops loudly through `d3d_fail("waveOutOpen: the waveOut output is not answered")` (the address comes from `d3d_fail`'s own suffix). win32hle's silent device would let the game's other output run with no sound, which is silent wrongness. `waveOutGetNumDevs`, `waveOutGetDevCapsA` and the rest stay win32hle's.
 
 - [ ] **Step 1: Write the failing tests** (groups in `audio_selftest`):
   - `ds_private`, the probe's sequence ("Measured" item 3) with the game's GUIDs:
     - `LoadLibraryA("dsound.dll")` gives a nonzero module, and `GetProcAddress(it, "DllGetClassObject")` gives a nonzero entry;
     - the call gives `S_OK` and a factory. `CreateInstance(NULL, IID_IKsPropertySet)` gives a property set;
-    - `Get(.., 7, NULL, 0, data, 8, &ret)` calls a selftest callback (a guest-callable shim, registered as the shims selftest's `selftest_completion` is) exactly once. It sees Type 2, DataFlow 0, the DeviceId above, the two strings, an empty Interface, WaveDeviceId 0 and the context passed through. ret is 8;
+    - `Get(.., 7, NULL, 0, data, 8, &ret)` calls a selftest callback (a guest-callable shim, registered as the shims selftest's `selftest_completion` is) exactly once. It sees Type 2, DataFlow 0, the DeviceId above, the two strings (pointers nonzero), an Interface pointer that is nonzero and points to a byte 0, WaveDeviceId 0 and the context passed through. ret is 8;
     - `Release` of the set and the factory brings `d3d_live_count` back.
-  - `ds_private_rules`: `CreateInstance` with an outer gives 0x80040110. In children, each of these stops with its line: `DllGetClassObject(CLSID_DirectSound, IID_IClassFactory)` (naming the class), `Get` with id 8 (naming the id), `Get` with another set (naming the set), and `waveOutOpen`.
+  - `ds_private_rules`: `CreateInstance` with an outer gives 0x80040110. In children, each of these stops with its line: `DllGetClassObject(CLSID_DirectSound, IID_IClassFactory)` (naming the class), `GetProcAddress(LoadLibraryA("ole32.dll"), "DllGetClassObject")` called with `CLSID_DirectSound` (the same shim, the same stop naming the class), `Get` with id 8 (naming the id), `Get` with another set (naming the set), and `waveOutOpen` (the bare `waveOutOpen: the waveOut output is not answered` text, with the guest address appearing once).
 - [ ] **Step 2: Run them.** `.venv/bin/pytest tests/test_audio.py -k private -v`. Expected: FAIL.
 - [ ] **Step 3: Implement** the private objects, the shim and the guard.
 - [ ] **Step 4: Run** `.venv/bin/python -m bw2.pipeline --build-only && .venv/bin/pytest tests/test_audio.py -q`. Expected: all pass. Then `BW2_HEADLESS=1 BW2_AUDIO_LOG=1 BW2_SUPPORT=$(mktemp -d) timeout 20 out/bw2 --game gamefiles/game > .superpowers/sdd/plan8-boot.txt 2>&1; tail -20 .superpowers/sdd/plan8-boot.txt`. Expected: no loud line, the buffer line from "Measured" item 4, audio second lines, and the DirectInput notice. The run ends at the timeout (exit 124).
@@ -302,8 +316,8 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
 - Modify:
   - `runtime/bw2/input/dinput8.c`: `BW2_QUIT_AFTER_READS`;
   - `runtime/bw2/input/input_selftest.c`, `tests/test_input.py`;
-  - `tests/test_boot.py`: `test_boot_to_audio` becomes `test_boot_to_front_end`, and the module docstring;
-  - the spec's section 5.2 (Audio paragraph, and a plan 8 note in the Files paragraph about the `OPEN_ALWAYS` rule);
+  - `tests/test_boot.py`: `test_boot_to_audio` becomes `test_boot_to_front_end` (Task 3's `xfail` mark is removed), and the module docstring;
+  - the spec: section 1's opening sentence, section 5.1's OpenAL line and its "Left to the builder" OpenAL line, and section 5.2 (Audio paragraph, and a plan 8 note in the Files paragraph about the `OPEN_ALWAYS` rule);
   - `docs/superpowers/plans/2026-11-11-bw2-plan6-input.md`: the status note.
 
 **Interfaces:**
@@ -317,11 +331,11 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
   - `test_boot_to_front_end` (`BW2_GAMEFILES=1`), run with `BW2_FRAME_LOG=1`, `BW2_FONT_LOG=1`, `BW2_AUDIO_LOG=1`, `BW2_QUIT_AFTER_READS=300` and a fresh `BW2_SUPPORT`. It asserts:
     - exit code 0 and the quit line for 300;
     - no line in `LOUD`, and no `owned by a later plan` line;
-    - the 49 font lines and the script plugin's line, as `test_boot_to_audio` checks them today;
+    - the first 49 font lines match the 49 that `test_boot_to_audio` checks today (`fonts[:49]`), and the script plugin's line is present. The front end may make more fonts; the total is not asserted unless Step 4 measures it stable over its runs;
     - exactly one audio buffer line, `audio buffer 1: 2 ch, 44100 Hz, 16 bit, 21504 bytes, flags 0x18000`;
     - at least one `audio second` line with nonsilent above 0;
     - the DirectInput notice exactly once;
-    - at least 300 frame lines, numbered from 1, the last one at least half non-black;
+    - at least 300 frame lines, numbered from 1, and at least one frame after the first input read at least half non-black (what the menu shows in its last frame was not measured, so the last frame is not asserted unless Step 4 measures it);
     - no file under `<support>/Game/` (Task 1's rule: the banks are read in place).
 - [ ] **Step 2: Run them.** `.venv/bin/python -m bw2.pipeline --build-only && .venv/bin/pytest tests/test_input.py -k quit -v && BW2_GAMEFILES=1 .venv/bin/pytest tests/test_boot.py -v`. Expected: FAIL.
 - [ ] **Step 3: Implement `BW2_QUIT_AFTER_READS`.**
@@ -330,17 +344,20 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
   - An unresolved call to a function start the catalog lacks is added as a `"boot"` start (Task 1, Step 5), with a full pipeline run.
   - A stop at Bink, OpenAL or another later plan's name before the front end is recorded, and the boot test's expected end changes to that stop.
   - Each stop outside every plan's layer and each tripwire stops the run and goes to the user, as does any disc, volume or driver query from the protection VM.
+  - Before fixing the boot test's assertions, measure at 300 reads over two runs (one with a fresh support folder): the font line count, the non-black share of the last frame and of each frame after the first read, and whether any game debug line (the model loader's 12 not-found lines included) contains a `LOUD` substring. Tighten the font total or the last-frame check only if both runs agree. If a game line matches `LOUD`, narrow the check so that game line no longer matches while every engine stop format still does (test sources never contain the game's strings, so the fix keys on the engine's own line shapes), and say so in `frontend.md`.
 - [ ] **Step 5: Measure and write `docs/research/frontend.md`.** It holds facts only (addresses, sizes, counts, GUIDs, and DLL, API and file names). It never quotes the game's own output: a debug line is described in neutral words with the address that prints it, as "Measured" does. It records:
   - the time from start to the first input read and to the first non-silent audio second (four runs, two with a fresh support folder), and the frame numbers;
   - the audio sequence of "Measured" items 1-5 as it runs now: each DirectSound and private call with its count over a 60 s run, the buffer line, and the audio seconds (how many are non-silent, and the peak range);
   - the output choice and the probe (items 2-3), and why the DirectSound output is taken;
   - the OpenAL loader and the waveOut output, both unused, and what would reach them;
-  - Task 1's fixes, with their addresses and counts (59 opens, 78 key names, the start `0x8B00B0`);
+  - Task 1's fixes, with their addresses and counts (59 opens, the 78 `GetKeyNameTextW` calls and the measured count of `GetKeyNameTextA` fallback calls after an empty W answer, at least 38, with their call sites from "Measured" item 9, the start `0x8B00B0`);
+  - the bad catalog entry `sub_008B00D6` ("Measured" item 7), for later catalog work, with a trace-confirmed statement that no run dispatches to `0x8B00D6`;
   - the front end: frames per second headless, the reads per frame, the message pump, and the imports seen in 60 s after the first read that are not seen before it. Also the absence of `GetCursorPos`, `GetAsyncKeyState`, `GetKeyState`, Bink and any disc or volume question;
   - the model loader's 12 not-found lines, counted, with the address that prints them;
   - for plan 6: where the reads come from (`sub_009AFD20`, the mode switch `sub_009AF790`), and that the front end now waits for input.
 - [ ] **Step 6: Update the docs.**
   - **Spec 5.2 Audio:** the game mixes in software and streams one DirectSound buffer, which a CoreAudio unit plays. The probe's private enumeration is answered, OpenAL and waveOut are unused, and EAX is not needed on this path.
+  - **Spec section 1 and 5.1:** the opening sentence's "DirectInput, OpenAL and Bink" becomes "DirectInput, DirectSound and Bink", and 5.1's "OpenAL + EAX on macOS" becomes "DirectSound on CoreAudio (the game mixes in software; OpenAL + EAX only if a later boot loads `wrap_oal.dll`)". The "Left to the builder" line on the OpenAL implementation gets a pointer to Ruling 2.
   - **Spec 5.2 Files:** a read-only open of an existing game file never touches the overlay.
   - **Plan 6's status note:** the game now reads its mouse at the front end, once per frame. Plan 6 is next. Before it runs, its "Measured" section is redone from `frontend.md` and its Task 2 is rebased on plan 5's stub (`runtime/bw2/input/dinput8.c`), keeping `BW2_QUIT_AFTER_READS`.
 
@@ -361,4 +378,7 @@ A throwaway spike branch (deleted, nothing kept) answered each stop with the lea
 10. **Key names** follow Windows' US English layout (the USA release, spec 11), for both A and W, in vendored win32hle. Other layouts are a non-goal.
 11. **The missed start `0x8B00B0`** is recorded as a `"boot"` start. Discovery is not widened: of the 91 vector-iterator callbacks it is the only one missing, and a wider "after `ret`" rule finds mostly exception funclets.
 12. **`BW2_QUIT_AFTER_READS`** ends a test run at the nth device read, with exit 0. Once the boot no longer stops by itself, a frame count is too dependent on loading speed (the front end appeared at frame 794 in one run and 1,065 in another). The first read marks the same point in every run.
-13. **`BW2_AUDIO_LOG`** prints numbers only (per mixed second: voices, peak, non-silent frames), and no audio is ever written to disk.
+13. **`BW2_AUDIO_LOG`** prints numbers only (per mixed second: voices, peak, non-silent frames), and no audio is ever written to disk. Printing from the CoreAudio render thread is accepted for this debug switch only.
+14. **The vendored `win32hle/dsound.c` is not used.** It is an MIT DirectSound with a software mixer, which spec 11 says to build on where it fits, but it does not fit here: it needs SDL2, which the headless core excludes; it has a fixed table (`MAX_BUFS` 256), against spec 7.2's no fixed-size tables; and it answers unknown calls silently. It stays out of `WIN32HLE_CORE`, and `runtime/bw2/absent.c`'s empty `win32hle_dsound` table and its `hle_dsound_register_com` (an `ABSENT` stop, never called) stay unchanged. BW2's DirectSound lives in `runtime/bw2/audio/` on plan 4's `d3d_com`.
+15. **Exit and the output.** `hle_exit` is `_exit` on macOS, so the process goes with no `atexit` or destructor race against the render callback. The `atexit` stop covers only `exit()` paths, and `hle_on_exit` stays `main.c`'s.
+16. **The null sink's catch-up is capped** at 2,048 frames per wake, with any larger backlog dropped, so a stall of the sink's own thread never laps the game's buffer. A lap from the game's own stall is accepted as DirectSound behaviour.
