@@ -120,8 +120,46 @@ static void o_CoCreateInstance(void) {                   /* (clsid, outer, ctx, 
 }
 static void o_OleInitialize(void)   { RET(S_OK, 1); }
 static void o_OleUninitialize(void) { RETV(0); }
-static void o_CoInitialize(void)    { RET(S_OK, 1); }
-static void o_CoUninitialize(void)  { RETV(0); }
+
+/* COM initialization: an apartment is per thread, and guest threads are host
+ * threads, so the count and the model are too. The first CoInitializeEx gives
+ * S_OK, the next ones S_FALSE (each needs its CoUninitialize), and one asking
+ * for the other model RPC_E_CHANGED_MODE (which does not count). */
+#define S_FALSE             1u
+#define E_INVALIDARG        0x80070057u
+#define RPC_E_CHANGED_MODE  0x80010106u
+#define COINIT_APARTMENTTHREADED 2u
+static _Thread_local uint32_t t_com_inits, t_com_model;
+static uint32_t co_initialize(uint32_t reserved, uint32_t coinit) {
+    if (reserved) return E_INVALIDARG;
+    if (coinit & ~0xEu) {                                /* 4 and 8 (OLE1DDE, speed) do not matter here */
+        fprintf(stderr, "[ole32] CoInitializeEx: flags 0x%X not known\n", coinit);
+        return E_INVALIDARG;
+    }
+    uint32_t model = coinit & COINIT_APARTMENTTHREADED;
+    if (!t_com_inits) { t_com_inits = 1, t_com_model = model; return S_OK; }
+    if (model != t_com_model) return RPC_E_CHANGED_MODE;
+    t_com_inits++;
+    return S_FALSE;
+}
+static void o_CoInitialize(void)    { RET(co_initialize(A32(0), COINIT_APARTMENTTHREADED), 1); }
+static void o_CoInitializeEx(void)  { RET(co_initialize(A32(0), A32(1)), 2); }
+static void o_CoUninitialize(void)  { if (t_com_inits) t_com_inits--; RETV(0); }
+
+/* CoFileTimeToDosDateTime(&ft, &date, &time): MS-DOS's packed date and time
+ * (two-second steps, years 1980 to 2107), with no time-zone conversion, as
+ * FileTimeToDosDateTime does none. */
+static void o_CoFileTimeToDosDateTime(void) {
+    const uint32_t *ft = (const uint32_t *)APTR(0);
+    if (!ft) RET(0, 3);
+    uint64_t t = ((uint64_t)ft[1] << 32 | ft[0]) / 10000000ull;            /* seconds since 1601 */
+    time_t unix_s = (time_t)((int64_t)t - 11644473600ll);
+    struct tm tm;
+    if (!gmtime_r(&unix_s, &tm) || tm.tm_year + 1900 < 1980 || tm.tm_year + 1900 > 2107) RET(0, 3);
+    if (A32(1)) MEM16(A32(1)) = (uint16_t)((tm.tm_year + 1900 - 1980) << 9 | (tm.tm_mon + 1) << 5 | tm.tm_mday);
+    if (A32(2)) MEM16(A32(2)) = (uint16_t)(tm.tm_hour << 11 | tm.tm_min << 5 | tm.tm_sec / 2);
+    RET(1, 3);
+}
 static void o_CoRegisterClassObject(void) {              /* (clsid, unk, ctx, flags, &cookie) */
     for (int i = 0; i < MAX_GUEST_CLASSES; i++)
         if (!g_guest_class[i].unk) {
@@ -215,6 +253,8 @@ const win32hle_shim win32hle_ole32[] = {
     { "OleInitialize",         o_OleInitialize },
     { "OleUninitialize",       o_OleUninitialize },
     { "CoInitialize",          o_CoInitialize },
+    { "CoInitializeEx",        o_CoInitializeEx },
+    { "CoFileTimeToDosDateTime", o_CoFileTimeToDosDateTime },
     { "CoUninitialize",        o_CoUninitialize },
     { "CoRegisterClassObject", o_CoRegisterClassObject },
     { "CoRevokeClassObject",   o_CoRevokeClassObject },
