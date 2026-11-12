@@ -1941,22 +1941,53 @@ static void u_MapVirtualKeyA(void) {                     /* (code, type) */
     if (type == 2) RET((uint32_t)vk_char(code, 0) & 0xFFu, 2);   /* VK -> char */
     RET(0, 2);
 }
-static void u_GetKeyNameTextA(void) {                    /* (lParam, buf, n) */
-    static const char *const names[] = { [0x01] = "Esc", [0x0E] = "Backspace", [0x0F] = "Tab", [0x1C] = "Enter", [0x1D] = "Ctrl",
-        [0x2A] = "Shift", [0x36] = "Right Shift", [0x38] = "Alt", [0x39] = "Space", [0x3A] = "Caps Lock",
-        [0x3B] = "F1", [0x3C] = "F2", [0x3D] = "F3", [0x3E] = "F4", [0x3F] = "F5", [0x40] = "F6", [0x41] = "F7", [0x42] = "F8",
-        [0x43] = "F9", [0x44] = "F10", [0x57] = "F11", [0x58] = "F12", [0x47] = "Home", [0x48] = "Up", [0x49] = "Page Up",
-        [0x4B] = "Left", [0x4D] = "Right", [0x4F] = "End", [0x50] = "Down", [0x51] = "Page Down", [0x52] = "Insert", [0x53] = "Delete" };
-    uint32_t scan = (A32(0) >> 16) & 0x7F;
-    char tmp[32] = "";
-    if (scan < sizeof names / sizeof *names && names[scan]) snprintf(tmp, sizeof tmp, "%s", names[scan]);
-    else {
-        static const char row[] = "\0\0" "1234567890-=\0\0" "QWERTYUIOP[]\0\0" "ASDFGHJKL;'`\0\\" "ZXCVBNM,./";
-        if (scan < sizeof row && row[scan]) tmp[0] = row[scan], tmp[1] = 0;
-    }
-    if (!A32(2)) RET(0, 3);
-    snprintf(ASTR(1), A32(2), "%s", tmp);
-    RET((uint32_t)strlen(ASTR(1)), 3);
+/* GetKeyNameText: Windows' US English names. lParam bits 16-23 are the scan
+ * code, bit 24 extended, bit 25 "don't care", which merges only the right
+ * Shift and Ctrl into Shift and Ctrl. An unknown key has no name (0, ""). */
+static const char *key_name(uint32_t lp) {
+    static const char *const plain[0x59] = {                 /* the main block's rows, then the rest */
+        [0x02] = "1", [0x03] = "2", [0x04] = "3", [0x05] = "4", [0x06] = "5", [0x07] = "6", [0x08] = "7", [0x09] = "8",
+        [0x0A] = "9", [0x0B] = "0", [0x0C] = "-", [0x0D] = "=",
+        [0x10] = "Q", [0x11] = "W", [0x12] = "E", [0x13] = "R", [0x14] = "T", [0x15] = "Y", [0x16] = "U", [0x17] = "I",
+        [0x18] = "O", [0x19] = "P", [0x1A] = "[", [0x1B] = "]",
+        [0x1E] = "A", [0x1F] = "S", [0x20] = "D", [0x21] = "F", [0x22] = "G", [0x23] = "H", [0x24] = "J", [0x25] = "K",
+        [0x26] = "L", [0x27] = ";", [0x28] = "'", [0x29] = "`", [0x2B] = "\\",
+        [0x2C] = "Z", [0x2D] = "X", [0x2E] = "C", [0x2F] = "V", [0x30] = "B", [0x31] = "N", [0x32] = "M", [0x33] = ",",
+        [0x34] = ".", [0x35] = "/",
+        [0x01] = "Esc", [0x0E] = "Backspace", [0x0F] = "Tab", [0x1C] = "Enter",
+        [0x1D] = "Ctrl", [0x2A] = "Shift", [0x36] = "Right Shift", [0x37] = "Num *", [0x38] = "Alt", [0x39] = "Space",
+        [0x3A] = "Caps Lock", [0x3B] = "F1", [0x3C] = "F2", [0x3D] = "F3", [0x3E] = "F4", [0x3F] = "F5", [0x40] = "F6",
+        [0x41] = "F7", [0x42] = "F8", [0x43] = "F9", [0x44] = "F10", [0x45] = "Pause", [0x46] = "Scroll Lock",
+        [0x47] = "Num 7", [0x48] = "Num 8", [0x49] = "Num 9", [0x4A] = "Num -", [0x4B] = "Num 4", [0x4C] = "Num 5",
+        [0x4D] = "Num 6", [0x4E] = "Num +", [0x4F] = "Num 1", [0x50] = "Num 2", [0x51] = "Num 3", [0x52] = "Num 0",
+        [0x53] = "Num Del", [0x56] = "\\", [0x57] = "F11", [0x58] = "F12" };
+    static const char *const ext[0x5E] = { [0x1C] = "Num Enter", [0x1D] = "Right Ctrl", [0x35] = "Num /",
+        [0x37] = "Prnt Scrn", [0x38] = "Right Alt", [0x45] = "Num Lock", [0x47] = "Home", [0x48] = "Up",
+        [0x49] = "Page Up", [0x4B] = "Left", [0x4D] = "Right", [0x4F] = "End", [0x50] = "Down", [0x51] = "Page Down",
+        [0x52] = "Insert", [0x53] = "Delete", [0x5B] = "Left Windows", [0x5C] = "Right Windows", [0x5D] = "Application" };
+    uint32_t scan = (lp >> 16) & 0xFF;
+    int extended = (lp >> 24) & 1, any = (lp >> 25) & 1;
+    if (any && !extended && scan == 0x36) return "Shift";
+    if (any && extended && scan == 0x1D) return "Ctrl";
+    if (extended) return scan < sizeof ext / sizeof *ext ? ext[scan] : NULL;
+    return scan < sizeof plain / sizeof *plain ? plain[scan] : NULL;
+}
+static void u_GetKeyNameTextA(void) {                    /* (lParam, buf, n): the count copied */
+    const char *name = key_name(A32(0));
+    uint32_t n = A32(2), k = 0;
+    if (!n) RET(0, 3);
+    char *out = ASTR(1);
+    for (; name && name[k] && k + 1 < n; k++) out[k] = name[k];
+    out[k] = 0;
+    RET(k, 3);
+}
+static void u_GetKeyNameTextW(void) {                    /* the same names as UTF-16 */
+    const char *name = key_name(A32(0));
+    uint32_t n = A32(2), k = 0, buf = A32(1);
+    if (!n) RET(0, 3);
+    for (; name && name[k] && k + 1 < n; k++) MEM16(buf + 2u * k) = (uint8_t)name[k];
+    MEM16(buf + 2u * k) = 0;
+    RET(k, 3);
 }
 static void u_ToAscii(void) {                            /* (vk, scan, keystate, &out, flags) */
     const uint8_t *ks = (const uint8_t *)APTR(2);
@@ -2386,7 +2417,7 @@ const win32hle_shim win32hle_user32[] = {
     { "SetTimer", u_SetTimer }, { "KillTimer", u_KillTimer },
     { "GetKeyState", u_GetKeyState }, { "GetAsyncKeyState", u_GetAsyncKeyState },
     { "GetKeyboardState", u_GetKeyboardState }, { "MapVirtualKeyA", u_MapVirtualKeyA },
-    { "GetKeyNameTextA", u_GetKeyNameTextA }, { "ToAscii", u_ToAscii },
+    { "GetKeyNameTextA", u_GetKeyNameTextA }, { "GetKeyNameTextW", u_GetKeyNameTextW }, { "ToAscii", u_ToAscii },
     { "CharToOemBuffA", u_CharToOemBuffA }, { "OemToCharBuffA", u_OemToCharBuffA },
     { "CharUpperA", u_CharUpperA }, { "CharLowerA", u_CharLowerA },
     { "RegisterHotKey", u_RegisterHotKey }, { "UnregisterHotKey", u_UnregisterHotKey },
