@@ -25,9 +25,11 @@ WIN32HLE_CORE = ("host.c", "host_lite.c", "guest_mem.c", "pe_loader.c", "module.
                  "ole32.c", "advapi32.c", "wsock32.c", "lz32.c", "storage.c")
 
 
-# Plan 4: the graphics layers, C and Objective-C (ARC); plan 5: the DirectInput mouse.
-BW2_SUBDIRS = ("d3d9", "d3dx", "input")
-FRAMEWORKS = ("Metal", "QuartzCore", "AppKit", "Foundation", "ImageIO", "CoreGraphics", "CoreText")
+# Plan 4: the graphics layers, C and Objective-C (ARC); plan 5: the DirectInput mouse;
+# plan 8: DirectSound and its mixer, played through CoreAudio.
+BW2_SUBDIRS = ("d3d9", "d3dx", "input", "audio")
+FRAMEWORKS = ("Metal", "QuartzCore", "AppKit", "Foundation", "ImageIO", "CoreGraphics", "CoreText",
+              "AudioToolbox", "CoreAudio")
 
 
 def engine_sources() -> list[Path]:
