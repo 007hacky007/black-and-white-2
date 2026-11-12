@@ -2,7 +2,8 @@
  * later.c - where plan 3's boot ends: the first call into a layer a later
  * plan owns (DirectInput before version 8, DirectSound/OpenAL, Bink, and
  * plan 5's D3DX shaders and effects). Each such import, and each LoadLibraryA of such a DLL, prints
- * "[bw2] reached <name>: owned by a later plan" and exits 4.
+ * "[bw2] reached <name>: owned by a later plan" and exits 4, as does
+ * CoCreateInstance of a DirectSound class.
  *
  * The imports come from the images' own import tables (every name the game
  * imports from those DLLs), plus the entry points a game finds with
@@ -15,8 +16,8 @@
 #include "win32hle.h"
 #include "bw2.h"
 
-/* Plan 4 answers d3d9, ddraw and D3DX's math and textures; plan 5 owns D3DX's
- * shaders, effects, sprite, font and mesh (named below). */
+/* Plan 4 answers d3d9, ddraw and D3DX's math and textures; later plans own
+ * D3DX's HLSL compiler, fragment linker and mesh (named below). */
 static const char *const g_later_dlls[] = {
     "dinput.dll", "dsound.dll", "binkw32.dll", "openal32.dll", "wrap_oal.dll", NULL,
 };
@@ -41,6 +42,50 @@ static void reached(const char *what) {
 }
 static void later_stop(void) { reached(g_cur_import ? g_cur_import : "?"); }
 void bw2_later_load(const char *base_name) { reached(base_name); }
+
+/* LoadLibraryA of a later plan's DLL stops, even one win32hle answers as a
+ * system DLL (dsound.dll). The base name follows Windows' default extension
+ * rule, as win32hle's own lookup does: no '.' gets ".dll", a trailing '.'
+ * means none. Every other call is win32hle's. */
+static void k_LoadLibraryA(void) {
+    const char *name = ASTR(0);
+    if (name) {
+        const char *b = name + strlen(name);
+        while (b > name && b[-1] != '\\' && b[-1] != '/' && b[-1] != ':') b--;
+        char base[64];
+        size_t k = strlen(b);
+        if (k && b[k - 1] == '.') snprintf(base, sizeof base, "%.*s", (int)(k - 1), b);
+        else snprintf(base, sizeof base, strchr(b, '.') ? "%s" : "%s.dll", b);
+        if (bw2_later_dll(base)) {
+            for (char *c = base; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
+            reached(base);
+        }
+    }
+    bw2_hle_shim("LoadLibraryA")();
+}
+const win32hle_shim bw2_later_shims[] = { { "LoadLibraryA", k_LoadLibraryA }, { NULL, NULL } };
+
+/* The audio layer (plan 8 decides DirectSound or OpenAL): CoCreateInstance of
+ * a DirectSound class stops. */
+#define GUID(a, b, c, d0, d1, d2, d3, d4, d5, d6, d7) { (a) & 0xFF, (a) >> 8 & 0xFF, (a) >> 16 & 0xFF, (a) >> 24 & 0xFF, \
+    (b) & 0xFF, (b) >> 8 & 0xFF, (c) & 0xFF, (c) >> 8 & 0xFF, d0, d1, d2, d3, d4, d5, d6, d7 }
+static const uint8_t g_dsound_clsids[][16] = {
+    GUID(0x47D4D946u, 0x62E8, 0x11CF, 0x93, 0xBC, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00),   /* CLSID_DirectSound */
+    GUID(0x3901CC3Fu, 0x84B5, 0x4FA4, 0xBA, 0x35, 0xAA, 0x81, 0x72, 0xB8, 0xA0, 0x9B),   /* CLSID_DirectSound8 */
+    GUID(0xB0210780u, 0x89CD, 0x11D0, 0xAF, 0x08, 0x00, 0xA0, 0xC9, 0x25, 0xCD, 0x16),   /* CLSID_DirectSoundCapture */
+    GUID(0xE4BCAC13u, 0x7F99, 0x4908, 0x9A, 0x8E, 0x74, 0xE3, 0xBF, 0x24, 0xB6, 0xE1),   /* CLSID_DirectSoundCapture8 */
+    GUID(0xFEA4300Cu, 0x7959, 0x4147, 0xB2, 0x6A, 0x23, 0x77, 0xB9, 0xE7, 0xA9, 0x1D),   /* CLSID_DirectSoundFullDuplex */
+};
+#undef GUID
+static uint32_t dsound_create(const uint8_t *iid, uint32_t *out) {
+    (void)iid, (void)out;
+    reached("DirectSound (CoCreateInstance)");
+    return 0x80004005u;                                  /* not reached: reached() exits */
+}
+void bw2_later_classes(void) {
+    for (size_t i = 0; i < sizeof g_dsound_clsids / sizeof *g_dsound_clsids; i++)
+        hle_com_register_class(g_dsound_clsids[i], dsound_create);
+}
 
 /* Register a stop for each name in g_later_names and each import from a later DLL in the PE at path. */
 void bw2_later_register(const char *path) {

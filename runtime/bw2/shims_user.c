@@ -63,7 +63,33 @@ static void k_GetKeyboardLayoutList(void) {             /* (n, list): with n 0, 
  * is accepted; the input layer (a later plan) sends them. TRUE. */
 static void k_TrackMouseEvent(void) { RET(1, 1); }
 
+/* LoadImageA(hinst, name, type, cx, cy, flags). A bitmap from a file that is
+ * not there is NULL with ERROR_FILE_NOT_FOUND, as on Windows: the game tries
+ * three paths for a bitmap the shipped tree does not have, and takes its own
+ * error path on NULL. (win32hle answers its placeholder bitmap there, which
+ * other titles rely on.) A file that is there is win32hle's to read, and its
+ * placeholder for one it cannot read stops the run. Every other call is
+ * win32hle's. */
+#define IMAGE_BITMAP          0u
+#define LR_LOADFROMFILE       0x0010u
+#define ERROR_FILE_NOT_FOUND  2u
+#define HLE_PLACEHOLDER_IMAGE 0x1C000003u
+static void k_LoadImageA(void) {
+    if (A32(2) != IMAGE_BITMAP || !(A32(5) & LR_LOADFROMFILE)) { bw2_hle_shim("LoadImageA")(); return; }
+    const char *path = ASTR(1);
+    char host[1024];
+    if (!path || !hle_host_path(path, host, sizeof host)) {
+        hle_set_last_error(ERROR_FILE_NOT_FOUND);
+        RET(0, 6);
+    }
+    uint32_t from = MEM32(g_esp);
+    bw2_hle_shim("LoadImageA")();
+    if (g_eax == HLE_PLACEHOLDER_IMAGE)
+        hle_fatal("LoadImageA: \"%s\" is not a bitmap win32hle reads (from guest 0x%08X)", path, from);
+}
+
 const win32hle_shim bw2_user_shims[] = {
+    { "LoadImageA",            k_LoadImageA },
     { "_TrackMouseEvent",      k_TrackMouseEvent },
     { "SystemParametersInfoA", k_SystemParametersInfoA },
     { "GetDoubleClickTime",    k_GetDoubleClickTime },

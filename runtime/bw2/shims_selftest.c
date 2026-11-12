@@ -8,6 +8,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "win32hle.h"
 #include "bw2.h"
 
@@ -49,7 +52,77 @@ static void t_completion(void) {
     g_ndone++;
     RET(0, 3);
 }
-static const win32hle_shim t_shims[] = { { "selftest_completion", t_completion }, { NULL, NULL } };
+/* A guest thread's start routine (stdcall, one argument): COM on a second thread, while the main one is initialized. */
+static uint32_t g_thread_coinit = 0xDEADBEEFu;
+static void t_coinit_thread(void) {
+    g_thread_coinit = call("CoInitializeEx", 2, 0u, 0u);
+    call("CoUninitialize", 0);
+    RET(0, 1);
+}
+static const win32hle_shim t_shims[] = {
+    { "selftest_completion", t_completion }, { "selftest_coinit_thread", t_coinit_thread }, { NULL, NULL } };
+
+/* A lifted-DLL hook that records what LoadLibraryA gave it. */
+static char g_hook_base[64], g_hook_host[1024];
+static int g_hook_calls, g_hook_r, g_hook_had_host;
+static int t_hook(const char *base, const char *host, uint32_t *hmod) {
+    (void)hmod;
+    g_hook_calls++;
+    snprintf(g_hook_base, sizeof g_hook_base, "%s", base);
+    g_hook_had_host = host != NULL;
+    snprintf(g_hook_host, sizeof g_hook_host, "%s", host ? host : "");
+    return g_hook_r;
+}
+static int ends_with(const char *s, const char *t) {
+    size_t a = strlen(s), b = strlen(t);
+    return a >= b && !strcmp(s + a - b, t);
+}
+static int count_of(const char *s, const char *t) {
+    int n = 0;
+    for (const char *p = s; (p = strstr(p, t)); p += strlen(t)) n++;
+    return n;
+}
+static void write_file(const char *path, const void *data, size_t n) {
+    FILE *f = fopen(path, "wb");
+    if (f) fwrite(data, 1, n, f), fclose(f);
+}
+
+/* Run fn in a child (fork) with its stderr captured in out: the child's exit status (fn returning is 0). */
+static int in_child(void (*fn)(void), char *out, size_t n) {
+    fflush(stdout), fflush(stderr);
+    int p[2];
+    if (pipe(p) != 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(p[0]);
+        dup2(p[1], 2);
+        close(p[1]);
+        fn();
+        fflush(stderr);
+        _exit(0);
+    }
+    close(p[1]);
+    size_t k = 0;
+    char sink[4096];
+    for (ssize_t r; (r = read(p[0], k + 1 < n ? out + k : sink, k + 1 < n ? n - 1 - k : sizeof sink)) > 0; )
+        if (k + 1 < n) k += (size_t)r;
+    out[k] = 0;
+    close(p[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+static uint32_t g_child_name;
+static void c_load(void) { call("LoadLibraryA", 1, g_child_name); }
+static void c_load_image(void) { call("LoadImageA", 6, 0u, g_child_name, 0u, 0u, 0u, 0x2010u); }
+static void c_dsound_class(void) {
+    static const uint8_t clsid[16] = { 0x46, 0xD9, 0xD4, 0x47, 0xE8, 0x62, 0xCF, 0x11,
+                                       0x93, 0xBC, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 };
+    static const uint8_t iid[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46 };
+    uint32_t c = gmem(16), i = gmem(16), out = gmem(4);
+    memcpy(hle_ptr(c), clsid, 16), memcpy(hle_ptr(i), iid, 16);
+    call("CoCreateInstance", 5, c, 0u, 1u, i, out);
+}
 
 int main(void) {
     hle_mem_init();
@@ -196,6 +269,117 @@ int main(void) {
         strcpy(hle_ptr(name), "data\\art\\t.dds");
         n = call("GetFullPathNameA", 4, name, 8u, buf, 0u);                        /* too small: the size needed */
         CHECK(n == strlen(BW2_INSTALL_DIR "\\data\\art\\t.dds") + 1);
+    }
+
+    /* LoadLibraryA: Windows' default extension. A module already loaded is found with or without ".dll" */
+    {
+        uint32_t name = gmem(260), name2 = gmem(260);
+        strcpy(hle_ptr(name), "kernel32");
+        strcpy(hle_ptr(name2), "kernel32.dll");
+        uint32_t k32 = call("LoadLibraryA", 1, name);
+        CHECK(k32 != 0 && call("LoadLibraryA", 1, name2) == k32);
+        CHECK(call("GetModuleHandleA", 1, name) == k32);
+        strcpy(hle_ptr(name), "user32");
+        strcpy(hle_ptr(name2), "USER32.DLL");
+        uint32_t u32 = call("LoadLibraryA", 1, name);
+        CHECK(u32 != 0 && u32 != k32 && call("LoadLibraryA", 1, name2) == u32);
+
+        /* what the lifted-DLL hook is given: the base name, and the host file with the extension added */
+        mkdir("support/C/PlugIns", 0755);
+        mkdir("support/C/a.b", 0755);
+        write_file("support/C/PlugIns/Thing.dll", "x", 1);
+        write_file("support/C/a.b/Thing.dll", "x", 1);
+        int (*saved)(const char *, const char *, uint32_t *) = hle_lifted_dll_hook;
+        hle_lifted_dll_hook = t_hook;
+        g_hook_r = 0;
+        strcpy(hle_ptr(name), ".\\PlugIns\\Thing");
+        g_hook_calls = 0;
+        call("LoadLibraryA", 1, name);
+        CHECK(g_hook_calls == 1 && !strcmp(g_hook_base, "thing.dll"));
+        strcpy(hle_ptr(name), "Thing.bin");
+        call("LoadLibraryA", 1, name);
+        CHECK(!strcmp(g_hook_base, "thing.bin"));
+        strcpy(hle_ptr(name), "Thing.");                            /* a trailing '.': no extension */
+        call("LoadLibraryA", 1, name);
+        CHECK(!strcmp(g_hook_base, "thing"));
+        strcpy(hle_ptr(name), "C:\\PlugIns\\Thing");
+        call("LoadLibraryA", 1, name);
+        CHECK(g_hook_had_host && ends_with(g_hook_host, "Thing.dll"));
+        strcpy(hle_ptr(name), "C:\\a.b\\Thing");                    /* a '.' in a folder is no extension */
+        call("LoadLibraryA", 1, name);
+        CHECK(!strcmp(g_hook_base, "thing.dll") && g_hook_had_host && ends_with(g_hook_host, "a.b/Thing.dll"));
+
+        /* a hook that fails: "not found" only when there was no file to give it */
+        char err[8192];
+        g_hook_r = -1;
+        g_child_name = name;
+        strcpy(hle_ptr(name), "C:\\NoSuch\\Thing");
+        CHECK(in_child(c_load, err, sizeof err) == 0 && count_of(err, "not found") == 1);
+        strcpy(hle_ptr(name), "C:\\PlugIns\\Thing");
+        CHECK(in_child(c_load, err, sizeof err) == 0 && count_of(err, "not found") == 0);
+        hle_lifted_dll_hook = saved;
+    }
+
+    /* ole32: COM initialization, counted per thread */
+    {
+        CHECK(call("CoInitializeEx", 2, 0u, 2u) == 0);              /* COINIT_APARTMENTTHREADED: S_OK */
+        CHECK(call("CoInitializeEx", 2, 0u, 2u) == 1);              /* S_FALSE: already */
+        CHECK(call("CoInitializeEx", 2, 0u, 0u) == 0x80010106u);    /* RPC_E_CHANGED_MODE */
+        CHECK(call("CoInitializeEx", 2, 1u, 2u) == 0x80070057u);    /* reserved not NULL: E_INVALIDARG */
+        uint32_t tid = gmem(4);
+        uint32_t th = call("CreateThread", 6, 0u, 0u, hle_resolve("selftest_coinit_thread"), 0u, 0u, tid);
+        CHECK(th != 0 && call("WaitForSingleObject", 2, th, 10000u) == 0);
+        CHECK(g_thread_coinit == 0);                                /* its own apartment: S_OK */
+        call("CoUninitialize", 0);
+        call("CoUninitialize", 0);
+        CHECK(call("CoInitializeEx", 2, 0u, 0u) == 0);              /* uninitialized again: any model */
+        call("CoUninitialize", 0);
+    }
+
+    /* ole32: CoFileTimeToDosDateTime, no time-zone conversion */
+    {
+        uint32_t ft = gmem(8), d = gmem(4), t = gmem(4);
+        MEM32(ft) = 0x85E7D800u, MEM32(ft + 4) = 0x01C5CB3Bu;     /* 2005-10-07 12:34:56 */
+        MEM32(d) = MEM32(t) = 0;
+        CHECK(call("CoFileTimeToDosDateTime", 3, ft, d, t) == 1 && MEM16(d) == 0x3347 && MEM16(t) == 0x645C);
+        MEM32(ft) = 0xE0A45300u, MEM32(ft + 4) = 0x01A8E79Fu;     /* 1979-12-31 23:59:58 */
+        CHECK(call("CoFileTimeToDosDateTime", 3, ft, d, t) == 0);
+    }
+
+    /* LoadImageA from a file: a missing one is NULL with ERROR_FILE_NOT_FOUND. One that is there is
+       win32hle's, and this engine links no GDI bitmaps (gdidc.c), so a real BMP stops the run, naming
+       what is missing; a file win32hle cannot read as a bitmap stops it, naming the file */
+    {
+        char err[8192];
+        uint32_t name = gmem(64);
+        strcpy(hle_ptr(name), "Data\\NoSuchFile.bmp");
+        CHECK(call("LoadImageA", 6, 0u, name, 0u, 0u, 0u, 0x2010u) == 0 && call("GetLastError", 0) == 2);
+        strcpy(hle_ptr(name), "C:\\NoSuchFile.bmp");
+        CHECK(call("LoadImageA", 6, 0u, name, 0u, 0u, 0u, 0x2010u) == 0 && call("GetLastError", 0) == 2);
+        uint8_t bmp[70] = { 'B', 'M', 70, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0,
+                            40, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 1, 0, 24, 0 };     /* 2x2, 24 bits, rows of 8 */
+        for (int i = 54; i < 70; i++) bmp[i] = (uint8_t)(i * 13);
+        write_file("support/C/two.bmp", bmp, sizeof bmp);
+        write_file("support/C/text.bmp", "not a bitmap", 12);
+        hle_path_changed();
+        g_child_name = name;
+        strcpy(hle_ptr(name), "C:\\two.bmp");
+        CHECK(in_child(c_load_image, err, sizeof err) == -1 && strstr(err, "hle_gdi_make_dib (gdidc.c): not linked"));
+        strcpy(hle_ptr(name), "C:\\text.bmp");
+        CHECK(in_child(c_load_image, err, sizeof err) == -1
+              && strstr(err, "LoadImageA: \"C:\\text.bmp\" is not a bitmap win32hle reads"));
+        CHECK(call("LoadImageA", 6, 0u, 0u, 2u, 0u, 0u, 0x10u) == 0x1C000003u);  /* an icon: win32hle's placeholder */
+    }
+
+    /* the audio layer is a later plan's: each stop exits 4, naming it */
+    {
+        char err[8192];
+        uint32_t name = gmem(32);
+        strcpy(hle_ptr(name), "dsound.dll");
+        g_child_name = name;
+        CHECK(in_child(c_load, err, sizeof err) == 4 && strstr(err, "reached dsound.dll: owned by a later plan"));
+        CHECK(in_child(c_dsound_class, err, sizeof err) == 4
+              && strstr(err, "reached DirectSound (CoCreateInstance): owned by a later plan"));
     }
 
     printf("shims selftest: %d failed\n", fails);

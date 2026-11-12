@@ -9,6 +9,8 @@
 /* BW2's import answers by DLL (shims_*.c); declared here so adding one
  * changes no header (every lifted shard depends on the headers). */
 extern const win32hle_shim bw2_k32_shims[], bw2_user_shims[], bw2_adv_shims[], bw2_net_shims[];
+extern const win32hle_shim bw2_later_shims[];   /* later.c: LoadLibraryA of a later plan's DLL */
+void bw2_later_classes(void);                   /* later.c: the DirectSound classes stop */
 void bw2_d3d_register(void);                    /* d3d9/d3d_register.c (plan 4) */
 void bw2_input_register(void);                  /* input/dinput8.c (plan 5) */
 
@@ -28,6 +30,8 @@ recomp_func_t bw2_hle_shim(const char *name) {
 
 void bw2_register_shims(void) {
     win32hle_register(bw2_guard_shims);         /* BW2's own first: hle_resolve takes the first */
+    win32hle_register(bw2_later_shims);
+    bw2_later_classes();
     win32hle_register(bw2_mount_shims);
     win32hle_register(bw2_shell_shims);
     win32hle_register(bw2_eh_shims);
