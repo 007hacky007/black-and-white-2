@@ -1,6 +1,7 @@
-"""Where the boot stops today: the lifted game boots on the patched tree through Direct3D, its DirectInput
-mouse setup, its shaders and effects (plan 5), its sprite and fonts and its loading screen (plan 7) to the
-audio layer (docs/research/startup.md)."""
+"""Where the boot gets to today: the lifted game boots on the patched tree through Direct3D, its DirectInput
+mouse setup, its shaders and effects (plan 5), its sprite and fonts and its loading screen (plan 7) and its
+DirectSound audio (plan 8) to the front end, where it first reads input (docs/research/frontend.md). The
+run ends at a fixed read count (BW2_QUIT_AFTER_READS), since the front end waits for input."""
 import os
 import re
 import subprocess
@@ -18,31 +19,42 @@ LOUD = ("TRIPWIRE", "trap:", "unresolved indirect call", "unresolved direct call
 ARIAL_NARROW_HEIGHTS = [-10, -8, -13, -10, -15, -12, -20, -16, -31, -24, -46, -36] * 4
 FONT = re.compile(r'^\[bw2\] font "([^"]*)" (-?\d+) weight (\d+): (.*)$')
 FRAME = re.compile(r"^\[bw2\] frame (\d+): (\d+)x(\d+), mean (\d+),(\d+),(\d+), nonblack (\d+) of (\d+)$")
+AUDIO_SECOND = re.compile(r"^\[bw2\] audio second (\d+): (\d+) playing, peak (\d+), nonsilent (\d+) of (\d+)$")
+NOTICE = "[bw2] DirectInput mouse: no input until plan 6"
+READS = 300
+
+
+def engine_lines(stderr):
+    """stderr as lines, with each engine line split off a game debug line that ran into it. The game's
+    OutputDebugStringA text is printed as given, and one of its lines has no newline, so the next engine
+    line can follow it on the same line. The engine prints whole lines, each starting "[bw2] "."""
+    return [part for ln in stderr.splitlines() for part in re.split(r"(?=\[bw2\] )", ln) if part]
 
 
 @pytest.mark.gamefiles
-@pytest.mark.xfail(strict=True, reason="plan 8: the boot passes DirectSound; Task 5 rewrites this test")
-def test_boot_to_audio(tmp_path):
-    # Plan 7: the game makes its sprite and its 49 fonts (the 48 Arial Narrow ones from the face it adds
-    # with AddFontMemResourceEx), loads its script plugin, shows its loading screen and stops at the
-    # audio layer, CoCreateInstance of the DirectSound class.
+def test_boot_to_front_end(tmp_path):
+    # Plan 8: the game makes its sprite and its fonts (the 48 Arial Narrow ones from the face it adds with
+    # AddFontMemResourceEx), loads its script plugin, shows its loading screen, starts its audio (one
+    # streaming DirectSound buffer, played by the mixer), and reaches its front end, where it reads the
+    # mouse once per frame. BW2_QUIT_AFTER_READS ends the run at the 300th read (docs/research/frontend.md).
     assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
-    env = dict(os.environ, BW2_SUPPORT=str(tmp_path / "support"), BW2_HEADLESS="1", BW2_FRAME_LOG="1",
-               BW2_FONT_LOG="1")
+    support = tmp_path / "support"
+    env = dict(os.environ, BW2_SUPPORT=str(support), BW2_HEADLESS="1", BW2_FRAME_LOG="1", BW2_FONT_LOG="1",
+               BW2_AUDIO_LOG="1", BW2_QUIT_AFTER_READS=str(READS))
     r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
                        timeout=180, env=env)
     (tmp_path / "stderr.txt").write_text(r.stderr)
     tail = r.stderr[-4000:]
-    lines = r.stderr.splitlines()
-    assert r.returncode == 4, f"exit {r.returncode}\n{tail}"
+    lines = engine_lines(r.stderr)
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    assert f"[bw2] quit after {READS} input reads (BW2_QUIT_AFTER_READS)" in lines, tail
     # the loader's own counts ("bound 412 imports, 0 unresolved", "0 unresolved imports") are not stops
     err = "\n".join(ln for ln in lines if not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln))
     for word in LOUD + ("unresolved", "unimplemented", "uncaught", "trap"):
         assert word not in err, f"{word!r} in stderr\n{tail}"
-    stop = [ln for ln in lines if "owned by a later plan" in ln]
-    assert len(stop) == 1, tail
-    assert "reached DirectSound (CoCreateInstance): owned by a later plan" in stop[0], stop[0]
-    # the fonts: Courier New from the Mac's file, then all 48 Arial Narrow ones from the game's own face
+    assert "owned by a later plan" not in r.stderr, tail
+    # the fonts: Courier New from the Mac's file, then all 48 Arial Narrow ones from the game's own face;
+    # the front end makes no more by its 300th read
     fonts = [m.groups() for m in map(FONT.match, lines) if m]
     assert len(fonts) == 49, "\n".join(map(str, fonts))
     face, height, weight, source = fonts[0]
@@ -51,11 +63,25 @@ def test_boot_to_audio(tmp_path):
     assert all(f[3] == "memory" for f in fonts[1:]), fonts
     # the script plugin loads as a lifted DLL with every import answered
     assert "scriptlibraryr.dll: lifted DLL at 0x10000000, 0 imports unanswered" in r.stderr, tail
-    # the loading screen: at least one frame is mostly not black
+    # audio: one streaming buffer, and the mixer plays non-silent seconds of it
+    bufs = [ln for ln in lines if ln.startswith("[bw2] audio buffer ")]
+    assert bufs == ["[bw2] audio buffer 1: 2 ch, 44100 Hz, 16 bit, 21504 bytes, flags 0x18000"], bufs
+    seconds = [tuple(map(int, m.groups())) for m in map(AUDIO_SECOND.match, lines) if m]
+    assert any(s[3] > 0 for s in seconds), seconds
+    # the front end reads the mouse: the notice comes once, at the first read
+    assert lines.count(NOTICE) == 1, tail
+    first_read = lines.index(NOTICE)
+    # the frames: numbered from 1, at least one per read, and the front end (to the last frame) is mostly
+    # not black
     frames = [tuple(map(int, m.groups())) for m in map(FRAME.match, lines) if m]
-    assert frames and [f[0] for f in frames] == list(range(1, len(frames) + 1)), frames
+    assert len(frames) >= READS and [f[0] for f in frames] == list(range(1, len(frames) + 1)), frames[-5:]
     assert all(f[7] == f[1] * f[2] for f in frames), frames
-    assert any(2 * f[6] >= f[7] for f in frames), frames
+    after = [tuple(map(int, m.groups())) for m in map(FRAME.match, lines[first_read:]) if m]
+    assert any(2 * f[6] >= f[7] for f in after), after
+    assert 2 * frames[-1][6] >= frames[-1][7], frames[-1]
+    # the sound banks are read in place: nothing is written under the support folder's game overlay
+    made = sorted(p for p in (support / "Game").rglob("*") if p.is_file()) if (support / "Game").exists() else []
+    assert not made, made
 
 
 def _vm_thunks_called_by_the_game():

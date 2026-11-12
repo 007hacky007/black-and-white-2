@@ -9,7 +9,7 @@ Run Black & White 2 (Lionhead / EA, 2005), the original game as it shipped,
 natively on Apple Silicon Macs. No Wine, no emulator, no virtual machine, no
 Rosetta. The method is the one NFSU2Recomp proved: lift the game's 32-bit x86
 executable to C ahead of time, compile it for ARM64 with clang, and answer
-every Windows, Direct3D 9, D3DX, DirectInput, OpenAL and Bink call with our
+every Windows, Direct3D 9, D3DX, DirectInput, DirectSound and Bink call with our
 own Mac code.
 
 The user makes the app on their own Mac from their own discs with a small
@@ -173,7 +173,8 @@ What pcrecomp does not have, so we write it:
 
 - Direct3D 9 on Metal (pcrecomp has only DirectX 6 Direct3D, in software).
 - D3DX 9 (`d3dx9_25`), including an HLSL compiler for `D3DXCompileShader`.
-- OpenAL + EAX on macOS.
+- DirectSound on CoreAudio (the game mixes in software; OpenAL + EAX only if a later
+  boot loads `wrap_oal.dll`).
 - DirectInput 8 on macOS (keyboard, mouse; gamepad not needed).
 - The Mac shell: Metal window, AppKit event loop, full screen/windowed,
   Retina, trackpad mapping, save locations.
@@ -258,17 +259,24 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   `.dll`, and `CoInitializeEx`, `CoFileTimeToDosDateTime` and the two memory-font
   calls are answered. `BW2_FRAME_LOG=1` prints numbers for each `Present` (size,
   mean colour and non-black pixels), and no pixels are stored.
-- **Audio:** the game loads OpenAL through `wrap_oal.dll`. We answer the
-  OpenAL + EAX API ourselves on top of an open OpenAL implementation or
-  CoreAudio (builder's call). EAX effects can be approximated or dropped in a
-  first pass but must not crash. **Measured start (plan 7):** audio init
+- **Audio:** the game's audio library mixes every voice in software and streams
+  the result into one looping DirectSound buffer (16-bit stereo PCM at 44,100 Hz,
+  21,504 bytes). We answer `IDirectSound` and that buffer on plan 4's COM
+  machinery, and a host mixer plays it through CoreAudio's default-output
+  `AudioUnit` (a real-time null sink when headless). The game's audio probe asks
+  `dsound.dll`'s private device enumeration (`CLSID_DirectSoundPrivate`,
+  `IKsPropertySet`, property 7); it is answered with one render device with no
+  device path, so the game takes its DirectSound output. Its OpenAL loader and
+  its waveOut output are not used on this path (waveOut stops loudly, and
+  `OpenAL32.dll` and `wrap_oal.dll` stay later-plan stops), and EAX is not
+  needed. `BW2_AUDIO_LOG=1` prints numbers only, and no audio is written to disk
+  (plan 8, `docs/research/frontend.md`). **Measured start (plan 7):** audio init
   (`sub_008B1400`) first calls `CoInitializeEx` and then `CoCreateInstance` of
   `CLSID_DirectSound`, which is where the boot stops today (exit 4). The spike
   behind plan 7 saw `CoUninitialize`, `GetVersion`, `LoadLibraryA("dsound.dll")`
   (`sub_008B9700`) and `GetProcAddress(DllGetClassObject)` come after it. The exe
   also names `wrap_oal.dll`, `OpenAL32.dll`, `alcOpenDevice` and `EAXGet`/`EAXSet`.
-  The game tree ships no OpenAL DLL. Plan 8 decides whether to answer DirectSound
-  or to fail it so the game goes to OpenAL (`docs/research/startup.md`).
+  The game tree ships no OpenAL DLL. Plan 8 answers DirectSound (above).
 - **Input:** DirectInput 8 keyboard and mouse from AppKit events, plus the
   Win32 mouse messages the game reads.
 - **Video:** Bink through pcrecomp's ffmpeg-backed `bink.c`, adapted to D3D9
@@ -283,7 +291,11 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   Mac is reachable: win32hle's `Z:` (the host root) is off, and a path that
   resolves outside the game tree and the support folder does not exist. The boot to
   `Direct3DCreate9` writes only the My Documents folders
-  (`docs/research/boot.md`).
+  (`docs/research/boot.md`). **Plan 8:** a read-only open of an existing game
+  file never touches the overlay: a `CreateFileA` without `GENERIC_WRITE` and with
+  `OPEN_ALWAYS` (or `OPEN_EXISTING`) opens the file in the game tree, as Windows
+  does. The overlay gets writes and creates only. The boot to the front end
+  writes nothing under `<support>/Game/`.
 
 ## 6. Hard problems and how we approach them
 
@@ -623,8 +635,9 @@ My calls (the user may override):
 
 Left to the builder:
 
-- Choice of HLSL compiler library, OpenAL implementation, and whether SDL2
-  stays for anything.
+- Choice of HLSL compiler library, OpenAL implementation (plan 8, Ruling 2: not
+  needed, the game's default path is DirectSound), and whether SDL2 stays for
+  anything.
 - `lift32.py` (global registers) vs `lift32_cpu.py` (CPU struct), or a
   hybrid, based on threading and performance.
 - Sharding, caching and build orchestration details.

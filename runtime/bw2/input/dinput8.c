@@ -6,6 +6,7 @@
  * rest. Every call it does not answer stops loudly; the objects are guest COM
  * objects on plan 4's d3d_com machinery.
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -149,8 +150,40 @@ static void no_input_yet(void) {
     fprintf(stderr, "[bw2] DirectInput mouse: no input until plan 6\n");
 }
 
+/* BW2_QUIT_AFTER_READS=<n> (plan 8 Task 5): a test ends its run at the nth
+ * device read (GetDeviceData and GetDeviceState counted together), with exit
+ * 0, before answering it. The game's front end waits for input and reads the
+ * mouse once per frame, so the first read marks the same point in every run.
+ * Read once; unset, nothing changes. A value that is not a positive integer
+ * stops the run at the first read, naming it. Reads run under the machine
+ * lock; the counter is atomic anyway. */
+static void count_read(void) {
+    static int parsed;
+    static const char *bad;
+    static unsigned long long limit;
+    static unsigned long long reads;
+    if (!parsed) {
+        const char *v = getenv("BW2_QUIT_AFTER_READS");
+        if (v) {
+            char *end = NULL;
+            errno = 0;
+            unsigned long long n = (*v >= '0' && *v <= '9') ? strtoull(v, &end, 10) : 0;
+            if (!end || *end || errno || n == 0) bad = v;
+            else limit = n;
+        }
+        parsed = 1;
+    }
+    if (bad) d3d_fail("BW2_QUIT_AFTER_READS='%s' is not a positive integer", bad);
+    if (!limit) return;
+    if (__atomic_add_fetch(&reads, 1, __ATOMIC_SEQ_CST) != limit) return;
+    fprintf(stderr, "[bw2] quit after %llu input reads (BW2_QUIT_AFTER_READS)\n", limit);
+    fflush(stderr);
+    hle_exit(0);
+}
+
 static void dd_GetDeviceState(void) {             /* (this, cbData, lpvData) */
     struct didevice *d = dev();
+    count_read();
     uint32_t cb = A32(1), p = A32(2);
     if (!d->acquired) RET(DIERR_NOTACQUIRED, 3);
     if (!p || cb != d->data_size) RET(DIERR_INVALIDPARAM, 3);
@@ -161,6 +194,7 @@ static void dd_GetDeviceState(void) {             /* (this, cbData, lpvData) */
 
 static void dd_GetDeviceData(void) {              /* (this, cbObjectData, rgdod, pdwInOut, dwFlags) */
     struct didevice *d = dev();
+    count_read();
     uint32_t cb = A32(1), inout = A32(3), flags = A32(4);
     if (!d->acquired) RET(DIERR_NOTACQUIRED, 5);
     if ((cb != 16 && cb != 20) || !inout || (flags & ~DIGDD_PEEK)) RET(DIERR_INVALIDPARAM, 5);

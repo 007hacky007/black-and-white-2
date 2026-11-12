@@ -276,6 +276,37 @@ static void group_di_loud(const char *what) {
     printf("di_loud: returned\n");
 }
 
+/* BW2_QUIT_AFTER_READS (set by the test): the reads before the nth answer as
+ * before, and the nth exits 0 before answering. "data" reads with
+ * GetDeviceData only; "mixed" alternates GetDeviceData and GetDeviceState,
+ * which count together. Each answered read prints a line, flushed, since the
+ * quit never returns here. */
+static void group_di_quit(const char *how) {
+    int mixed = how && !strcmp(how, "mixed");
+    uint32_t di = new_di(), dev = new_mouse(di);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, mouse_format(16)), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 5u), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetProperty, 2, DIPROP_BUFFERSIZE, bufsize_prop(512)), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    uint32_t buf = gmem(20 * 512), n = gmem(4), st = gmem(16);
+    for (int i = 1; i <= 8; i++) {
+        printf("di_quit: read %d asked (%d failed so far)\n", i, fails);
+        fflush(stdout);
+        if (mixed && i % 2 == 0) {
+            memset(hle_ptr(st), 0xAB, 16);
+            CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+            for (int k = 0; k < 16; k++) CHECKEQ(((uint8_t *)hle_ptr(st))[k], 0);
+        } else {
+            MEM32(n) = 512;
+            CHECKEQ(vcall(dev, DD_GetDeviceData, 4, 20u, buf, n, 0u), DI_OK);
+            CHECKEQ(MEM32(n), 0);
+        }
+        printf("di_quit: read %d answered (%d failed so far)\n", i, fails);
+        fflush(stdout);
+    }
+    printf("di_quit: returned\n");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: input_selftest <group> [arg]\n"); return 2; }
     hle_mem_init();
@@ -286,6 +317,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "di_game_setup")) group_di_game_setup();
     else if (!strcmp(argv[1], "di_rules")) group_di_rules();
     else if (!strcmp(argv[1], "di_loud") && argc > 2) group_di_loud(argv[2]);
+    else if (!strcmp(argv[1], "di_quit")) group_di_quit(argc > 2 ? argv[2] : NULL);
     else { fprintf(stderr, "input_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

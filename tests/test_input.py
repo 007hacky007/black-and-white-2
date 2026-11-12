@@ -24,8 +24,11 @@ def selftest(tmp_path_factory):
     return exe
 
 
-def run_group(exe, group, tmp_path, *args):
+def run_group(exe, group, tmp_path, *args, quit_after=None):
     env = dict(os.environ, BW2_HEADLESS="1", BW2_SUPPORT=str(tmp_path / "support"))
+    env.pop("BW2_QUIT_AFTER_READS", None)
+    if quit_after is not None:
+        env["BW2_QUIT_AFTER_READS"] = quit_after
     return subprocess.run([str(exe), group, *map(str, args)], capture_output=True, text=True, timeout=120,
                           cwd=tmp_path, env=env)
 
@@ -61,4 +64,35 @@ def test_di_loud(selftest, tmp_path, case, message):
     r = run_group(selftest, "di_loud", tmp_path, case)
     assert r.returncode != 0 and "di_loud: returned" not in r.stdout, r.stdout[-2000:]
     assert message in r.stderr, r.stderr[-2000:]
+    assert "FATAL: d3d9: " in r.stderr, r.stderr[-2000:]
+
+
+def test_di_quit_unset(selftest, tmp_path):
+    # unset, nothing changes: all 8 reads answer and the group returns
+    r = check(selftest, "di_quit", tmp_path)
+    assert "di_quit: read 8 answered (0 failed so far)" in r.stdout, r.stdout[-2000:]
+    assert "quit after" not in r.stderr, r.stderr[-2000:]
+
+
+@pytest.mark.parametrize("how, n", [("data", 3), ("mixed", 3), ("mixed", 2), ("data", 1)])
+def test_di_quit(selftest, tmp_path, how, n):
+    # the nth read (GetDeviceData and GetDeviceState counted together) exits 0 before answering
+    r = run_group(selftest, "di_quit", tmp_path, how, quit_after=str(n))
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert f"[bw2] quit after {n} input reads (BW2_QUIT_AFTER_READS)" in r.stderr, r.stderr[-2000:]
+    assert "FAIL" not in r.stdout, r.stdout[-2000:]
+    for i in range(1, n):
+        assert f"di_quit: read {i} answered (0 failed so far)" in r.stdout, r.stdout[-2000:]
+    assert f"di_quit: read {n} asked" in r.stdout, r.stdout[-2000:]
+    assert f"di_quit: read {n} answered" not in r.stdout, r.stdout[-2000:]
+    assert "di_quit: returned" not in r.stdout, r.stdout[-2000:]
+
+
+@pytest.mark.parametrize("value", ["x", "0", "-2", "3x", ""])
+def test_di_quit_bad_value(selftest, tmp_path, value):
+    # a value that is not a positive integer stops the run at the first read, naming it
+    r = run_group(selftest, "di_quit", tmp_path, "data", quit_after=value)
+    assert r.returncode != 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "di_quit: read 1 asked" in r.stdout and "di_quit: read 1 answered" not in r.stdout, r.stdout[-2000:]
+    assert f"BW2_QUIT_AFTER_READS={value!r} is not a positive integer" in r.stderr, r.stderr[-2000:]
     assert "FATAL: d3d9: " in r.stderr, r.stderr[-2000:]
