@@ -45,6 +45,7 @@ void bw2_in_clip(const int *rect_or_null);   /* screen {l, t, r, b}; empty or in
 /* dinput8.c: the DirectInput side of the drain. */
 int  bw2_in_mouse_exclusive(void);
 void bw2_in_mouse_lost(void);
+void bw2_dinput8_sink(const struct bw2_in_event *e);   /* the mouse sink dinput8.c installs */
 void bw2_dinput8_register(void);
 
 void bw2_input_register(void);

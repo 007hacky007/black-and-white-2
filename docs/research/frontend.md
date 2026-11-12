@@ -25,7 +25,7 @@ loop of Task 5 found no new stop: the boot ran to the front end on the first run
 - the script plugin's lifted-DLL line with 0 imports unanswered;
 - exactly one audio buffer line, `audio buffer 1: 2 ch, 44100 Hz, 16 bit, 21504 bytes, flags 0x18000`;
 - at least one audio second with non-silent frames;
-- the DirectInput notice exactly once;
+- the DirectInput first-read marker (`[bw2] DirectInput mouse: first read`) exactly once;
 - at least 300 frame lines numbered from 1, at least one frame after the first read at least half
   non-black, and the last frame at least half non-black (5 runs: every frame after the first read,
   the last one included, is 786,432 of 786,432 non-black, mean colour 186,183,182);
@@ -34,8 +34,9 @@ loop of Task 5 found no new stop: the boot ran to the front end on the first run
 ## Timing
 
 Each run is untraced, with the four log switches above. "First read" is the first
-`GetDeviceData` (the DirectInput notice line). "First non-silent second" is the audio log's
-first second with non-silent frames; the line prints when that second has been mixed.
+`GetDeviceData` (the DirectInput first-read marker; these runs printed plan 5's notice, which came
+at the same moment). "First non-silent second" is the audio log's first second with non-silent
+frames; the line prints when that second has been mixed.
 
 | Run | Support folder | First read | Frame at the first read | First non-silent second | Its frame | Quit (300 reads) |
 |---|---|---|---|---|---|---|

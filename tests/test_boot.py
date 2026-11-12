@@ -20,7 +20,7 @@ ARIAL_NARROW_HEIGHTS = [-10, -8, -13, -10, -15, -12, -20, -16, -31, -24, -46, -3
 FONT = re.compile(r'^\[bw2\] font "([^"]*)" (-?\d+) weight (\d+): (.*)$')
 FRAME = re.compile(r"^\[bw2\] frame (\d+): (\d+)x(\d+), mean (\d+),(\d+),(\d+), nonblack (\d+) of (\d+)$")
 AUDIO_SECOND = re.compile(r"^\[bw2\] audio second (\d+): (\d+) playing, peak (\d+), nonsilent (\d+) of (\d+)$")
-NOTICE = "[bw2] DirectInput mouse: no input until plan 6"
+FIRST_READ = "[bw2] DirectInput mouse: first read"
 READS = 300
 
 
@@ -68,9 +68,9 @@ def test_boot_to_front_end(tmp_path):
     assert bufs == ["[bw2] audio buffer 1: 2 ch, 44100 Hz, 16 bit, 21504 bytes, flags 0x18000"], bufs
     seconds = [tuple(map(int, m.groups())) for m in map(AUDIO_SECOND.match, lines) if m]
     assert any(s[3] > 0 for s in seconds), seconds
-    # the front end reads the mouse: the notice comes once, at the first read
-    assert lines.count(NOTICE) == 1, tail
-    first_read = lines.index(NOTICE)
+    # the front end reads the mouse: the first-read marker comes once, at the first read
+    assert lines.count(FIRST_READ) == 1, tail
+    first_read = lines.index(FIRST_READ)
     # the frames: numbered from 1, at least one per read, and the front end (to the last frame) is mostly
     # not black
     frames = [tuple(map(int, m.groups())) for m in map(FRAME.match, lines) if m]

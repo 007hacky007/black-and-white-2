@@ -1,7 +1,7 @@
 """Plan 5 Task 1: a minimal DirectInput mouse, driven as lifted code drives it (runtime/bw2/input/input_selftest.c).
 Plan 6 Task 1: the host input queue, the Windows messages it makes and IMM32.
+Plan 6 Task 2: the DirectInput mouse fed from the host input queue.
 
-It answers the game's measured setup and reports no input; plan 6 replaces the reads.
 Each test runs one group of the selftest headless and expects "<group>: 0 failed"."""
 import os
 import subprocess
@@ -11,7 +11,7 @@ import pytest
 from bw2.build import (BW2RT, FLAGS, RECOMP32, WIN32HLE, bw2_includes, check_tools, engine_libs,
                        engine_sources, sdk_path)
 
-NOTICE = "[bw2] DirectInput mouse: no input until plan 6"
+FIRST_READ = "[bw2] DirectInput mouse: first read"
 
 
 @pytest.fixture(scope="module")
@@ -42,12 +42,14 @@ def check(exe, group, tmp_path, *args):
 
 def test_di_create(selftest, tmp_path):
     r = check(selftest, "di_create", tmp_path)
-    assert NOTICE not in r.stderr
+    assert FIRST_READ not in r.stderr
+    assert "no input until plan 6" not in r.stderr
 
 
 def test_di_game_setup(selftest, tmp_path):
     r = check(selftest, "di_game_setup", tmp_path)
-    assert r.stderr.count(NOTICE) == 1, r.stderr[-2000:]
+    assert r.stderr.count(FIRST_READ) == 1, r.stderr[-2000:]
+    assert "no input until plan 6" not in r.stderr
 
 
 def test_di_rules(selftest, tmp_path):
@@ -58,7 +60,7 @@ def test_di_rules(selftest, tmp_path):
     ("caps", "IDirectInputDevice8A::GetCapabilities not implemented"),
     ("guid", "{6F1D2B61-D5A0-11CF-BFC7-444553540000}"),
     ("coop", "SetCooperativeLevel flags 0x15"),
-    ("prop", "SetProperty property 2"),
+    ("prop", "SetProperty property 4"),
     ("enum", "IDirectInput8A::EnumDevices not implemented"),
 ])
 def test_di_loud(selftest, tmp_path, case, message):
@@ -132,3 +134,10 @@ def test_drain_points(selftest, tmp_path):
 
 def test_imm(selftest, tmp_path):
     check(selftest, "imm", tmp_path)
+
+
+# ---- plan 6 Task 2: the DirectInput mouse on real input ----
+
+@pytest.mark.parametrize("group", ["di_format", "di_data", "di_state", "di_overflow", "focus_loss", "di_exclusive"])
+def test_di_input(selftest, tmp_path, group):
+    check(selftest, group, tmp_path)

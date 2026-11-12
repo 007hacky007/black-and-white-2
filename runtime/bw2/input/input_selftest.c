@@ -81,6 +81,7 @@ static const uint8_t GUID_SysKeyboard[16] = G(0x6F1D2B61, 0xD5A0, 0x11CF, 0xBF, 
 static const uint8_t GUID_XAxis[16] = G(0xA36D02E0, 0xC9F3, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
 static const uint8_t GUID_YAxis[16] = G(0xA36D02E1, 0xC9F3, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
 static const uint8_t GUID_ZAxis[16] = G(0xA36D02E2, 0xC9F3, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+static const uint8_t GUID_Button[16] = G(0xA36D02F0, 0xC9F3, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
 
 static uint32_t gguid(const uint8_t *g) { uint32_t p = gmem(16); memcpy(hle_ptr(p), g, 16); return p; }
 
@@ -94,8 +95,27 @@ static uint32_t gguid(const uint8_t *g) { uint32_t p = gmem(16); memcpy(hle_ptr(
 #define DIERR_ACQUIRED 0x800700AAu
 #define DIERR_NOTACQUIRED 0x8007000Cu
 #define DIPROP_BUFFERSIZE 1u
+#define DIPROP_AXISMODE 2u
+#define DIPROP_RANGE 4u
+#define DIERR_INPUTLOST 0x8007001Eu
+#define DIERR_OTHERAPPHASPRIO 0x80070005u
+#define DIERR_NOTBUFFERED 0x80040207u
+#define E_NOTIMPL 0x80004001u
+#define E_HANDLE 0x80070006u
+#define DI_BUFFEROVERFLOW 1u
+#define DIDFT_OPTIONAL 0x80000000u
+#define DIGDD_PEEK 1u
+#define INFINITE 0xFFFFFFFFu
 #define HINST 0x00400000u
-#define HWND 0x00010010u
+
+/* The window SetCooperativeLevel is given: a real top-level window, made once per process. */
+static uint32_t make_window(uint32_t cls_style, int x, int y, int w, int h);
+static uint32_t g_di_hwnd;
+static uint32_t di_window(void) {
+    if (!g_di_hwnd) g_di_hwnd = make_window(0, 50, 50, 1024, 768);
+    return g_di_hwnd;
+}
+#define HWND di_window()
 
 /* IDirectInput8A and IDirectInputDevice8A slots */
 enum { DI_CreateDevice = 3 };
@@ -104,6 +124,7 @@ enum { DD_GetCapabilities = 3, DD_EnumObjects, DD_GetProperty, DD_SetProperty, D
 
 /* DirectInput8Create(hinst, 0x800, IID_IDirectInput8A, &di, NULL) */
 static uint32_t new_di(void) {
+    di_window();
     uint32_t out = gmem(4);
     CHECKEQ(call("DirectInput8Create", 5, HINST, 0x800u, gguid(IID_IDirectInput8A), out, 0u), DI_OK);
     return MEM32(out);
@@ -216,13 +237,22 @@ static void group_di_rules(void) {
     bad = mouse_format(16);
     MEM32(bad + 4) = 12;
     CHECKEQ(vcall(dev, DD_SetDataFormat, 1, bad), DIERR_INVALIDPARAM);
-    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, mouse_format(24)), DIERR_INVALIDPARAM);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, mouse_format(24)), DI_OK);    /* a multiple of 4, every offset inside */
+    bad = mouse_format(16);
+    MEM32(MEM32(bad + 20) + 6 * 16 + 4) = 16;                                /* the last button at 16 of 16 */
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, bad), DIERR_INVALIDPARAM);
     CHECKEQ(vcall(dev, DD_SetDataFormat, 1, 0u), DIERR_INVALIDPARAM);
     CHECKEQ(vcall(dev, DD_SetDataFormat, 1, mouse_format(20)), DI_OK);          /* c_dfDIMouse2's size */
     CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt), DI_OK);
-    /* background levels are accepted too */
-    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 9u), DI_OK);
+    /* non-exclusive background is accepted; an exclusive background mouse is not implemented by DirectInput */
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 9u), E_NOTIMPL);
     CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 10u), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 3u), DIERR_INVALIDPARAM);   /* both exclusive and not */
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 12u), DIERR_INVALIDPARAM);  /* both fore- and background */
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 4u), DIERR_INVALIDPARAM);   /* neither exclusive nor not */
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 2u), DIERR_INVALIDPARAM);   /* neither fore- nor background */
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, 0x12345u, 6u), E_HANDLE);         /* no such window */
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, 0u, 6u), E_HANDLE);
     CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 6u), DI_OK);
     CHECKEQ(vcall(dev, DD_SetProperty, 2, DIPROP_BUFFERSIZE, prop), DI_OK);
     /* setup calls while acquired */
@@ -270,7 +300,7 @@ static void group_di_loud(const char *what) {
         vcall(dev, DD_SetCooperativeLevel, 2, HWND, 0x15u);               /* DISCL_NOWINKEY */
     } else if (!strcmp(what, "prop")) {
         uint32_t dev = new_mouse(di);
-        vcall(dev, DD_SetProperty, 2, 2u, bufsize_prop(0));               /* DIPROP_AXISMODE */
+        vcall(dev, DD_SetProperty, 2, DIPROP_RANGE, bufsize_prop(0));
     } else if (!strcmp(what, "enum")) {
         vcall(di, 4, 4, 0u, 0x12345678u, 0u, 0u);                         /* EnumDevices */
     } else {
@@ -463,7 +493,7 @@ static void group_queue(void) {
     CHECK(!hle_msg_pop(NULL, NULL, NULL));
     CHECKEQ(bw2_in_active(), 1);
     CHECKEQ(bw2_in_losses(), 0);
-    bw2_in_set_mouse_sink(NULL);
+    bw2_in_set_mouse_sink(bw2_dinput8_sink);
 }
 
 static void group_mouse_msgs(void) {
@@ -763,6 +793,518 @@ static void group_drain_points(void) {
     hle_proc_hook = NULL;
 }
 
+/* ---- plan 6 Task 2: the DirectInput mouse on the host input queue ---- */
+
+/* A data format of n objects {guid or NULL, offset, type}, built in guest memory. */
+struct fobj { const uint8_t *guid; uint32_t ofs, type; };
+static uint32_t fmt_build(uint32_t flags, uint32_t data_size, int n, const struct fobj *o) {
+    uint32_t objs = gmem(16u * (uint32_t)(n ? n : 1)), f = gmem(24);
+    for (int i = 0; i < n; i++) {
+        uint32_t a = objs + 16u * (uint32_t)i;
+        MEM32(a) = o[i].guid ? gguid(o[i].guid) : 0, MEM32(a + 4) = o[i].ofs, MEM32(a + 8) = o[i].type;
+        MEM32(a + 12) = 0;
+    }
+    MEM32(f) = 24, MEM32(f + 4) = 16, MEM32(f + 8) = flags, MEM32(f + 12) = data_size, MEM32(f + 16) = (uint32_t)n;
+    MEM32(f + 20) = objs;
+    return f;
+}
+/* the game's seven objects ("Measured" item 2), and room for an eighth */
+static struct fobj g_game_objs[8] = {
+    { GUID_XAxis, 0, 0x00FFFF03u }, { GUID_YAxis, 4, 0x00FFFF03u }, { GUID_ZAxis, 8, 0x80FFFF03u },
+    { NULL, 12, 0x00FFFF0Cu }, { NULL, 13, 0x00FFFF0Cu }, { NULL, 14, 0x80FFFF0Cu }, { NULL, 15, 0x80FFFF0Cu } };
+
+static uint32_t dword_prop(uint32_t v) { return bufsize_prop(v); }
+
+/* The game's setup (0x9AF220) and mode switch (0x9AF790), with a buffer of `buffer` elements. */
+static uint32_t game_mouse(uint32_t di, uint32_t buffer) {
+    uint32_t dev = new_mouse(di);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, mouse_format(16)), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 6u), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetProperty, 2, DIPROP_BUFFERSIZE, bufsize_prop(buffer)), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 5u), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    return dev;
+}
+
+static void ev_delta(int dx, int dy, uint32_t t) {
+    struct bw2_in_event e = { .kind = BW2_IN_MOVE, .time_ms = t, .dx = dx, .dy = dy };
+    bw2_in_push_at(&e);
+}
+static void ev_wheel(int wheel, uint32_t t) {
+    struct bw2_in_event e = { .kind = BW2_IN_WHEEL, .time_ms = t, .wheel = wheel };
+    bw2_in_push_at(&e);
+}
+
+/* element i of a GetDeviceData buffer of cb-byte elements */
+static uint32_t el(uint32_t buf, uint32_t cb, int i, int field) { return MEM32(buf + cb * (uint32_t)i + 4u * (uint32_t)field); }
+enum { EL_OFS, EL_DATA, EL_TIME, EL_SEQ, EL_APP };
+
+static uint32_t read_data(uint32_t dev, uint32_t cb, uint32_t buf, uint32_t *n, uint32_t flags) {
+    uint32_t pn = gmem(4);
+    MEM32(pn) = *n;
+    uint32_t hr = vcall(dev, DD_GetDeviceData, 4, cb, buf, pn, flags);
+    *n = MEM32(pn);
+    return hr;
+}
+
+static void group_di_format(void) {
+    uint32_t di = new_di(), dev = new_mouse(di);
+    struct fobj o[8];
+    memcpy(o, g_game_objs, sizeof o);
+    /* the game's format */
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 16, 7, o)), DI_OK);
+    /* a fourth axis: no such object; optional, it is left out */
+    o[7] = (struct fobj){ NULL, 16, 0x00FFFF03u };
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 20, 8, o)), DIERR_INVALIDPARAM);
+    o[7].type |= DIDFT_OPTIONAL;
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 20, 8, o)), DI_OK);
+    o[7] = (struct fobj){ NULL, 16, 0x00000303u };                          /* axis instance 3 */
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 20, 8, o)), DIERR_INVALIDPARAM);
+    /* a ninth button: there are eight */
+    struct fobj b[9];
+    for (int i = 0; i < 9; i++) b[i] = (struct fobj){ GUID_Button, (uint32_t)i, 0x00FFFF0Cu };
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 12, 8, b)), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 12, 9, b)), DIERR_INVALIDPARAM);
+    /* by instance: button 7, then an axis GUID on a button type matches nothing */
+    struct fobj one[1] = { { NULL, 0, 0x0000070Cu } };
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 4, 1, one)), DI_OK);
+    one[0] = (struct fobj){ NULL, 0, 0x0000080Cu };
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 4, 1, one)), DIERR_INVALIDPARAM);
+    one[0] = (struct fobj){ GUID_XAxis, 0, 0x00FFFF0Cu };
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 4, 1, one)), DIERR_INVALIDPARAM);
+    one[0] = (struct fobj){ GUID_Button, 0, 0x00FFFF03u };
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 4, 1, one)), DIERR_INVALIDPARAM);
+    one[0] = (struct fobj){ GUID_ZAxis, 0, 0x00000203u };                   /* Z is axis instance 2 */
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 4, 1, one)), DI_OK);
+    /* offsets: past dwDataSize, an axis that does not fit, an unaligned axis; a size not a multiple of 4 */
+    memcpy(o, g_game_objs, sizeof o);
+    o[6].ofs = 16;
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 16, 7, o)), DIERR_INVALIDPARAM);
+    memcpy(o, g_game_objs, sizeof o);
+    o[2].ofs = 14;
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 20, 7, o)), DIERR_INVALIDPARAM);
+    o[2].ofs = 16;
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 16, 7, o)), DIERR_INVALIDPARAM);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 20, 7, o)), DI_OK);
+    memcpy(o, g_game_objs, sizeof o);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 18, 7, o)), DIERR_INVALIDPARAM);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 0, 0, o)), DIERR_INVALIDPARAM);
+    /* the axis-mode flags: absolute, relative, not both */
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(1, 16, 7, o)), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(3, 16, 7, o)), DIERR_INVALIDPARAM);
+    /* the same device object twice: the second is a fourth axis */
+    o[1] = (struct fobj){ GUID_XAxis, 4, 0x00FFFF03u };
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 16, 7, o)), DIERR_INVALIDPARAM);
+    /* the axis mode property */
+    uint32_t am = dword_prop(2);
+    CHECKEQ(vcall(dev, DD_SetProperty, 2, DIPROP_AXISMODE, am), DIERR_INVALIDPARAM);
+    CHECKEQ(vcall(dev, DD_SetProperty, 2, DIPROP_AXISMODE, dword_prop(0)), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetProperty, 2, DIPROP_AXISMODE, dword_prop(1)), DI_OK);
+    /* the game's format again, acquired, then SetDataFormat and SetProperty are refused */
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, mouse_format(16)), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 6u), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetProperty, 2, DIPROP_AXISMODE, dword_prop(0)), DIERR_ACQUIRED);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, mouse_format(16)), DIERR_ACQUIRED);
+    /* reads with no buffer size */
+    uint32_t buf = gmem(20 * 4), n = 4;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DIERR_NOTBUFFERED);
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    /* a child window is not top-level */
+    uint32_t child = call("CreateWindowExA", 12, 0u, gstr("Static"), gstr(""), 0x50000000u, 0u, 0u, 10u, 10u, HWND,
+                          0u, HINST, 0u);
+    CHECK(child != 0);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, child, 6u), E_HANDLE);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    CHECKEQ(vcall(di, 2, 0), 0);
+}
+
+static void group_di_data(void) {
+    uint32_t di = new_di(), dev = game_mouse(di, 512);
+    uint32_t buf = gmem(20 * 512), n;
+    uint32_t t0 = 2000000u;
+    memset(hle_ptr(buf), 0xAB, 20 * 512);
+    ev_delta(3, -2, t0);
+    ev_button_at(0, 1, 0, 0, t0 + 10);
+    ev_wheel(-120, t0 + 20);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 4);
+    if (n == 4) {
+        CHECKEQ(el(buf, 20, 0, EL_OFS), 0);
+        CHECKEQ(el(buf, 20, 0, EL_DATA), 3);
+        CHECKEQ(el(buf, 20, 1, EL_OFS), 4);
+        CHECKEQ(el(buf, 20, 1, EL_DATA), (uint32_t)-2);
+        CHECKEQ(el(buf, 20, 0, EL_SEQ), el(buf, 20, 1, EL_SEQ));
+        CHECKEQ(el(buf, 20, 2, EL_OFS), 12);
+        CHECKEQ(el(buf, 20, 2, EL_DATA), 0x80);
+        CHECKEQ(el(buf, 20, 3, EL_OFS), 8);
+        CHECKEQ(el(buf, 20, 3, EL_DATA), (uint32_t)-120);
+        CHECK(el(buf, 20, 2, EL_SEQ) > el(buf, 20, 1, EL_SEQ));
+        CHECK(el(buf, 20, 3, EL_SEQ) > el(buf, 20, 2, EL_SEQ));
+        CHECKEQ(el(buf, 20, 0, EL_TIME), t0);
+        CHECKEQ(el(buf, 20, 1, EL_TIME), t0);
+        CHECKEQ(el(buf, 20, 2, EL_TIME), t0 + 10);
+        CHECKEQ(el(buf, 20, 3, EL_TIME), t0 + 20);
+        for (int i = 0; i < 4; i++) CHECKEQ(el(buf, 20, i, EL_APP), 0);
+    }
+    uint32_t last = el(buf, 20, 3, EL_SEQ);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 0);
+    /* bw2_in_push stamps the push time */
+    uint32_t before = hle_ticks_ms();
+    ev_button(0, 0, 0, 0);
+    uint32_t after = hle_ticks_ms();
+    /* DX3's 16-byte elements; a peek keeps the data; n caps the count */
+    ev_delta(0, 5, t0 + 30);                                       /* only Y moved: one element */
+    n = 512;
+    CHECKEQ(read_data(dev, 16, buf, &n, DIGDD_PEEK), DI_OK);
+    CHECKEQ(n, 2);
+    memset(hle_ptr(buf), 0xAB, 20 * 512);
+    n = 1;
+    CHECKEQ(read_data(dev, 16, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 1);
+    CHECKEQ(el(buf, 16, 0, EL_OFS), 12);
+    CHECKEQ(el(buf, 16, 0, EL_DATA), 0);
+    CHECK(el(buf, 16, 0, EL_TIME) >= before && el(buf, 16, 0, EL_TIME) <= after);
+    CHECK(el(buf, 16, 0, EL_SEQ) > last);
+    CHECKEQ(el(buf, 16, 1, EL_OFS), 0xABABABABu);                 /* nothing past n, and 16 bytes each */
+    n = 512;
+    CHECKEQ(read_data(dev, 16, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 1);
+    CHECKEQ(el(buf, 16, 0, EL_OFS), 4);
+    CHECKEQ(el(buf, 16, 0, EL_DATA), 5);
+    /* a flush (NULL, INFINITE) gives the count; a NULL peek counts and keeps */
+    ev_delta(1, 1, t0 + 40);
+    ev_wheel(120, t0 + 50);
+    n = INFINITE;
+    CHECKEQ(read_data(dev, 20, 0, &n, DIGDD_PEEK), DI_OK);
+    CHECKEQ(n, 3);
+    n = INFINITE;
+    CHECKEQ(read_data(dev, 20, 0, &n, 0), DI_OK);
+    CHECKEQ(n, 3);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 0);
+    /* buttons 4 to 7 are not in the game's format; a second down of a held button is no change */
+    ev_button(4, 1, 0, 0);
+    ev_button(3, 1, 0, 0);
+    ev_button(3, 1, 0, 0);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 1);
+    CHECKEQ(el(buf, 20, 0, EL_OFS), 15);
+    /* Acquire empties the buffer */
+    ev_delta(1, 0, t0 + 60);
+    bw2_in_drain_input();
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 0);
+    /* unacquired, it records nothing */
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    ev_delta(1, 0, t0 + 70);
+    bw2_in_drain_input();
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 0);
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    CHECKEQ(vcall(di, 2, 0), 0);
+}
+
+static int32_t st32(uint32_t st, int ofs) { return (int32_t)MEM32(st + (uint32_t)ofs); }
+static uint8_t st8(uint32_t st, int ofs) { return ((uint8_t *)hle_ptr(st))[ofs]; }
+
+static void group_di_state(void) {
+    uint32_t di = new_di(), dev = game_mouse(di, 512), st = gmem(16);
+    /* relative: the motion since the last GetDeviceState */
+    ev_delta(3, 1, 1000u);
+    ev_delta(4, 0, 1001u);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st32(st, 0), 7);
+    CHECKEQ(st32(st, 4), 1);
+    CHECKEQ(st32(st, 8), 0);
+    memset(hle_ptr(st), 0xAB, 16);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st32(st, 0), 0);
+    CHECKEQ(st32(st, 4), 0);
+    for (int i = 12; i < 16; i++) CHECKEQ(st8(st, i), 0);
+    /* a held button reads 0x80, read after read; the wheel is Z */
+    ev_button(0, 1, 0, 0);
+    ev_button(3, 1, 0, 0);
+    ev_wheel(-240, 1002u);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st8(st, 12), 0x80);
+    CHECKEQ(st8(st, 13), 0);
+    CHECKEQ(st8(st, 15), 0x80);
+    CHECKEQ(st32(st, 8), -240);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st8(st, 12), 0x80);
+    CHECKEQ(st32(st, 8), 0);
+    ev_button(0, 0, 0, 0);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st8(st, 12), 0);
+    /* GetDeviceData does not take the motion GetDeviceState reports */
+    uint32_t buf = gmem(20 * 16), n = INFINITE;
+    CHECKEQ(read_data(dev, 20, 0, &n, 0), DI_OK);                  /* the flush: X, Y, X, 2 downs, Z, an up */
+    CHECKEQ(n, 7);
+    n = 16;
+    ev_delta(2, 0, 1003u);
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 1);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st32(st, 0), 2);
+    /* cb must be the format's size */
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 20u, st), DIERR_INVALIDPARAM);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 12u, st), DIERR_INVALIDPARAM);
+    /* absolute (DIPROP_AXISMODE): the running sum, in the state and in the buffer */
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetProperty, 2, DIPROP_AXISMODE, dword_prop(0)), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    ev_delta(3, -1, 1004u);
+    ev_delta(4, 0, 1005u);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st32(st, 0), 7);
+    CHECKEQ(st32(st, 4), -1);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st32(st, 0), 7);
+    n = 16;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 3);
+    if (n == 3) {
+        CHECKEQ(el(buf, 20, 0, EL_DATA), 3);
+        CHECKEQ(el(buf, 20, 1, EL_DATA), (uint32_t)-1);
+        CHECKEQ(el(buf, 20, 2, EL_OFS), 0);
+        CHECKEQ(el(buf, 20, 2, EL_DATA), 7);
+    }
+    /* back to relative */
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetProperty, 2, DIPROP_AXISMODE, dword_prop(1)), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    ev_delta(5, 0, 1006u);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st32(st, 0), 5);
+    /* DIDF_ABSAXIS in the format is absolute too */
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    struct fobj o[8];
+    memcpy(o, g_game_objs, sizeof o);
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(1, 16, 7, o)), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    ev_delta(1, 0, 1007u);
+    ev_delta(1, 0, 1008u);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st32(st, 0), 2);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st32(st, 0), 2);
+    /* a 20-byte format (DIMOUSESTATE2): eight buttons */
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    struct fobj m2[11] = { { GUID_XAxis, 0, 0x00FFFF03u }, { GUID_YAxis, 4, 0x00FFFF03u }, { GUID_ZAxis, 8, 0x80FFFF03u } };
+    for (int i = 0; i < 8; i++) m2[3 + i] = (struct fobj){ NULL, 12u + (uint32_t)i, 0x80FFFF0Cu };
+    CHECKEQ(vcall(dev, DD_SetDataFormat, 1, fmt_build(2, 20, 11, m2)), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    uint32_t st2 = gmem(20);
+    ev_button(4, 1, 0, 0);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 20u, st2), DI_OK);
+    CHECKEQ(st8(st2, 16), 0x80);
+    CHECKEQ(st8(st2, 15), 0);
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    CHECKEQ(vcall(di, 2, 0), 0);
+}
+
+static void group_di_overflow(void) {
+    uint32_t di = new_di(), dev = game_mouse(di, 4);
+    uint32_t buf = gmem(20 * 16), n;
+    for (int i = 0; i < 6; i++) ev_button_at(0, i % 2 == 0, 0, 0, 3000u + (uint32_t)i);
+    n = 16;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_BUFFEROVERFLOW);
+    CHECKEQ(n, 4);
+    uint32_t seq = 0;
+    for (int i = 0; i < 4 && i < (int)n; i++) {
+        CHECKEQ(el(buf, 20, i, EL_TIME), 3002u + (uint32_t)i);   /* the newest four */
+        CHECKEQ(el(buf, 20, i, EL_DATA), i % 2 == 0 ? 0x80u : 0u);
+        CHECK(el(buf, 20, i, EL_SEQ) > seq);
+        seq = el(buf, 20, i, EL_SEQ);
+    }
+    n = 16;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 0);
+    ev_button_at(0, 1, 0, 0, 3010u);
+    n = 16;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 1);
+    CHECK(el(buf, 20, 0, EL_SEQ) > seq);
+    /* a peek after an overflow says so and keeps it for the read */
+    for (int i = 0; i < 5; i++) ev_button_at(0, i % 2 != 0, 0, 0, 3020u + (uint32_t)i);
+    n = 16;
+    CHECKEQ(read_data(dev, 20, buf, &n, DIGDD_PEEK), DI_BUFFEROVERFLOW);
+    CHECKEQ(n, 4);
+    n = 16;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_BUFFEROVERFLOW);
+    CHECKEQ(n, 4);
+    n = 16;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    /* a move is two elements; an overflow there drops the oldest element */
+    ev_delta(1, 1, 3030u);
+    ev_delta(2, 2, 3031u);
+    ev_delta(3, 3, 3032u);
+    n = 16;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_BUFFEROVERFLOW);
+    CHECKEQ(n, 4);
+    CHECKEQ(el(buf, 20, 0, EL_DATA), 2);
+    CHECKEQ(el(buf, 20, 3, EL_DATA), 3);
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    CHECKEQ(vcall(di, 2, 0), 0);
+}
+
+static void group_focus_loss(void) {
+    hle_proc_hook = recorder;
+    bw2_in_set_window(HWND);
+    pump_all();
+    uint32_t di = new_di(), dev = game_mouse(di, 512);
+    /* a non-exclusive background mouse is not lost */
+    uint32_t bg = new_mouse(di);
+    CHECKEQ(vcall(bg, DD_SetDataFormat, 1, mouse_format(16)), DI_OK);
+    CHECKEQ(vcall(bg, DD_SetCooperativeLevel, 2, HWND, 10u), DI_OK);
+    CHECKEQ(vcall(bg, DD_SetProperty, 2, DIPROP_BUFFERSIZE, bufsize_prop(64)), DI_OK);
+    CHECKEQ(vcall(bg, DD_Acquire, 0), DI_OK);
+    uint32_t buf = gmem(20 * 512), n, st = gmem(16);
+    /* the left button held */
+    ev_button(0, 1, 0, 0);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 1);
+    /* deactivated with no pump between: the read says lost, and no window procedure runs in it */
+    rec_reset();
+    ev_activate(0);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DIERR_INPUTLOST);
+    CHECK(!rec_has(WM_ACTIVATE) && !rec_has(WM_KILLFOCUS) && !rec_has(WM_ACTIVATEAPP));
+    CHECKEQ(bw2_in_losses(), 1);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DIERR_NOTACQUIRED);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DIERR_NOTACQUIRED);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DIERR_OTHERAPPHASPRIO);
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_NOEFFECT);
+    n = 64;
+    CHECKEQ(read_data(bg, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 1);                                                /* the button, before the loss */
+    /* the pump delivers the deactivation; still no Acquire */
+    pump_all();
+    CHECK(rec_has(WM_ACTIVATE) && rec_has(WM_KILLFOCUS) && rec_has(WM_ACTIVATEAPP));
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DIERR_OTHERAPPHASPRIO);
+    CHECKEQ(bw2_in_mouse_exclusive(), 0);
+    /* back: Acquire works, and the state is empty */
+    ev_activate(1);
+    pump_all();
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    CHECKEQ(bw2_in_mouse_exclusive(), 1);
+    CHECKEQ(vcall(dev, DD_GetDeviceState, 2, 16u, st), DI_OK);
+    CHECKEQ(st8(st, 12), 0);
+    /* the game's retry loop: read; on lost or not acquired, Acquire and read again */
+    ev_button(0, 0, 0, 0);
+    ev_activate(0);
+    pump_all();
+    ev_activate(1);
+    pump_all();
+    CHECKEQ(bw2_in_losses(), 2);
+    uint32_t hr = 0, tries = 0;
+    for (; tries < 4; tries++) {
+        n = 512;
+        hr = read_data(dev, 20, buf, &n, 0);
+        if (hr != DIERR_INPUTLOST && hr != DIERR_NOTACQUIRED) break;
+        CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    }
+    CHECKEQ(hr, DI_OK);
+    CHECKEQ(tries, 1);
+    CHECKEQ(n, 0);
+    /* lost and then given back before the read: still lost once */
+    ev_activate(0);
+    ev_activate(1);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DIERR_INPUTLOST);
+    pump_all();
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(bg, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(bg, 2, 0), 0);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    CHECKEQ(vcall(di, 2, 0), 0);
+    hle_proc_hook = NULL;
+}
+
+static void group_di_exclusive(void) {
+    hle_proc_hook = recorder;
+    bw2_in_set_window(HWND);
+    pump_all();
+    uint32_t di = new_di(), dev = game_mouse(di, 512), pt = gmem(8), buf = gmem(20 * 512), n;
+    struct bw2_in_event e = { .kind = BW2_IN_MOVE, .x = 10, .y = 20, .dx = 1, .dy = 1 };
+    /* the cursor somewhere first, through a non-exclusive phase */
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(bw2_in_mouse_exclusive(), 0);
+    bw2_in_push(&e);
+    pump_all();
+    CHECKEQ(call("GetCursorPos", 1, pt), 1);
+    CHECKEQ(MEM32(pt), 60);
+    CHECKEQ(MEM32(pt + 4), 70);
+    /* exclusive (5), acquired: DirectInput only */
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    CHECKEQ(bw2_in_mouse_exclusive(), 1);
+    rec_reset();
+    e.x = 30, e.y = 40;
+    bw2_in_push(&e);
+    pump_all();
+    CHECK(!rec_has(WM_MOUSEMOVE));
+    CHECKEQ(call("GetCursorPos", 1, pt), 1);
+    CHECKEQ(MEM32(pt), 60);
+    CHECKEQ(MEM32(pt + 4), 70);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 2);
+    /* non-exclusive (6, the setup's): both */
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 6u), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    CHECKEQ(bw2_in_mouse_exclusive(), 0);
+    rec_reset();
+    bw2_in_push(&e);
+    pump_all();
+    EXPECT(1, WM_MOUSEMOVE, ANY, (40u << 16) | 30u);
+    CHECKEQ(call("GetCursorPos", 1, pt), 1);
+    CHECKEQ(MEM32(pt), 80);
+    n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(n, 2);
+    /* exclusive again, then Unacquire: a message again */
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, DD_SetCooperativeLevel, 2, HWND, 5u), DI_OK);
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    CHECKEQ(bw2_in_mouse_exclusive(), 1);
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(bw2_in_mouse_exclusive(), 0);
+    rec_reset();
+    e.x = 1, e.y = 2;
+    bw2_in_push(&e);
+    pump_all();
+    EXPECT(1, WM_MOUSEMOVE, ANY, (2u << 16) | 1u);
+    /* released with the device: no exclusive mouse left */
+    CHECKEQ(vcall(dev, DD_Acquire, 0), DI_OK);
+    CHECKEQ(bw2_in_mouse_exclusive(), 1);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    CHECKEQ(bw2_in_mouse_exclusive(), 0);
+    CHECKEQ(vcall(di, 2, 0), 0);
+    hle_proc_hook = NULL;
+}
+
 /* The game's IMM32 sequence (plan 6 "Measured" item 7), then the other four. */
 static void group_imm(void) {
     uint32_t hwnd = make_window(0, 0, 0, 640, 480);
@@ -814,6 +1356,12 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "close")) group_close();
     else if (!strcmp(argv[1], "drain_points")) group_drain_points();
     else if (!strcmp(argv[1], "imm")) group_imm();
+    else if (!strcmp(argv[1], "di_format")) group_di_format();
+    else if (!strcmp(argv[1], "di_data")) group_di_data();
+    else if (!strcmp(argv[1], "di_state")) group_di_state();
+    else if (!strcmp(argv[1], "di_overflow")) group_di_overflow();
+    else if (!strcmp(argv[1], "focus_loss")) group_focus_loss();
+    else if (!strcmp(argv[1], "di_exclusive")) group_di_exclusive();
     else { fprintf(stderr, "input_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);
