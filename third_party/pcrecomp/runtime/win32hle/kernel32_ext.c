@@ -110,11 +110,13 @@ static void k_CreateFileA(void) {
     const char *name = ASTR(0);
     uint32_t access = A32(1), disp = A32(4);
     char path[1024];
-    int exists = 0;
+    int exists = 0, in_place = 0;
     if (!name || !*name) { hle_set_last_error(ERROR_PATH_NOT_FOUND); RET(INVALID_HANDLE, 7); }
     if (is_device(name, path, sizeof path)) {
         if (!path[0]) { hle_set_last_error(ERROR_FILE_NOT_FOUND); RET(INVALID_HANDLE, 7); }
         exists = 1;
+    } else if (!(access & 0x40000000u) && (disp == 3 || disp == 4) && hle_host_path(name, path, sizeof path)) {
+        exists = in_place = 1;      /* a read-only open of a file that is there: in place, as Windows does */
     } else if ((access & 0x40000000u) || disp == 1 || disp == 2 || disp == 4) {
         /* a write or a create: under a mod's overlay, into the overlay (a file
          * opened to change in place is copied there first) */
@@ -130,7 +132,7 @@ static void k_CreateFileA(void) {
     switch (disp) {
     case 1: fl |= O_CREAT | O_EXCL; break;
     case 2: fl |= O_CREAT | O_TRUNC; break;
-    case 4: fl |= O_CREAT; break;
+    case 4: if (!in_place) fl |= O_CREAT; break;     /* never made where the guest only reads */
     case 5: fl |= O_TRUNC; break;
     default: break;
     }
