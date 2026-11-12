@@ -443,6 +443,30 @@ int main(void) {
         CHECK(in_child(c_load, err, sizeof err) == 4 && strstr(err, "reached openal32.dll: owned by a later plan"));
     }
 
+    /* the profile dialog's name field (plan 6 Task 6): code page 1252 has no DBCS lead bytes, and
+       PathGetCharTypeW gives shlwapi's GCT_* classes (0 invalid, 1 long names only, 3 both, 4 wild,
+       8 separator); a WCHAR is the low 16 bits of its argument slot */
+    {
+        static const uint32_t bytes[] = { 0x00, 0x41, 0x81, 0xE0, 0xFF, 0x12345681u };
+        for (size_t i = 0; i < sizeof bytes / sizeof *bytes; i++) {
+            uint32_t r = call("IsDBCSLeadByte", 1, bytes[i]);
+            if (r != 0) printf("FAIL IsDBCSLeadByte(0x%X) = %u\n", bytes[i], r), fails++;
+        }
+        CHECK(call("GetACP", 0) == 1252);
+        static const struct { uint32_t ch, want; } ct[] = {
+            { 'a', 3 }, { 'P', 3 }, { '0', 3 }, { '.', 3 }, { '~', 3 }, { 0xE9, 3 }, { '_', 3 }, { '-', 3 },
+            { 0x4E2D, 3 }, { 0x7F, 3 }, { 0xFFFF, 3 },
+            { ' ', 1 }, { ';', 1 }, { ',', 1 }, { '+', 1 }, { '=', 1 }, { '[', 1 }, { ']', 1 },
+            { '*', 4 }, { '?', 4 },
+            { '\\', 8 }, { '/', 8 }, { ':', 8 },
+            { 0x00, 0 }, { 0x09, 0 }, { 0x1F, 0 }, { '"', 0 }, { '<', 0 }, { '>', 0 }, { '|', 0 },
+            { 0xABCD002Au, 4 }, { 0x00010041u, 3 } };
+        for (size_t i = 0; i < sizeof ct / sizeof *ct; i++) {
+            uint32_t r = call("PathGetCharTypeW", 1, ct[i].ch);
+            if (r != ct[i].want) printf("FAIL PathGetCharTypeW(0x%X) = %u, want %u\n", ct[i].ch, r, ct[i].want), fails++;
+        }
+    }
+
     printf("shims selftest: %d failed\n", fails);
     return fails != 0;
 }

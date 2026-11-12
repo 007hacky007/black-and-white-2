@@ -52,6 +52,12 @@ void bw2_dinput8_register(void);
 void bw2_input_register(void);
 extern const win32hle_shim bw2_input_shims[];
 
+/* ---- script.c: BW2_INPUT_SCRIPT (plan 6 Task 6), a test and measurement switch ---- */
+/* From each DirectInput read, after the quit check and before its drain: pushes every script event
+ * whose read number is at most n and not yet pushed. The file is read at the first call; a bad line
+ * or a file that cannot be opened stops the run (d3d_fail). Unset, nothing happens. */
+void bw2_script_at_read(unsigned long long n);
+
 /* ---- cursor.c: the cursor policy (plan 6 Task 5) ---- */
 struct bw2_cursor_mode {
     int hidden;                          /* the Mac pointer hidden over the game */

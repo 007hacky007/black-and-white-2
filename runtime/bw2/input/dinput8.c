@@ -367,11 +367,12 @@ static unsigned long long count_read(void) {
     return reads;
 }
 
-/* What every read does first: the marker, the counter, the partial drain;
- * then a loss is reported once, and an unacquired device refuses. */
+/* What every read does first: the marker, the counter (and the quit check),
+ * the script's events up to this read (script.c), the partial drain; then a
+ * loss is reported once, and an unacquired device refuses. */
 static uint32_t begin_read(struct didevice *d) {
     first_read();
-    count_read();
+    bw2_script_at_read(count_read());
     bw2_in_drain_input();
     if (d->lost) { d->lost = 0; return DIERR_INPUTLOST; }
     return d->acquired ? DI_OK : DIERR_NOTACQUIRED;

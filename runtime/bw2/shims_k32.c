@@ -147,7 +147,12 @@ static void k_WaitForSingleObjectEx(void) {
     bw2_hle_shim("WaitForSingleObjectEx")();
 }
 
+/* IsDBCSLeadByte(b): FALSE for every byte. The ANSI code page is 1252 (GetACP's answer), a single-byte
+ * code page with no lead bytes. The profile dialog's name field asks once per WM_CHAR. */
+static void k_IsDBCSLeadByte(void) { RET(0, 1); }
+
 const win32hle_shim bw2_k32_shims[] = {
+    { "IsDBCSLeadByte",                        k_IsDBCSLeadByte },
     { "ReadFileEx",                            k_ReadFileEx },
     { "SleepEx",                               k_SleepEx },
     { "WaitForSingleObjectEx",                 k_WaitForSingleObjectEx },

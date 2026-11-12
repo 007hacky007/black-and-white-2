@@ -3,6 +3,7 @@ Plan 6 Task 1: the host input queue, the Windows messages it makes and IMM32.
 Plan 6 Task 2: the DirectInput mouse fed from the host input queue.
 Plan 6 Task 3: Mac events translated into the game's terms (translate.c).
 Plan 6 Task 5: the cursor policy (cursor.c) and the cursor shims.
+Plan 6 Task 6: BW2_INPUT_SCRIPT (script.c), pushed at the always-counting read counter.
 
 Each test runs one group of the selftest headless and expects "<group>: 0 failed"."""
 import os
@@ -27,11 +28,14 @@ def selftest(tmp_path_factory):
     return exe
 
 
-def run_group(exe, group, tmp_path, *args, quit_after=None):
+def run_group(exe, group, tmp_path, *args, quit_after=None, script=None):
     env = dict(os.environ, BW2_HEADLESS="1", BW2_SUPPORT=str(tmp_path / "support"))
     env.pop("BW2_QUIT_AFTER_READS", None)
+    env.pop("BW2_INPUT_SCRIPT", None)
     if quit_after is not None:
         env["BW2_QUIT_AFTER_READS"] = quit_after
+    if script is not None:
+        env["BW2_INPUT_SCRIPT"] = str(script)
     return subprocess.run([str(exe), group, *map(str, args)], capture_output=True, text=True, timeout=120,
                           cwd=tmp_path, env=env)
 
@@ -164,3 +168,73 @@ def test_window_size(selftest, tmp_path):
 @pytest.mark.parametrize("group", ["cursor_policy", "mode_switch", "cursor_warp", "clip", "cursor_image"])
 def test_cursor(selftest, tmp_path, group):
     check(selftest, group, tmp_path)
+
+
+# ---- plan 6 Task 6: scripted input ----
+
+SCRIPT = """# the test's script: read, verb, fields
+3 move 510 382
+5 down 0
+6 up 0
+
+7 key 8 0x0E down   # Backspace
+7 key 8 0x0E up
+9 move -88 45
+9 wheel -120
+"""
+
+
+def write_script(tmp_path, text, name="input.script"):
+    p = tmp_path / name
+    p.write_text(text)
+    return p
+
+
+def test_script(selftest, tmp_path):
+    # BW2_QUIT_AFTER_READS unset: the read numbers come from the always-counting read counter
+    r = run_group(selftest, "script", tmp_path, script=write_script(tmp_path, SCRIPT))
+    assert r.returncode == 0 and "script: 0 failed" in r.stdout, r.stdout[-4000:] + r.stderr[-4000:]
+    assert "script: read 9 answered (0 failed so far)" in r.stdout, r.stdout[-2000:]
+    assert "quit after" not in r.stderr, r.stderr[-2000:]
+
+
+def test_script_quit(selftest, tmp_path):
+    # the script and BW2_QUIT_AFTER_READS share the counter: the down on read 5, the exit at read 6,
+    # before that read's events
+    r = run_group(selftest, "script", tmp_path, script=write_script(tmp_path, SCRIPT), quit_after="6")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "[bw2] quit after 6 input reads (BW2_QUIT_AFTER_READS)" in r.stderr, r.stderr[-2000:]
+    assert "FAIL" not in r.stdout, r.stdout[-2000:]
+    assert "script: read 5 answered (0 failed so far)" in r.stdout, r.stdout[-2000:]
+    assert "script: read 6 asked" in r.stdout and "script: read 6 answered" not in r.stdout, r.stdout[-2000:]
+
+
+@pytest.mark.parametrize("group", ["script_reads", "script_nowin"])
+def test_script_direct(selftest, tmp_path, group):
+    # the group writes its own script to the path it is given and calls bw2_script_at_read itself
+    check(selftest, group, tmp_path, tmp_path / "direct.script")
+
+
+@pytest.mark.parametrize("text, words", [
+    ("2 jump 1 1\n", ["BW2_INPUT_SCRIPT line 1:", "jump"]),
+    ("5 move 1 1\n4 move 1 1\n", ["BW2_INPUT_SCRIPT line 2:"]),
+    ("1 wheel 100\n", ["BW2_INPUT_SCRIPT line 1:", "wheel"]),
+    ("1 down 7\n", ["BW2_INPUT_SCRIPT line 1:", "button"]),
+    ("# a comment\n\n1 move 1\n", ["BW2_INPUT_SCRIPT line 3:", "move"]),
+    ("1 close now\n", ["BW2_INPUT_SCRIPT line 1:", "close"]),
+    ("1 move 1 x\n", ["BW2_INPUT_SCRIPT line 1:", "'x'"]),
+    ("1 key 8 0x0E sideways\n", ["BW2_INPUT_SCRIPT line 1:", "sideways"]),
+    ("1 wheel 0\n", ["BW2_INPUT_SCRIPT line 1:", "wheel"]),
+    ("0 close\n", ["BW2_INPUT_SCRIPT line 1:", "read"]),
+    ("move 1 1\n", ["BW2_INPUT_SCRIPT line 1:"]),
+    (None, ["no-such.script", "BW2_INPUT_SCRIPT"]),
+])
+def test_script_bad(selftest, tmp_path, text, words):
+    # each in a child: the first read stops the run through d3d_fail, naming the line (or the file)
+    path = tmp_path / "no-such.script" if text is None else write_script(tmp_path, text)
+    r = run_group(selftest, "script", tmp_path, script=path)
+    assert r.returncode != 0 and "script: read 1 answered" not in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "script: read 1 asked" in r.stdout, r.stdout[-2000:]
+    assert "FATAL: d3d9: " in r.stderr, r.stderr[-2000:]
+    for w in words:
+        assert w in r.stderr, r.stderr[-2000:]

@@ -70,7 +70,28 @@ static void user_name(int wide) {
 static void k_GetUserNameA(void) { user_name(0); }
 static void k_GetUserNameW(void) { user_name(1); }
 
+/* PathGetCharTypeW(ch): shlwapi's GCT_* class of a path character. Control characters and " < > | are
+ * GCT_INVALID; * ? are GCT_WILD; \ / : are GCT_SEPARATOR; space and ; , + = [ ] are valid in long names
+ * only (GCT_LFNCHAR); every other character, the non-ASCII range included, is valid in both long and
+ * short names (GCT_LFNCHAR | GCT_SHORTCHAR). The WCHAR is the low 16 bits of its argument slot. The
+ * profile dialog checks each character of the name with it. */
+#define GCT_INVALID   0u
+#define GCT_LFNCHAR   1u
+#define GCT_SHORTCHAR 2u
+#define GCT_WILD      4u
+#define GCT_SEPARATOR 8u
+static void k_PathGetCharTypeW(void) {
+    uint32_t ch = A32(0) & 0xFFFFu, r;
+    if (ch < 0x20u || ch == '"' || ch == '<' || ch == '>' || ch == '|') r = GCT_INVALID;
+    else if (ch == '*' || ch == '?') r = GCT_WILD;
+    else if (ch == '\\' || ch == '/' || ch == ':') r = GCT_SEPARATOR;
+    else if (ch < 0x80u && strchr(" ;,+=[]", (int)ch)) r = GCT_LFNCHAR;
+    else r = GCT_LFNCHAR | GCT_SHORTCHAR;
+    RET(r, 1);
+}
+
 const win32hle_shim bw2_shell_shims[] = {
+    { "PathGetCharTypeW",     k_PathGetCharTypeW },
     { "SHGetFolderPathA",     k_SHGetFolderPathA },
     { "SHCreateDirectoryExA", k_SHCreateDirectoryExA },
     { "GetUserNameA",         k_GetUserNameA },

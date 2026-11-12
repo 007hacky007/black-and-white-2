@@ -2160,6 +2160,184 @@ static void group_cursor_image(void) {
     CHECKEQ(rgba[(31 * 32 + 31) * 4 + 3], 0);
 }
 
+/* ---- plan 6 Task 6: BW2_INPUT_SCRIPT (script.c) ---- */
+
+#define WM_RBUTTONDOWN 0x0204u
+#define WM_RBUTTONUP 0x0205u
+
+/* What the mouse sink is given, then on to the DirectInput mouse. */
+static struct bw2_in_event g_ss[64];
+static int g_nss;
+static void script_sink(const struct bw2_in_event *e) {
+    if (g_nss < 64) g_ss[g_nss] = *e;
+    g_nss++;
+    bw2_dinput8_sink(e);
+}
+static void expect_sunk(int line, int i, enum bw2_in_kind kind, int x, int y, int a, int b) {
+    /* a, b: dx, dy for a MOVE; button, down for a BUTTON; the wheel (a) for a WHEEL */
+    if (i >= g_nss || i >= 64) { printf("FAIL %s:%d: no sunk event %d (%d)\n", __FILE__, line, i, g_nss); fails++; return; }
+    const struct bw2_in_event *e = &g_ss[i];
+    int ok = e->kind == kind && e->x == x && e->y == y;
+    if (kind == BW2_IN_MOVE) ok = ok && e->dx == a && e->dy == b;
+    if (kind == BW2_IN_BUTTON) ok = ok && e->button == a && e->down == b;
+    if (kind == BW2_IN_WHEEL) ok = ok && e->wheel == a;
+    if (ok) return;
+    printf("FAIL %s:%d: sunk %d is kind %d at (%d, %d), d (%d, %d), button %d down %d, wheel %d\n", __FILE__, line, i,
+           (int)e->kind, e->x, e->y, e->dx, e->dy, e->button, e->down, e->wheel);
+    fails++;
+}
+#define EXPECT_SUNK(...) expect_sunk(__LINE__, __VA_ARGS__)
+
+/* script: the test's script (tests/test_input.py SCRIPT) through the game's mouse, read by read. */
+static void group_script(void) {
+    uint32_t di = new_di(), dev = game_mouse(di, 512);
+    bw2_in_set_window(HWND);
+    hle_proc_hook = recorder;
+    pump_all();
+    g_nss = 0;
+    bw2_in_set_mouse_sink(script_sink);
+    uint32_t buf = gmem(20 * 512), n;
+    for (int r = 1; r <= 9; r++) {
+        printf("script: read %d asked (%d failed so far)\n", r, fails);
+        fflush(stdout);
+        rec_reset();
+        memset(hle_ptr(buf), 0xAB, 20 * 512);
+        n = 512;
+        CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+        switch (r) {
+        case 3:                                          /* 3 move 510 382: one sequence number */
+            CHECKEQ(n, 2);
+            CHECKEQ(el(buf, 20, 0, EL_OFS), 0);
+            CHECKEQ(el(buf, 20, 0, EL_DATA), 510);
+            CHECKEQ(el(buf, 20, 1, EL_OFS), 4);
+            CHECKEQ(el(buf, 20, 1, EL_DATA), 382);
+            CHECKEQ(el(buf, 20, 0, EL_SEQ), el(buf, 20, 1, EL_SEQ));
+            break;
+        case 5:                                          /* 5 down 0 */
+        case 6:                                          /* 6 up 0 */
+            CHECKEQ(n, 1);
+            CHECKEQ(el(buf, 20, 0, EL_OFS), 12);
+            CHECKEQ(el(buf, 20, 0, EL_DATA), r == 5 ? 0x80u : 0u);
+            break;
+        case 9:                                          /* 9 move -88 45, 9 wheel -120 */
+            CHECKEQ(n, 3);
+            CHECKEQ(el(buf, 20, 0, EL_OFS), 0);
+            CHECKEQ(el(buf, 20, 0, EL_DATA), (uint32_t)-88);
+            CHECKEQ(el(buf, 20, 1, EL_OFS), 4);
+            CHECKEQ(el(buf, 20, 1, EL_DATA), 45);
+            CHECKEQ(el(buf, 20, 0, EL_SEQ), el(buf, 20, 1, EL_SEQ));
+            CHECKEQ(el(buf, 20, 2, EL_OFS), 8);
+            CHECKEQ(el(buf, 20, 2, EL_DATA), (uint32_t)-120);
+            CHECK(el(buf, 20, 2, EL_SEQ) > el(buf, 20, 1, EL_SEQ));
+            break;
+        default:
+            CHECKEQ(n, 0);
+        }
+        /* the keys of read 7 were posted by its drain; the pump hands them to the window */
+        CHECKEQ(g_nrec, 0);
+        pump_all();
+        if (r == 7) {
+            /* TranslateMessage's WM_CHAR goes after input already queued (Task 1's ruling), so a down
+             * and an up pushed at one read give the character after the up */
+            EXPECT(3, WM_KEYDOWN, 8u, 0x000E0001u, WM_KEYUP, 8u, 0xC00E0001u, WM_CHAR, 8u, 0x000E0001u);
+            if (g_nrec) CHECKEQ(g_rec[0].h, HWND);
+        } else
+            EXPECT(0);                                   /* the exclusive mouse: no mouse messages */
+        printf("script: read %d answered (%d failed so far)\n", r, fails);
+        fflush(stdout);
+    }
+    /* each mouse event at the running client point */
+    CHECKEQ(g_nss, 5);
+    EXPECT_SUNK(0, BW2_IN_MOVE, 510, 382, 510, 382);
+    EXPECT_SUNK(1, BW2_IN_BUTTON, 510, 382, 0, 1);
+    EXPECT_SUNK(2, BW2_IN_BUTTON, 510, 382, 0, 0);
+    EXPECT_SUNK(3, BW2_IN_MOVE, 422, 427, -88, 45);
+    EXPECT_SUNK(4, BW2_IN_WHEEL, 422, 427, -120, 0);
+    bw2_in_set_mouse_sink(bw2_dinput8_sink);
+    hle_proc_hook = NULL;
+    CHECKEQ(vcall(dev, DD_Unacquire, 0), DI_OK);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    CHECKEQ(vcall(di, 2, 0), 0);
+}
+
+static void write_text(const char *path, const char *text) {
+    FILE *f = fopen(path, "w");
+    if (!f) { printf("FAIL cannot write %s\n", path); fails++; return; }
+    fputs(text, f);
+    fclose(f);
+}
+
+/* script_reads: a read pushes every event up to its number not yet pushed, in file order; the
+ * running point is clamped to the game window's client rect; buttons, wheel, keys and close. */
+static void group_script_reads(const char *path) {
+    write_text(path, "2 move 5000 -5000\n"
+                     "2 down 1\n"
+                     "4 move -10 10   # back inside\n"
+                     "4 key 0x25 0x4B down ext\n"
+                     "4 key 0x25 0x4B up ext\n"
+                     "6 wheel 240\n"
+                     "8 up 1\n"
+                     "8 close\n");
+    setenv("BW2_INPUT_SCRIPT", path, 1);
+    make_window(0, 0, 0, 320, 240);                      /* the first window, not the game's */
+    uint32_t a = make_window(0, 50, 50, 1024, 768);
+    bw2_in_set_window(a);
+    hle_proc_hook = recorder;
+    pump_all();
+    g_nss = 0;
+    bw2_in_set_mouse_sink(script_sink);
+    rec_reset();
+    bw2_script_at_read(1);
+    bw2_in_drain_input();
+    CHECKEQ(g_nss, 0);
+    bw2_script_at_read(3);                               /* read 2's events, at read 3 */
+    bw2_in_drain_input();
+    CHECKEQ(g_nss, 2);
+    EXPECT_SUNK(0, BW2_IN_MOVE, 1023, 0, 5000, -5000);
+    EXPECT_SUNK(1, BW2_IN_BUTTON, 1023, 0, 1, 1);
+    bw2_script_at_read(3);                               /* nothing twice */
+    bw2_in_drain_input();
+    CHECKEQ(g_nss, 2);
+    pump_all();
+    EXPECT(2, WM_MOUSEMOVE, ANY, 0x000003FFu, WM_RBUTTONDOWN, ANY, 0x000003FFu);
+    rec_reset();
+    bw2_script_at_read(7);                               /* reads 4 and 6 */
+    bw2_in_drain_input();
+    CHECKEQ(g_nss, 4);
+    EXPECT_SUNK(2, BW2_IN_MOVE, 1013, 10, -10, 10);
+    EXPECT_SUNK(3, BW2_IN_WHEEL, 1013, 10, 240, 0);
+    pump_all();
+    EXPECT(4, WM_MOUSEMOVE, ANY, 0x000A03F5u, WM_KEYDOWN, 0x25u, 0x014B0001u, WM_KEYUP, 0x25u, 0xC14B0001u,
+           WM_MOUSEWHEEL, ANY, ((60u << 16) | 1063u));
+    if (g_nrec == 4) CHECKEQ(g_rec[3].w >> 16, 240);
+    rec_reset();
+    bw2_script_at_read(100);
+    bw2_in_drain_input();
+    CHECKEQ(g_nss, 5);
+    EXPECT_SUNK(4, BW2_IN_BUTTON, 1013, 10, 1, 0);
+    pump_all();
+    EXPECT(2, WM_RBUTTONUP, ANY, 0x000A03F5u, WM_CLOSE, 0u, 0u);
+    if (g_nrec == 2) CHECKEQ(g_rec[1].h, a);
+    bw2_in_set_mouse_sink(bw2_dinput8_sink);
+    hle_proc_hook = NULL;
+}
+
+/* script_nowin: with no window the running point is not clamped. */
+static void group_script_nowin(const char *path) {
+    write_text(path, "1 move -5 -7\n1 down 2\n2 move 3000 3000\n");
+    setenv("BW2_INPUT_SCRIPT", path, 1);
+    CHECKEQ(hle_first_hwnd(), 0);
+    g_nss = 0;
+    bw2_in_set_mouse_sink(script_sink);
+    bw2_script_at_read(2);
+    bw2_in_drain_input();
+    CHECKEQ(g_nss, 3);
+    EXPECT_SUNK(0, BW2_IN_MOVE, -5, -7, -5, -7);
+    EXPECT_SUNK(1, BW2_IN_BUTTON, -5, -7, 2, 1);
+    EXPECT_SUNK(2, BW2_IN_MOVE, 2995, 2993, 3000, 3000);
+    bw2_in_set_mouse_sink(bw2_dinput8_sink);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: input_selftest <group> [arg]\n"); return 2; }
     hle_mem_init();
@@ -2200,6 +2378,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "cursor_warp")) group_cursor_warp();
     else if (!strcmp(argv[1], "clip")) group_clip();
     else if (!strcmp(argv[1], "cursor_image")) group_cursor_image();
+    else if (!strcmp(argv[1], "script")) group_script();
+    else if (!strcmp(argv[1], "script_reads") && argc > 2) group_script_reads(argv[2]);
+    else if (!strcmp(argv[1], "script_nowin") && argc > 2) group_script_nowin(argv[2]);
     else { fprintf(stderr, "input_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);
