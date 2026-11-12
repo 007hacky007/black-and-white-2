@@ -142,15 +142,16 @@ static void expect_stop(void (*fn)(void), const char *want, const char *what) {
 /* ---- the device ---- */
 
 static uint32_t g_pp;
-static uint32_t new_device(void) {
+static uint32_t new_device_sized(uint32_t w, uint32_t h) {
     uint32_t d3d = call("Direct3DCreate9", 1, 32u);
     uint32_t pp = gmem(56), out = gmem(4);
-    MEM32(pp + 0) = 64, MEM32(pp + 4) = 64, MEM32(pp + 8) = 22, MEM32(pp + 12) = 1, MEM32(pp + 24) = 1;
+    MEM32(pp + 0) = w, MEM32(pp + 4) = h, MEM32(pp + 8) = 22, MEM32(pp + 12) = 1, MEM32(pp + 24) = 1;
     MEM32(pp + 28) = 0x10001u, MEM32(pp + 32) = 1, MEM32(pp + 36) = 1, MEM32(pp + 40) = 75;
     g_pp = pp;
     CHECKEQ(mcall(d3d, "IDirect3D9", "CreateDevice", 6, 0u, 1u, 0x10001u, 0x40u, pp, out), D3D_OK);
     return MEM32(out);
 }
+static uint32_t new_device(void) { return new_device_sized(64, 64); }
 static uint32_t argb_target(uint32_t dev) {
     uint32_t out = gmem(4);
     CHECKEQ(DV(dev, "CreateRenderTarget", 8, 64u, 64u, 21u, 0u, 0u, 0u, out, 0u), D3D_OK);
@@ -159,17 +160,19 @@ static uint32_t argb_target(uint32_t dev) {
 }
 static void clear(uint32_t dev, uint32_t c) { CHECKEQ(DV(dev, "Clear", 6, 0u, 0u, 7u, c, f2u(1.0f), 0u), D3D_OK); }
 static uint32_t g_px[64 * 64];
-static void read_rt(uint32_t dev, uint32_t rt) {
+/* a w x h render target's pixels into px */
+static void read_into(uint32_t dev, uint32_t rt, uint32_t *px, uint32_t w, uint32_t h) {
     uint32_t desc = gmem(32), out = gmem(4);
     CHECKEQ(mcall(rt, "IDirect3DSurface9", "GetDesc", 1, desc), D3D_OK);
-    CHECKEQ(DV(dev, "CreateOffscreenPlainSurface", 6, 64u, 64u, MEM32(desc), 2u, out, 0u), D3D_OK);
+    CHECKEQ(DV(dev, "CreateOffscreenPlainSurface", 6, w, h, MEM32(desc), 2u, out, 0u), D3D_OK);
     uint32_t s = MEM32(out), lr = gmem(8);
     CHECKEQ(DV(dev, "GetRenderTargetData", 2, rt, s), D3D_OK);
     CHECKEQ(mcall(s, "IDirect3DSurface9", "LockRect", 3, lr, 0u, 0x10u), D3D_OK);
-    for (uint32_t y = 0; y < 64; y++) memcpy(g_px + y * 64, hle_ptr(MEM32(lr + 4) + y * MEM32(lr)), 64 * 4);
+    for (uint32_t y = 0; y < h; y++) memcpy(px + y * w, hle_ptr(MEM32(lr + 4) + y * MEM32(lr)), w * 4);
     CHECKEQ(mcall(s, "IDirect3DSurface9", "UnlockRect", 0), D3D_OK);
     release(s);
 }
+static void read_rt(uint32_t dev, uint32_t rt) { read_into(dev, rt, g_px, 64, 64); }
 /* an A8R8G8B8 managed texture of w x h texels */
 static uint32_t texture(uint32_t dev, uint32_t w, uint32_t h, const uint32_t *texels) {
     uint32_t out = gmem(4), lr = gmem(8);
@@ -939,6 +942,7 @@ static void group_font_raster(void) {
     bw2_font_close(f);
 }
 
+static void font_cp1252_draw(void);
 static void group_font_cp1252(void) {
     CHECKEQ(bw2_cp1252(0x41), 0x41);
     CHECKEQ(bw2_cp1252(0x80), 0x20AC);
@@ -949,6 +953,709 @@ static void group_font_cp1252(void) {
     CHECKEQ(bw2_cp1252(0x8D), 0x8D), CHECKEQ(bw2_cp1252(0x8F), 0x8F), CHECKEQ(bw2_cp1252(0x90), 0x90);
     CHECKEQ(bw2_cp1252(0x9D), 0x9D);
     CHECKEQ(bw2_cp1252(0x7F), 0x7F), CHECKEQ(bw2_cp1252(0xA0), 0xA0), CHECKEQ(bw2_cp1252(0xFF), 0xFF);
+    if (g_arg[0]) font_cp1252_draw();
+}
+
+/* ---- ID3DXFont (d3dx_font.c): a 256x64 A8R8G8B8 target. argv[0] is the Mac's Arial Narrow renamed
+ * "BW2 Test Face", added through AddFontMemResourceEx, so the memory path is the one drawn from. The
+ * expectations come from the same face opened through font.h. ---- */
+
+#define FW 256u
+#define FH 64u
+#define TEST_FACE "BW2 Test Face"
+#define DT_CENTER 0x1u
+#define DT_RIGHT 0x2u
+#define DT_VCENTER 0x4u
+#define DT_BOTTOM 0x8u
+#define DT_WORDBREAK 0x10u
+#define DT_SINGLELINE 0x20u
+#define DT_EXPANDTABS 0x40u
+#define DT_NOCLIP 0x100u
+#define DT_CALCRECT 0x400u
+#define WHITE 0xFFFFFFFFu
+#define BLACK 0xFF000000u
+#define FN(f, m, n, ...) mcall(f, "ID3DXFont", m, n, ##__VA_ARGS__)
+
+static uint32_t g_fpx[FW * FH];
+static uint32_t wide_target(uint32_t dev) {
+    uint32_t out = gmem(4);
+    CHECKEQ(DV(dev, "CreateRenderTarget", 8, FW, FH, 21u, 0u, 0u, 0u, out, 0u), D3D_OK);
+    CHECKEQ(DV(dev, "SetRenderTarget", 2, 0u, MEM32(out)), D3D_OK);
+    return MEM32(out);
+}
+static void read_wide(uint32_t dev, uint32_t rt) { read_into(dev, rt, g_fpx, FW, FH); }
+static uint32_t create_font(uint32_t dev, const char *face, int32_t h, uint32_t width, uint32_t mips, uint32_t charset) {
+    uint32_t out = gmem(4);
+    CHECKEQ(call("D3DXCreateFontA", 12, dev, (uint32_t)h, width, 400u, mips, 0u, charset, 7u, 4u, 0u,
+                 gbytes(face, (uint32_t)strlen(face)), out), D3D_OK);
+    return MEM32(out);
+}
+static uint32_t new_font(uint32_t dev, const char *face, int32_t h) {
+    uint32_t f = create_font(dev, face, h, 0, 1, 1);
+    CHECK(f != 0);
+    return f;
+}
+static int32_t text_a(uint32_t font, uint32_t sprite, const char *s, int32_t count, uint32_t rc, uint32_t fmt,
+                      uint32_t color) {
+    return (int32_t)FN(font, "DrawTextA", 6, sprite, gbytes(s, (uint32_t)strlen(s)), (uint32_t)count, rc, fmt, color);
+}
+static int32_t text_w(uint32_t font, uint32_t sprite, const uint16_t *s, int32_t count, uint32_t rc, uint32_t fmt,
+                      uint32_t color) {
+    uint32_t n = 0;
+    while (s[n]) n++;
+    return (int32_t)FN(font, "DrawTextW", 6, sprite, gbytes(s, 2 * n + 2), (uint32_t)count, rc, fmt, color);
+}
+static int32_t rc_at(uint32_t r, int i) { return (int32_t)MEM32(r + 4u * (uint32_t)i); }
+
+/* where a line of Windows-1252 text puts its glyphs: the black box's top-left, from the pen at x */
+static uint32_t expect_line(const struct bw2_font *ref, const char *s, int32_t x, int32_t baseline,
+                            struct d3dx_glyph_pos *out) {
+    uint32_t n = 0;
+    for (; *s; s++) {
+        uint32_t g = bw2_font_glyph(ref, bw2_cp1252((uint8_t)*s));
+        struct bw2_glyph b;
+        bw2_font_raster(ref, g, &b);
+        out[n++] = (struct d3dx_glyph_pos){ g, x + b.left, baseline - b.top };
+        free(b.alpha);
+        x += bw2_font_advance(ref, g);
+    }
+    return n;
+}
+static int32_t width_of(const struct bw2_font *ref, const char *s) {
+    int32_t w = 0;
+    for (; *s; s++) w += bw2_font_advance(ref, bw2_font_glyph(ref, bw2_cp1252((uint8_t)*s)));
+    return w;
+}
+static struct d3dx_glyph_pos g_lay[1024];
+static uint32_t layout(void) {
+    uint32_t n = d3dx_font_last_layout(g_lay, 1024);
+    CHECK(n <= 1024);
+    return n;
+}
+static void expect_layout(const struct d3dx_glyph_pos *want, uint32_t n, const char *what) {
+    uint32_t k = layout();
+    if (k != n) { printf("FAIL %s: %u glyphs placed, want %u\n", what, k, n); fails++; return; }
+    for (uint32_t i = 0; i < n; i++)
+        if (g_lay[i].glyph != want[i].glyph || g_lay[i].x != want[i].x || g_lay[i].y != want[i].y) {
+            printf("FAIL %s: glyph %u is %u at (%d,%d), want %u at (%d,%d)\n", what, i, g_lay[i].glyph, g_lay[i].x,
+                   g_lay[i].y, want[i].glyph, want[i].x, want[i].y);
+            fails++;
+            return;
+        }
+}
+/* The whole target against the glyphs' coverage alpha-blended in colour over black, in order (within
+ * 2/255); a pixel outside every black box (or outside clip, l t r b) is black. */
+static int expect_text(const struct bw2_font *ref, const struct d3dx_glyph_pos *p, uint32_t n, uint32_t color,
+                       const int32_t *clip, const char *what) {
+    static float want[FW * FH][3];
+    memset(want, 0, sizeof want);
+    float c[3] = { (float)(color >> 16 & 0xFF), (float)(color >> 8 & 0xFF), (float)(color & 0xFF) };
+    float ca = (float)(color >> 24) / 255.0f;
+    for (uint32_t k = 0; k < n; k++) {
+        struct bw2_glyph g;
+        bw2_font_raster(ref, p[k].glyph, &g);
+        for (uint32_t yy = 0; yy < g.h; yy++)
+            for (uint32_t xx = 0; xx < g.w; xx++) {
+                int32_t X = p[k].x + (int32_t)xx, Y = p[k].y + (int32_t)yy;
+                if (X < 0 || Y < 0 || X >= (int32_t)FW || Y >= (int32_t)FH) continue;
+                if (clip && (X < clip[0] || Y < clip[1] || X >= clip[2] || Y >= clip[3])) continue;
+                float a = (float)g.alpha[yy * g.w + xx] / 255.0f * ca;
+                for (int i = 0; i < 3; i++) want[Y * FW + X][i] = c[i] * a + want[Y * FW + X][i] * (1 - a);
+            }
+        free(g.alpha);
+    }
+    int bad = 0;
+    for (uint32_t i = 0; i < FW * FH; i++)
+        for (int ch = 0; ch < 3; ch++) {
+            int got = (int)(g_fpx[i] >> (16 - 8 * ch) & 0xFF), w = (int)lroundf(want[i][ch]);
+            if (abs(got - w) > 2) {
+                if (bad++ < 6)
+                    printf("FAIL %s: pixel (%u,%u) 0x%08X, want %d in channel %d\n", what, i % FW, i / FW, g_fpx[i], w,
+                           ch);
+                break;
+            }
+        }
+    if (bad > 6) printf("FAIL %s: %d pixels in all\n", what, bad);
+    fails += bad;
+    return bad == 0;
+}
+static void print_tma(const char *label, uint32_t tm) {
+    const uint8_t *b = hle_ptr(tm + 44);
+    printf("tm %s height=%d ascent=%d descent=%d internal_leading=%d external_leading=%d ave_char_width=%d "
+           "max_char_width=%d weight=%d overhang=%d aspect_x=%d aspect_y=%d first=%u last=%u deflt=%u brk=%u "
+           "italic=%u underlined=%u struck_out=%u pitch_family=%u charset=%u\n", label,
+           (int32_t)MEM32(tm), (int32_t)MEM32(tm + 4), (int32_t)MEM32(tm + 8), (int32_t)MEM32(tm + 12),
+           (int32_t)MEM32(tm + 16), (int32_t)MEM32(tm + 20), (int32_t)MEM32(tm + 24), (int32_t)MEM32(tm + 28),
+           (int32_t)MEM32(tm + 32), (int32_t)MEM32(tm + 36), (int32_t)MEM32(tm + 40), b[0], b[1], b[2], b[3], b[4],
+           b[5], b[6], b[7], b[8]);
+}
+
+/* ---- font_create ---- */
+
+/* CoreText is not safe in a fork child of a process with Metal's threads, so the checks that open a face
+ * after the stop run as processes of their own from tests/test_ui.py: font_log (with and without
+ * BW2_FONT_LOG=1) and font_noface. */
+static uint32_t g_fdev, g_font;
+static void c_font_width(void) { create_font(g_fdev, TEST_FACE, -16, 5, 1, 1); }
+static void c_font_mips(void) { create_font(g_fdev, TEST_FACE, -16, 0, 2, 1); }
+static void c_font_charset(void) { create_font(g_fdev, TEST_FACE, -16, 0, 1, 128); }
+
+static void group_font_log(void) {
+    add_ok(g_arg[0]);
+    uint32_t dev = new_device_sized(FW, FH);
+    release(new_font(dev, TEST_FACE, -16));
+    release(new_font(dev, "Courier New", -16));
+}
+static void group_font_noface(void) {                   /* stops */
+    add_ok(g_arg[0]);
+    create_font(new_device_sized(FW, FH), "No Such Face", -16, 0, 1, 1);
+}
+
+static void group_font_create(void) {
+    add_ok(g_arg[0]);
+    uint32_t dev = g_fdev = new_device_sized(FW, FH), out = gmem(4);
+    CHECKEQ(call("D3DXCreateFontA", 12, 0u, (uint32_t)-16, 0u, 400u, 1u, 0u, 1u, 7u, 4u, 0u, gbytes("x", 1), out),
+            D3DERR_INVALIDCALL);
+    /* the game's call */
+    uint32_t f = new_font(dev, TEST_FACE, -16);
+    if (!f) return;
+    uint32_t r0 = refs(dev);
+    CHECKEQ(FN(f, "GetDevice", 1, out), D3D_OK);
+    CHECKEQ(MEM32(out), dev);
+    CHECKEQ(refs(dev), r0 + 1);
+    release(dev);
+    uint32_t d = gmem(96);
+    memset(hle_ptr(d), 0xCC, 96);
+    CHECKEQ(FN(f, "GetDescA", 1, d), D3D_OK);
+    const uint8_t *b = hle_ptr(d);
+    CHECKEQ(MEM32(d), (uint32_t)-16), CHECKEQ(MEM32(d + 4), 0), CHECKEQ(MEM32(d + 8), 400);
+    CHECKEQ(MEM32(d + 12), 1), CHECKEQ(MEM32(d + 16), 0);
+    CHECKEQ(b[20], 1), CHECKEQ(b[21], 7), CHECKEQ(b[22], 4), CHECKEQ(b[23], 0);
+    CHECK(!memcmp(b + 24, TEST_FACE, sizeof TEST_FACE));
+    for (int i = 24 + (int)sizeof TEST_FACE; i < 56; i++) CHECKEQ(b[i], 0);
+    CHECKEQ(b[56], 0xCC);                                              /* 56 bytes, no more */
+    memset(hle_ptr(d), 0xCC, 96);
+    CHECKEQ(FN(f, "GetDescW", 1, d), D3D_OK);
+    CHECKEQ(MEM32(d), (uint32_t)-16), CHECKEQ(MEM32(d + 8), 400), CHECKEQ(b[20], 1), CHECKEQ(b[22], 4);
+    for (int i = 0; i < 32; i++)
+        CHECKEQ(b[24 + 2 * i] | b[25 + 2 * i] << 8, i < (int)sizeof TEST_FACE - 1 ? (uint8_t)TEST_FACE[i] : 0);
+    CHECKEQ(b[88], 0xCC);
+    CHECKEQ(FN(f, "GetDescA", 1, 0u), D3DERR_INVALIDCALL);
+    /* TEXTMETRICA (56 bytes), and TEXTMETRICW (60) with the same numbers */
+    uint32_t ta = gmem(64), tw = gmem(64);
+    memset(hle_ptr(ta), 0xCC, 64), memset(hle_ptr(tw), 0xCC, 64);
+    CHECKEQ(FN(f, "GetTextMetricsA", 1, ta), 1);
+    CHECKEQ(FN(f, "GetTextMetricsW", 1, tw), 1);
+    CHECKEQ(FN(f, "GetTextMetricsA", 1, 0u), 0);
+    print_tma("a", ta);
+    const uint8_t *A = hle_ptr(ta), *W = hle_ptr(tw);
+    CHECK(!memcmp(A, W, 44));
+    for (int i = 0; i < 4; i++) CHECKEQ(W[44 + 2 * i] | W[45 + 2 * i] << 8, A[44 + i]);
+    CHECK(!memcmp(W + 52, A + 48, 5));
+    CHECKEQ(A[56], 0xCC), CHECKEQ(W[60], 0xCC);
+    struct bw2_font *ref = OPEN(TEST_FACE, -16, 400, 0);
+    if (ref) CHECKEQ(MEM32(ta), bw2_font_metrics(ref)->height), bw2_font_close(ref);
+    /* the arguments this layer does not handle stop */
+    expect_stop(c_font_width, "D3DXCreateFontA: Width 5", "Width 5");
+    expect_stop(c_font_mips, "D3DXCreateFontA: MipLevels 2", "MipLevels 2");
+    expect_stop(c_font_charset, "D3DXCreateFontA: CharSet 128", "CharSet 128");
+    release(f);
+}
+
+/* ---- font_binding: a face binds at D3DXCreateFontA. argv: Arial Narrow renamed "Courier New" ---- */
+
+static void group_font_binding(void) {
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), ta = gmem(64), tb = gmem(64);
+    uint32_t before = new_font(dev, "Courier New", -16);
+    CHECKEQ(FN(before, "GetTextMetricsA", 1, ta), 1);
+    print_tma("system", ta);
+    uint32_t h = add_ok(g_arg[0]);
+    CHECKEQ(FN(before, "GetTextMetricsA", 1, tb), 1);
+    CHECK(!memcmp(hle_ptr(ta), hle_ptr(tb), 56));                      /* still the system face */
+    uint32_t after = new_font(dev, "Courier New", -16);
+    CHECKEQ(FN(after, "GetTextMetricsA", 1, tb), 1);
+    print_tma("memory", tb);
+    CHECK(memcmp(hle_ptr(ta), hle_ptr(tb), 56) != 0);
+    struct bw2_font *ref = OPEN("Courier New", -16, 400, 0);           /* the memory face, while it is there */
+    CHECK(is_memory(ref));
+    CHECKEQ(gdi_call("RemoveFontMemResourceEx", 1, h), 1);
+    if (!ref) return;
+    /* removed: the font made from it still draws its glyphs (none cached before) */
+    struct d3dx_glyph_pos want[8];
+    uint32_t n = expect_line(ref, "Hi", 4, 4 + bw2_font_metrics(ref)->ascent, want);
+    clear(dev, BLACK);
+    CHECKEQ(text_a(after, 0, "Hi", -1, rect(4, 4, 200, 40), DT_NOCLIP, WHITE), bw2_font_metrics(ref)->height);
+    read_wide(dev, rt);
+    expect_text(ref, want, n, WHITE, NULL, "drawn after RemoveFontMemResourceEx");
+    int lit = 0;
+    for (uint32_t i = 0; i < FW * FH; i++) lit += (g_fpx[i] & 0xFFFFFF) != 0;
+    CHECK(lit > 20);
+    bw2_font_close(ref);
+    release(before), release(after), release(rt);
+}
+
+/* ---- font_measure: the game's DT_CALCRECT call ---- */
+
+static void group_font_measure(void) {
+    add_ok(g_arg[0]);
+    struct bw2_font *ref = OPEN(TEST_FACE, -16, 400, 0);
+    if (!ref) return;
+    const struct bw2_tm *tm = bw2_font_metrics(ref);
+    int32_t h = tm->height, adv = bw2_font_advance(ref, bw2_font_glyph(ref, 'X'));
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), f = new_font(dev, TEST_FACE, -16);
+    clear(dev, BLACK);
+    uint32_t live0 = d3d_live_count(), n0 = d3dx_sprite_draw_calls();
+    static const uint32_t fmts[2] = { 0x524u, 0x528u };                /* DT_VCENTER, then DT_BOTTOM */
+    struct d3dx_glyph_pos want[2];
+    for (int k = 0; k < 2; k++) {
+        uint32_t r = rect(0, 0, 0, 0);
+        CHECKEQ(text_a(f, 0, "X", 1, r, fmts[k], 0u), h);
+        CHECKEQ(rc_at(r, 0), 0), CHECKEQ(rc_at(r, 1), 0), CHECKEQ(rc_at(r, 2), adv), CHECKEQ(rc_at(r, 3), h);
+        expect_layout(want, expect_line(ref, "X", 0, tm->ascent, want), "measured X");
+        r = rect(10, 20, 10, 20);
+        CHECKEQ(text_a(f, 0, "X", 1, r, fmts[k], 0u), h);
+        CHECKEQ(rc_at(r, 0), 10), CHECKEQ(rc_at(r, 1), 20), CHECKEQ(rc_at(r, 2), 10 + adv), CHECKEQ(rc_at(r, 3), 20 + h);
+    }
+    /* two lines, the widest one's width */
+    uint32_t r = rect(0, 0, 0, 0);
+    CHECKEQ(text_a(f, 0, "ab\nabc", -1, r, DT_CALCRECT, 0u), 2 * h);
+    CHECKEQ(rc_at(r, 2), width_of(ref, "abc")), CHECKEQ(rc_at(r, 3), 2 * h);
+    /* count 0: 0, the rect as it was */
+    r = rect(1, 2, 3, 4);
+    CHECKEQ(text_a(f, 0, "X", 0, r, DT_CALCRECT, 0u), 0);
+    CHECKEQ(rc_at(r, 2), 3), CHECKEQ(rc_at(r, 3), 4);
+    CHECKEQ(layout(), 0);
+    /* nothing drawn, no texture made */
+    CHECKEQ(d3d_live_count(), live0);
+    CHECKEQ(d3dx_sprite_draw_calls(), n0);
+    read_wide(dev, rt);
+    int changed = 0;
+    for (uint32_t i = 0; i < FW * FH; i++) changed += g_fpx[i] != BLACK;
+    CHECKEQ(changed, 0);
+    bw2_font_close(ref);
+    release(f), release(rt);
+}
+
+/* ---- font_draw ---- */
+
+static void group_font_draw(void) {
+    add_ok(g_arg[0]);
+    struct bw2_font *ref = OPEN(TEST_FACE, -16, 400, 0);
+    if (!ref) return;
+    const struct bw2_tm *tm = bw2_font_metrics(ref);
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), f = new_font(dev, TEST_FACE, -16);
+    struct d3dx_glyph_pos want[8];
+    uint32_t n = expect_line(ref, "Hi", 4, 4 + tm->ascent, want);
+    static const uint32_t colors[2] = { WHITE, 0xFF00FF00u };
+    for (int k = 0; k < 2; k++) {
+        clear(dev, BLACK);
+        CHECKEQ(text_a(f, 0, "Hi", -1, rect(4, 4, 200, 40), DT_NOCLIP, colors[k]), tm->height);
+        expect_layout(want, n, "Hi");
+        read_wide(dev, rt);
+        expect_text(ref, want, n, colors[k], NULL, k ? "green Hi" : "white Hi");
+    }
+    int green = 0;                                                     /* the last one drew green */
+    for (uint32_t i = 0; i < FW * FH; i++) green += (g_fpx[i] & 0xFFFFFF) == 0x00FF00u;
+    CHECK(green > 4);
+    bw2_font_close(ref);
+    release(f), release(rt);
+}
+
+/* ---- font_align ---- */
+
+static void group_font_align(void) {
+    add_ok(g_arg[0]);
+    struct bw2_font *ref = OPEN(TEST_FACE, -16, 400, 0);
+    if (!ref) return;
+    const struct bw2_tm *tm = bw2_font_metrics(ref);
+    int32_t h = tm->height, W = width_of(ref, "Hi");
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), f = new_font(dev, TEST_FACE, -16);
+    struct d3dx_glyph_pos want[8];
+    static const struct { uint32_t fmt; const char *what; } c[] = {
+        { DT_CENTER, "DT_CENTER" }, { DT_RIGHT, "DT_RIGHT" }, { DT_VCENTER | DT_SINGLELINE, "DT_VCENTER" },
+        { DT_BOTTOM | DT_SINGLELINE, "DT_BOTTOM" }, { DT_VCENTER, "DT_VCENTER without DT_SINGLELINE" },
+        { DT_CENTER | DT_BOTTOM | DT_SINGLELINE, "DT_CENTER | DT_BOTTOM" },
+    };
+    for (size_t k = 0; k < sizeof c / sizeof *c; k++) {
+        uint32_t fmt = c[k].fmt;
+        int32_t x = 0, top = 0;
+        if (fmt & DT_CENTER) x = ((int32_t)FW - W) / 2;                /* positive, so the division floors */
+        if (fmt & DT_RIGHT) x = (int32_t)FW - W;
+        if ((fmt & DT_SINGLELINE) && (fmt & DT_VCENTER)) top = ((int32_t)FH - h) / 2;
+        if ((fmt & DT_SINGLELINE) && (fmt & DT_BOTTOM)) top = (int32_t)FH - h;
+        int32_t ret = (fmt & DT_SINGLELINE) && (fmt & (DT_VCENTER | DT_BOTTOM)) ? top + h : h;
+        uint32_t n = expect_line(ref, "Hi", x, top + tm->ascent, want);
+        clear(dev, BLACK);
+        CHECKEQ(text_a(f, 0, "Hi", -1, rect(0, 0, (int32_t)FW, (int32_t)FH), fmt, WHITE), ret);
+        expect_layout(want, n, c[k].what);
+        read_wide(dev, rt);
+        expect_text(ref, want, n, WHITE, NULL, c[k].what);
+    }
+    CHECKEQ(text_a(f, 0, "Hi", -1, rect(0, 0, (int32_t)FW, (int32_t)FH), DT_BOTTOM | DT_SINGLELINE, WHITE), (int32_t)FH);
+    /* a rect narrower than the line: floor((width - line width) / 2) rounds down, from the rect's left */
+    uint32_t n = expect_line(ref, "Hi", 10 - 2, tm->ascent, want);
+    text_a(f, 0, "Hi", -1, rect(10, 0, 10 + W - 3, (int32_t)FH), DT_CENTER | DT_NOCLIP, WHITE);
+    expect_layout(want, n, "DT_CENTER, 3 pixels too narrow");
+    n = expect_line(ref, "Hi", 10 + W - 3 - W, tm->ascent, want);
+    text_a(f, 0, "Hi", -1, rect(10, 0, 10 + W - 3, (int32_t)FH), DT_RIGHT | DT_NOCLIP, WHITE);
+    expect_layout(want, n, "DT_RIGHT, 3 pixels too narrow");
+    bw2_font_close(ref);
+    release(f), release(rt);
+}
+
+/* ---- font_wrap ---- */
+
+/* the layout of lines of text, each at the left, one tm height apart from top */
+static uint32_t expect_lines(const struct bw2_font *ref, const char *const *ls, int nl, int32_t x, int32_t top,
+                             struct d3dx_glyph_pos *out) {
+    uint32_t n = 0;
+    for (int i = 0; i < nl; i++)
+        n += expect_line(ref, ls[i], x, top + i * bw2_font_metrics(ref)->height + bw2_font_metrics(ref)->ascent, out + n);
+    return n;
+}
+static void group_font_wrap(void) {
+    add_ok(g_arg[0]);
+    struct bw2_font *ref = OPEN(TEST_FACE, -16, 400, 0);
+    if (!ref) return;
+    const struct bw2_tm *tm = bw2_font_metrics(ref);
+    int32_t h = tm->height, T = 8 * tm->ave_char_width;
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), f = new_font(dev, TEST_FACE, -16);
+    struct d3dx_glyph_pos want[64];
+    (void)rt;
+    /* as wide as "aaa bbb": two lines, the space at the break gone */
+    static const char *const two[] = { "aaa bbb", "ccc" }, *const three[] = { "aaa", "bbb", "ccc" };
+    int32_t w2 = width_of(ref, "aaa bbb"), w3 = width_of(ref, "aaa");
+    CHECKEQ(text_a(f, 0, "aaa bbb ccc", -1, rect(0, 0, w2, 64), DT_WORDBREAK, WHITE), 2 * h);
+    expect_layout(want, expect_lines(ref, two, 2, 0, 0, want), "two lines");
+    CHECKEQ(text_a(f, 0, "aaa bbb ccc", -1, rect(0, 0, w2 + 1, 64), DT_WORDBREAK, WHITE), 2 * h);
+    /* narrower than "aaa": three lines, no word split */
+    CHECKEQ(text_a(f, 0, "aaa bbb ccc", -1, rect(0, 0, w3 - 1, 64), DT_WORDBREAK, WHITE), 3 * h);
+    expect_layout(want, expect_lines(ref, three, 3, 0, 0, want), "three lines");
+    CHECKEQ(text_a(f, 0, "aaa bbb ccc", -1, rect(0, 0, 0, 0), DT_WORDBREAK | DT_NOCLIP, WHITE), 3 * h);
+    /* a run of spaces at a break takes no width */
+    CHECKEQ(text_a(f, 0, "aaa    bbb ccc", -1, rect(0, 0, w3 + 2, 64), DT_WORDBREAK, WHITE), 3 * h);
+    expect_layout(want, expect_lines(ref, three, 3, 0, 0, want), "a run of spaces");
+    /* without DT_WORDBREAK: one line */
+    CHECKEQ(text_a(f, 0, "aaa bbb ccc", -1, rect(0, 0, w3, 64), 0, WHITE), h);
+    /* line breaks */
+    static const char *const ab[] = { "a", "b" };
+    static const char *const brk[] = { "a\nb", "a\r\nb", "a\rb" };
+    for (int k = 0; k < 3; k++) {
+        CHECKEQ(text_a(f, 0, brk[k], -1, rect(0, 0, 200, 64), 0, WHITE), 2 * h);
+        expect_layout(want, expect_lines(ref, ab, 2, 0, 0, want), brk[k]);
+        CHECKEQ(text_a(f, 0, brk[k], -1, rect(0, 0, 200, 64), DT_SINGLELINE, WHITE), h);
+        expect_layout(want, expect_line(ref, "ab", 0, tm->ascent, want), "DT_SINGLELINE: CR and LF draw nothing");
+    }
+    CHECKEQ(text_a(f, 0, "a\n", -1, rect(0, 0, 200, 64), 0, WHITE), h);
+    CHECKEQ(text_a(f, 0, "a\n\nb", -1, rect(0, 0, 200, 64), 0, WHITE), 3 * h);
+    /* tabs: DT_EXPANDTABS stops every 8 * ave_char_width from the rect's left; else the tab's glyph */
+    uint32_t n = expect_line(ref, "a", 5, tm->ascent, want);
+    n += expect_line(ref, "b", 5 + T, tm->ascent, want + n);
+    CHECKEQ(text_a(f, 0, "a\tb", -1, rect(5, 0, 200, 64), DT_EXPANDTABS, WHITE), h);
+    expect_layout(want, n, "a tab stop");
+    n = expect_line(ref, "b", 5 + 2 * T, tm->ascent, want);
+    CHECKEQ(text_a(f, 0, "\t\tb", -1, rect(5, 0, 200, 64), DT_EXPANDTABS | DT_NOCLIP, WHITE), h);
+    expect_layout(want, n, "two tab stops");
+    int32_t wa = width_of(ref, "aaaaaaaaaa");
+    n = expect_line(ref, "aaaaaaaaaa", 0, tm->ascent, want);
+    n += expect_line(ref, "b", (wa / T + 1) * T, tm->ascent, want + n);
+    CHECKEQ(text_a(f, 0, "aaaaaaaaaa\tb", -1, rect(0, 0, 200, 64), DT_EXPANDTABS | DT_NOCLIP, WHITE), h);
+    expect_layout(want, n, "a tab past the first stop");
+    n = expect_line(ref, "a\tb", 0, tm->ascent, want);
+    CHECKEQ(text_a(f, 0, "a\tb", -1, rect(0, 0, 200, 64), 0, WHITE), h);
+    expect_layout(want, n, "a tab without DT_EXPANDTABS");
+    bw2_font_close(ref);
+    release(f), release(rt);
+}
+
+/* ---- font_calcrect_roundtrip ---- */
+
+static void group_font_calcrect_roundtrip(void) {
+    add_ok(g_arg[0]);
+    struct bw2_font *ref = OPEN(TEST_FACE, -16, 400, 0);
+    if (!ref) return;
+    int32_t h = bw2_font_metrics(ref)->height;
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), f = new_font(dev, TEST_FACE, -16);
+    static const char *const s[5] = { "The quick brown fox jumps over the lazy dog", "aaa bbb ccc ddd eee",
+                                      "one  two   three four", "Hello, World! Wrap me please, at the edge.",
+                                      "x yy zzz wwww vvvvv u" };
+    static const int32_t extra[5] = { 0, 3, 9, 14, 21 };
+    for (int k = 0; k < 5; k++) {
+        int32_t word = 0;                                              /* the widest word: none is split */
+        char buf[128];
+        snprintf(buf, sizeof buf, "%s", s[k]);
+        for (char *t = strtok(buf, " "); t; t = strtok(NULL, " ")) word = width_of(ref, t) > word ? width_of(ref, t) : word;
+        int32_t W = word + extra[k];
+        uint32_t r = rect(5, 3, 5 + W, 3);
+        int32_t ret = text_a(f, 0, s[k], -1, r, DT_CALCRECT | DT_WORDBREAK, WHITE);
+        CHECK(ret >= 2 * h && ret % h == 0);
+        CHECKEQ(rc_at(r, 0), 5), CHECKEQ(rc_at(r, 1), 3), CHECKEQ(rc_at(r, 3), 3 + ret);
+        CHECK(rc_at(r, 2) <= 5 + W && rc_at(r, 2) >= 5 + word);
+        struct d3dx_glyph_pos calc[128], a[128];
+        uint32_t nc = d3dx_font_last_layout(calc, 128);
+        CHECKEQ(text_a(f, 0, s[k], -1, r, DT_WORDBREAK, WHITE), ret);  /* into the rect it gave */
+        uint32_t na = d3dx_font_last_layout(a, 128);
+        CHECKEQ(text_a(f, 0, s[k], -1, rect(5, 3, 5 + W, 3), DT_WORDBREAK | DT_NOCLIP, WHITE), ret);
+        char what[64];
+        snprintf(what, sizeof what, "roundtrip %d (%d lines)", k, ret / h);
+        CHECKEQ(na, nc);
+        expect_layout(a, na, what);
+        expect_layout(calc, nc, what);
+        /* the widest line is the rect's width: the pen after some glyph ends there */
+        int32_t right = 0;
+        for (uint32_t i = 0; i < na; i++) {
+            struct bw2_glyph g;
+            bw2_font_raster(ref, a[i].glyph, &g);
+            int32_t end = a[i].x - g.left + bw2_font_advance(ref, a[i].glyph);
+            free(g.alpha);
+            if (end > right) right = end;
+        }
+        CHECKEQ(right, rc_at(r, 2));
+    }
+    bw2_font_close(ref);
+    release(f), release(rt);
+}
+
+/* ---- font_clip ---- */
+
+static void group_font_clip(void) {
+    add_ok(g_arg[0]);
+    struct bw2_font *ref = OPEN(TEST_FACE, -16, 400, 0);
+    if (!ref) return;
+    const struct bw2_tm *tm = bw2_font_metrics(ref);
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), f = new_font(dev, TEST_FACE, -16);
+    struct d3dx_glyph_pos want[16];
+    const char *s = "WWWWWWWWWW";
+    int32_t W = width_of(ref, s), h = tm->height;
+    CHECK(W > 30);
+    static const int32_t box[4] = { 10, 10, 40, 30 };
+    uint32_t n = expect_line(ref, s, 10, 10 + tm->ascent, want);
+    clear(dev, BLACK);
+    text_a(f, 0, s, -1, rect(box[0], box[1], box[2], box[3]), 0, WHITE);
+    read_wide(dev, rt);
+    expect_text(ref, want, n, WHITE, box, "clipped right");
+    clear(dev, BLACK);
+    text_a(f, 0, s, -1, rect(box[0], box[1], box[2], box[3]), DT_NOCLIP, WHITE);
+    read_wide(dev, rt);
+    expect_text(ref, want, n, WHITE, NULL, "DT_NOCLIP");
+    int past = 0;
+    for (uint32_t y = 0; y < FH; y++)
+        for (uint32_t x = 40; x < FW; x++) past += (g_fpx[y * FW + x] & 0xFFFFFF) != 0;
+    CHECK(past > 0);
+    /* cut on the left and at the top: DT_RIGHT and DT_BOTTOM in a short rect */
+    static const int32_t small[4] = { 10, 10, 40, 18 };
+    n = expect_line(ref, s, 40 - W, 18 - h + tm->ascent, want);
+    clear(dev, BLACK);
+    text_a(f, 0, s, -1, rect(small[0], small[1], small[2], small[3]), DT_RIGHT | DT_BOTTOM | DT_SINGLELINE, WHITE);
+    read_wide(dev, rt);
+    expect_text(ref, want, n, WHITE, small, "clipped left and top");
+    bw2_font_close(ref);
+    release(f), release(rt);
+}
+
+/* ---- font_sprite: the game's own sprite ---- */
+
+static void group_font_sprite(void) {
+    add_ok(g_arg[0]);
+    struct bw2_font *ref = OPEN(TEST_FACE, -16, 400, 0);
+    if (!ref) return;
+    const struct bw2_tm *tm = bw2_font_metrics(ref);
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), f = new_font(dev, TEST_FACE, -16);
+    uint32_t s = new_sprite(dev);
+    struct d3dx_glyph_pos want[8];
+    uint32_t n = expect_line(ref, "Hi", 4, 4 + tm->ascent, want);
+    /* 1:1 inside the game's Begin/End */
+    clear(dev, BLACK);
+    CHECKEQ(SP(s, "Begin", 1, D3DXSPRITE_ALPHABLEND), D3D_OK);
+    uint32_t n0 = d3dx_sprite_draw_calls();
+    CHECKEQ(text_a(f, s, "Hi", -1, rect(4, 4, 100, 30), DT_NOCLIP, WHITE), tm->height);
+    CHECKEQ(d3dx_sprite_draw_calls(), n0);                            /* queued in the game's sprite */
+    CHECKEQ(SP(s, "End", 0), D3D_OK);
+    CHECK(d3dx_sprite_draw_calls() > n0);
+    read_wide(dev, rt);
+    expect_text(ref, want, n, WHITE, NULL, "in the game's sprite");
+    /* scale 2: the text at twice the size */
+    int32_t bx0 = 1 << 30, by0 = 1 << 30, bx1 = -(1 << 30), by1 = -(1 << 30);
+    for (uint32_t k = 0; k < n; k++) {
+        struct bw2_glyph g;
+        bw2_font_raster(ref, want[k].glyph, &g);
+        if (g.w) {
+            bx0 = want[k].x < bx0 ? want[k].x : bx0, by0 = want[k].y < by0 ? want[k].y : by0;
+            int32_t r = want[k].x + (int32_t)g.w, b = want[k].y + (int32_t)g.h;
+            bx1 = r > bx1 ? r : bx1, by1 = b > by1 ? b : by1;
+        }
+        free(g.alpha);
+    }
+    const float m2[16] = { 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    CHECKEQ(SP(s, "SetTransform", 1, matrix(m2)), D3D_OK);
+    clear(dev, BLACK);
+    CHECKEQ(SP(s, "Begin", 1, D3DXSPRITE_ALPHABLEND), D3D_OK);
+    n0 = d3dx_sprite_draw_calls();
+    CHECKEQ(text_a(f, s, "Hi", -1, rect(4, 4, 100, 30), DT_NOCLIP, WHITE), tm->height);
+    CHECKEQ(d3dx_sprite_draw_calls(), n0);
+    CHECKEQ(SP(s, "End", 0), D3D_OK);
+    CHECK(d3dx_sprite_draw_calls() > n0);
+    read_wide(dev, rt);
+    int32_t lx0 = 1 << 30, ly0 = 1 << 30, lx1 = -1, ly1 = -1;
+    for (int32_t y = 0; y < (int32_t)FH; y++)
+        for (int32_t x = 0; x < (int32_t)FW; x++)
+            if ((g_fpx[y * (int32_t)FW + x] & 0xFF) > 0x40) {
+                lx0 = x < lx0 ? x : lx0, ly0 = y < ly0 ? y : ly0, lx1 = x + 1 > lx1 ? x + 1 : lx1, ly1 = y + 1 > ly1 ? y + 1 : ly1;
+            }
+    printf("scaled box (%d,%d)-(%d,%d), 1:1 box (%d,%d)-(%d,%d)\n", lx0, ly0, lx1, ly1, bx0, by0, bx1, by1);
+    CHECK(abs(lx0 - 2 * bx0) <= 2 && abs(ly0 - 2 * by0) <= 2 && abs(lx1 - 2 * bx1) <= 2 && abs(ly1 - 2 * by1) <= 2);
+    bw2_font_close(ref);
+    release(s), release(f), release(rt);
+}
+
+/* ---- font_cp1252 (the table), and with argv[0] what DrawTextA and DrawTextW place ---- */
+
+static void font_cp1252_draw(void) {
+    add_ok(g_arg[0]);
+    struct bw2_font *ref = OPEN(TEST_FACE, -16, 400, 0);
+    if (!ref) return;
+    const struct bw2_tm *tm = bw2_font_metrics(ref);
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), f = new_font(dev, TEST_FACE, -16);
+    struct d3dx_glyph_pos want[8];
+    uint32_t q = bw2_font_glyph(ref, 0x2019), e = bw2_font_glyph(ref, 0xE9);
+    CHECK(q != 0 && e != 0 && q != e);
+    uint32_t n = expect_line(ref, "\x92\xE9", 4, 4 + tm->ascent, want);
+    CHECKEQ(want[0].glyph, q), CHECKEQ(want[1].glyph, e);
+    clear(dev, BLACK);
+    CHECKEQ(text_a(f, 0, "\x92\xE9", -1, rect(4, 4, 200, 40), DT_NOCLIP, WHITE), tm->height);
+    expect_layout(want, n, "0x92 0xE9");
+    read_wide(dev, rt);
+    expect_text(ref, want, n, WHITE, NULL, "0x92 0xE9");
+    /* the same through DrawTextW */
+    static const uint16_t qe[] = { 0x2019, 0xE9, 0 };
+    clear(dev, BLACK);
+    CHECKEQ(text_w(f, 0, qe, -1, rect(4, 4, 200, 40), DT_NOCLIP, WHITE), tm->height);
+    expect_layout(want, n, "U+2019 U+00E9");
+    /* a code point the face lacks: glyph 0, with glyph 0's advance */
+    CHECKEQ(bw2_font_glyph(ref, 0x4E00), 0);
+    struct bw2_glyph g0;
+    bw2_font_raster(ref, 0, &g0);
+    CHECK(g0.w > 0 && g0.h > 0);
+    want[0] = (struct d3dx_glyph_pos){ 0, 4 + g0.left, 4 + tm->ascent - g0.top };
+    free(g0.alpha);
+    n = 1 + expect_line(ref, "X", 4 + bw2_font_advance(ref, 0), 4 + tm->ascent, want + 1);
+    static const uint16_t cjk[] = { 0x4E00, 'X', 0 };
+    clear(dev, BLACK);
+    CHECKEQ(text_w(f, 0, cjk, 2, rect(4, 4, 200, 40), DT_NOCLIP, WHITE), tm->height);
+    expect_layout(want, n, "U+4E00 X");
+    read_wide(dev, rt);
+    expect_text(ref, want, n, WHITE, NULL, "U+4E00 X");
+    bw2_font_close(ref);
+    release(f), release(rt);
+}
+
+/* ---- font_cache_spill ---- */
+
+static void group_font_cache_spill(void) {
+    add_ok(g_arg[0]);
+    struct bw2_font *ref = OPEN(TEST_FACE, -46, 400, 0);
+    if (!ref) return;
+    const struct bw2_tm *tm = bw2_font_metrics(ref);
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), f = new_font(dev, TEST_FACE, -46);
+    uint32_t live0 = d3d_live_count();
+    CHECKEQ(FN(f, "PreloadCharacters", 2, 0x20u, 0xFFu), D3D_OK);
+    uint32_t ntex = d3d_live_count() - live0;
+    printf("cache textures %u\n", ntex);
+    CHECK(ntex >= 2);
+    int bad = 0;
+    uint32_t live1 = 0;                       /* after the first draw: its sprite's state block is made then */
+    for (uint16_t cp = 0x20; cp <= 0xFF; cp++) {
+        uint32_t g = bw2_font_glyph(ref, cp);
+        struct bw2_glyph b;
+        bw2_font_raster(ref, g, &b);
+        free(b.alpha);
+        struct d3dx_glyph_pos want = { g, 8 + b.left, tm->ascent - b.top };
+        uint16_t s[2] = { cp, 0 };
+        clear(dev, BLACK);
+        CHECKEQ(text_w(f, 0, s, 1, rect(8, 0, (int32_t)FW, (int32_t)FH), DT_NOCLIP, WHITE), tm->height);
+        expect_layout(&want, 1, "spill layout");
+        read_wide(dev, rt);
+        char what[32];
+        snprintf(what, sizeof what, "U+%04X", cp);
+        bad += !expect_text(ref, &want, 1, WHITE, NULL, what);
+        if (cp == 0x20) live1 = d3d_live_count(), CHECKEQ(live1, live0 + ntex + 1);
+    }
+    CHECKEQ(bad, 0);
+    CHECKEQ(d3d_live_count(), live1);                                  /* every glyph was preloaded */
+    /* PreloadTextA and PreloadTextW of glyphs already there make nothing */
+    CHECKEQ(FN(f, "PreloadTextA", 2, gbytes("Hello", 5), (uint32_t)-1), D3D_OK);
+    static const uint16_t hw[] = { 'W', 0xE9, 0 };
+    CHECKEQ(FN(f, "PreloadTextW", 2, gbytes(hw, 6), 2u), D3D_OK);
+    CHECKEQ(d3d_live_count(), live1);
+    bw2_font_close(ref);
+    release(f), release(rt);
+}
+
+/* ---- font_reset ---- */
+
+static void group_font_reset(void) {
+    add_ok(g_arg[0]);
+    struct bw2_font *ref = OPEN(TEST_FACE, -16, 400, 0);
+    if (!ref) return;
+    const struct bw2_tm *tm = bw2_font_metrics(ref);
+    uint32_t dev = new_device_sized(FW, FH), rt = wide_target(dev), f = new_font(dev, TEST_FACE, -16);
+    uint32_t s = new_sprite(dev), t = solid(dev, 0xFF00FF00u);
+    struct d3dx_glyph_pos want[8];
+    uint32_t n = expect_line(ref, "Hi", 4, 4 + tm->ascent, want);
+    for (int round = 0; round < 2; round++) {
+        clear(dev, BLACK);
+        CHECKEQ(text_a(f, 0, "Hi", -1, rect(4, 4, 200, 40), DT_NOCLIP, WHITE), tm->height);
+        read_wide(dev, rt);
+        expect_text(ref, want, n, WHITE, NULL, round ? "after Reset" : "before Reset");
+        CHECKEQ(SP(s, "Begin", 1, 0u), D3D_OK);
+        CHECKEQ(SP(s, "Draw", 5, t, 0u, 0u, vec3(100, 30, 0), 0xFFFFFFFFu), D3D_OK);
+        CHECKEQ(SP(s, "End", 0), D3D_OK);
+        read_wide(dev, rt);
+        CHECKEQ(g_fpx[31 * FW + 101] & 0xFFFFFF, 0x00FF00u);
+        if (round) break;
+        CHECKEQ(FN(f, "OnLostDevice", 0), D3D_OK);
+        CHECKEQ(SP(s, "OnLostDevice", 0), D3D_OK);
+        release(rt);
+        CHECKEQ(DV(dev, "Reset", 1, g_pp), D3D_OK);
+        CHECKEQ(FN(f, "OnResetDevice", 0), D3D_OK);
+        CHECKEQ(SP(s, "OnResetDevice", 0), D3D_OK);
+        rt = wide_target(dev);
+    }
+    bw2_font_close(ref);
+    release(s), release(t), release(f), release(rt);
+}
+
+/* ---- font_loud ---- */
+
+static void c_getdc(void) { FN(g_font, "GetDC", 0); }
+static void c_glyphdata(void) { FN(g_font, "GetGlyphData", 4, 0u, gmem(4), gmem(16), gmem(8)); }
+static void c_preloadglyphs(void) { FN(g_font, "PreloadGlyphs", 2, 0u, 10u); }
+static void c_rtl(void) { text_a(g_font, 0, "Hi", -1, rect(0, 0, 100, 40), 0x20000u, WHITE); }
+static void c_tabstop(void) { text_a(g_font, 0, "Hi", -1, rect(0, 0, 100, 40), 0x80u | DT_EXPANDTABS, WHITE); }
+static void c_high_bit(void) { text_a(g_font, 0, "Hi", -1, rect(0, 0, 100, 40), 0x80000000u, WHITE); }
+static void c_center_right(void) { text_a(g_font, 0, "Hi", -1, rect(0, 0, 100, 40), DT_CENTER | DT_RIGHT, WHITE); }
+static void c_count(void) { text_a(g_font, 0, "Hi", -2, rect(0, 0, 100, 40), 0, WHITE); }
+static void c_no_text(void) { FN(g_font, "DrawTextA", 6, 0u, 0u, 2u, rect(0, 0, 100, 40), 0u, WHITE); }
+static uint32_t g_idle_sprite;
+static void c_sprite_not_begun(void) { text_a(g_font, g_idle_sprite, "Hi", -1, rect(0, 0, 100, 40), DT_NOCLIP, WHITE); }
+
+static void group_font_loud(void) {
+    add_ok(g_arg[0]);
+    g_fdev = new_device_sized(FW, FH);
+    wide_target(g_fdev);
+    g_font = new_font(g_fdev, TEST_FACE, -16);
+    expect_stop(c_getdc, "ID3DXFont::GetDC not implemented", "GetDC");
+    expect_stop(c_glyphdata, "ID3DXFont::GetGlyphData not implemented", "GetGlyphData");
+    expect_stop(c_preloadglyphs, "ID3DXFont::PreloadGlyphs not implemented", "PreloadGlyphs");
+    expect_stop(c_rtl, "DT_RTLREADING (0x20000)", "DT_RTLREADING");
+    expect_stop(c_tabstop, "DT_TABSTOP (0x80)", "DT_TABSTOP");
+    expect_stop(c_high_bit, "0x80000000", "an unnamed format bit");
+    expect_stop(c_center_right, "DT_CENTER and DT_RIGHT", "DT_CENTER | DT_RIGHT");
+    expect_stop(c_count, "count -2", "count -2");
+    expect_stop(c_no_text, "no text", "NULL text");
+    g_idle_sprite = new_sprite(g_fdev);                                /* the glyphs cached here, not in the child */
+    CHECKEQ(FN(g_font, "PreloadTextA", 2, gbytes("Hi", 2), 2u), D3D_OK);
+    expect_stop(c_sprite_not_begun, "ID3DXSprite::Draw gave 0x8876086C", "a sprite outside Begin/End");
 }
 
 int main(int argc, char **argv) {
@@ -974,6 +1681,20 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "font_fallthrough")) group_font_fallthrough();
     else if (!strcmp(argv[1], "font_raster")) group_font_raster();
     else if (!strcmp(argv[1], "font_cp1252")) group_font_cp1252();
+    else if (!strcmp(argv[1], "font_create")) group_font_create();
+    else if (!strcmp(argv[1], "font_log")) group_font_log();
+    else if (!strcmp(argv[1], "font_noface")) group_font_noface();
+    else if (!strcmp(argv[1], "font_binding")) group_font_binding();
+    else if (!strcmp(argv[1], "font_measure")) group_font_measure();
+    else if (!strcmp(argv[1], "font_draw")) group_font_draw();
+    else if (!strcmp(argv[1], "font_align")) group_font_align();
+    else if (!strcmp(argv[1], "font_wrap")) group_font_wrap();
+    else if (!strcmp(argv[1], "font_calcrect_roundtrip")) group_font_calcrect_roundtrip();
+    else if (!strcmp(argv[1], "font_clip")) group_font_clip();
+    else if (!strcmp(argv[1], "font_sprite")) group_font_sprite();
+    else if (!strcmp(argv[1], "font_cache_spill")) group_font_cache_spill();
+    else if (!strcmp(argv[1], "font_reset")) group_font_reset();
+    else if (!strcmp(argv[1], "font_loud")) group_font_loud();
     else { fprintf(stderr, "ui_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

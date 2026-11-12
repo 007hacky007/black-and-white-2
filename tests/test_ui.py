@@ -1,5 +1,6 @@
-"""Plan 7: D3DX's 2D layer - host calls into guest COM (d3d_call), ID3DXSprite and the fonts
-(runtime/bw2/d3dx/ui_selftest.c). Pixel groups draw into a 64x64 A8R8G8B8 target, headless.
+"""Plan 7: D3DX's 2D layer - host calls into guest COM (d3d_call), ID3DXSprite, the fonts and ID3DXFont
+(runtime/bw2/d3dx/ui_selftest.c). Pixel groups draw into a 64x64 (ID3DXFont: 256x64) A8R8G8B8 target,
+headless.
 
 The font groups use the Mac's own Arial Narrow and Courier New, and copies of them renamed or with a
 table dropped (tests/ttf.py), written to tmp_path. Their expectations are worked out here from the same
@@ -31,10 +32,15 @@ def selftest(tmp_path_factory):
     return exe
 
 
-def check(exe, group, tmp_path, *args):
-    env = dict(os.environ, BW2_HEADLESS="1", BW2_SUPPORT=str(tmp_path / "support"))
-    r = subprocess.run([str(exe), group, *map(str, args)], capture_output=True, text=True, timeout=300,
-                       cwd=tmp_path, env=env)
+def run(exe, group, tmp_path, *args, **extra):
+    env = {k: v for k, v in os.environ.items() if k != "BW2_FONT_LOG"}
+    env.update(BW2_HEADLESS="1", BW2_SUPPORT=str(tmp_path / "support"), **extra)
+    return subprocess.run([str(exe), group, *map(str, args)], capture_output=True, text=True, timeout=300,
+                          cwd=tmp_path, env=env)
+
+
+def check(exe, group, tmp_path, *args, **extra):
+    r = run(exe, group, tmp_path, *args, **extra)
     assert r.returncode == 0 and f"{group}: 0 failed" in r.stdout, r.stdout[-6000:] + r.stderr[-4000:]
     return r
 
@@ -149,5 +155,47 @@ def test_font_raster(selftest, tmp_path, fonts):
     check(selftest, "font_raster", tmp_path, ttf.cap_height(arial) * s, x0 * s, y0 * s, x1 * s, y1 * s)
 
 
-def test_font_cp1252(selftest, tmp_path):
-    check(selftest, "font_cp1252", tmp_path)
+# ---- ID3DXFont: drawn from the Mac's Arial Narrow renamed "BW2 Test Face", added through
+# AddFontMemResourceEx, so the memory path is exercised ----
+
+def face_file(tmp_path, arial):
+    return write(tmp_path, "test_face.ttf", ttf.renamed(arial, "BW2 Test Face"))
+
+
+def textmetric(m):
+    """ttf.metrics in TEXTMETRIC's fields (it has no ppem)."""
+    return {k: v for k, v in m.items() if k != "ppem"}
+
+
+def test_font_create(selftest, tmp_path, fonts):
+    arial, _ = fonts
+    r = check(selftest, "font_create", tmp_path, face_file(tmp_path, arial))
+    got = lines(r.stdout, "tm")
+    assert got["a"] == textmetric(ttf.metrics(arial, -16))
+    # BW2_FONT_LOG=1: one line per create, naming the file the face bound to
+    face = face_file(tmp_path, arial)
+    r = check(selftest, "font_log", tmp_path, face, BW2_FONT_LOG="1")
+    assert r.stderr.count("[bw2] font ") == 2, r.stderr
+    assert '[bw2] font "BW2 Test Face" -16 weight 400: memory\n' in r.stderr
+    assert f'[bw2] font "Courier New" -16 weight 400: {COURIER}\n' in r.stderr
+    assert "[bw2] font " not in check(selftest, "font_log", tmp_path, face).stderr
+    # a face font.h refuses stops the run with its message
+    r = run(selftest, "font_noface", tmp_path, face)
+    assert r.returncode != 0 and "font_noface: 0 failed" not in r.stdout
+    assert 'D3DXCreateFontA: no font named "No Such Face"' in r.stderr, r.stderr[-2000:]
+
+
+def test_font_binding(selftest, tmp_path, fonts):
+    arial, courier = fonts
+    r = check(selftest, "font_binding", tmp_path,
+              write(tmp_path, "arial_as_courier.ttf", ttf.renamed(arial, "Courier New")))
+    got = lines(r.stdout, "tm")
+    assert got["system"] == textmetric(ttf.metrics(courier, -16))
+    assert got["memory"] == textmetric(ttf.metrics(arial, -16))
+
+
+@pytest.mark.parametrize("group", ["font_measure", "font_draw", "font_align", "font_wrap", "font_calcrect_roundtrip",
+                                   "font_clip", "font_sprite", "font_cp1252", "font_cache_spill", "font_reset",
+                                   "font_loud"])
+def test_font_object(selftest, group, tmp_path, fonts):
+    check(selftest, group, tmp_path, face_file(tmp_path, fonts[0]))

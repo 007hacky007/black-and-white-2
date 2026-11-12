@@ -1,6 +1,6 @@
 /*
- * ui.h - D3DX's 2D layer (plan 7): ID3DXSprite (d3dx_sprite.c), and later
- * ID3DXFont. Both reach the device through its guest vtable (d3d_call), so
+ * ui.h - D3DX's 2D layer (plan 7): ID3DXSprite (d3dx_sprite.c) and
+ * ID3DXFont (d3dx_font.c). Both reach the device through its guest vtable (d3d_call), so
  * state blocks, Get calls and draws see what the game would see.
  */
 #ifndef BW2_UI_H
@@ -21,5 +21,11 @@
 uint32_t d3dx_sprite_create(uint32_t device);
 /* How many DrawPrimitiveUP calls the sprite layer has made (tests). */
 uint32_t d3dx_sprite_draw_calls(void);
+
+/* The glyphs the last ID3DXFont::DrawText placed (also under DT_CALCRECT), in order, each with the
+ * top-left of its black box in target pixels before clipping (a blank glyph's is the pen on the
+ * baseline). Copies up to max into out; the number placed (tests). */
+struct d3dx_glyph_pos { uint32_t glyph; int32_t x, y; };
+uint32_t d3dx_font_last_layout(struct d3dx_glyph_pos *out, uint32_t max);
 
 #endif
