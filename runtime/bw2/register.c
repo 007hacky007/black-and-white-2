@@ -11,7 +11,8 @@
 extern const win32hle_shim bw2_k32_shims[], bw2_user_shims[], bw2_adv_shims[], bw2_net_shims[];
 extern const win32hle_shim bw2_later_shims[];   /* later.c: LoadLibraryA of a later plan's DLL */
 void bw2_d3d_register(void);                    /* d3d9/d3d_register.c (plan 4) */
-void bw2_input_register(void);                  /* input/dinput8.c (plan 5) */
+void bw2_input_register(void);                  /* input/input.c (plan 6) */
+void bw2_in_drain_hook(void);                   /* input/input.c: the host input queue's full drain */
 void bw2_audio_register(void);                  /* audio/dsound.c (plan 8) */
 
 static const win32hle_shim *const g_hle_tables[] = {
@@ -53,5 +54,8 @@ void bw2_register_shims(void) {
     win32hle_register(win32hle_ole32);
     win32hle_register(win32hle_storage);
     win32hle_register(win32hle_advapi32);
+    /* Host input reaches the guest when its message queue is empty, inside
+     * PeekMessage/GetMessage, where Windows delivers sent messages. */
+    hle_set_pump_hook(bw2_in_drain_hook);
 }
 

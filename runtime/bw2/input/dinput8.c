@@ -12,6 +12,7 @@
 #include <string.h>
 #include "bw2.h"
 #include "d3d_com.h"
+#include "input.h"
 
 #define DI_OK                        0u
 #define DI_NOEFFECT                  1u
@@ -215,7 +216,12 @@ static const win32hle_shim g_impls[] = {
     { 0, 0 } };
 static const win32hle_shim g_exports[] = { { "DirectInput8Create", x_DirectInput8Create }, { 0, 0 } };
 
-void bw2_input_register(void) {
+/* The DirectInput side of the input drain (input.c): no exclusive mouse and
+ * nothing to lose until plan 6 Task 2 feeds the device. */
+int bw2_in_mouse_exclusive(void) { return 0; }
+void bw2_in_mouse_lost(void) {}
+
+void bw2_dinput8_register(void) {               /* from input.c's bw2_input_register */
     d3d_impls(g_impls);
     win32hle_register(g_exports);
 }

@@ -1,4 +1,5 @@
 """Plan 5 Task 1: a minimal DirectInput mouse, driven as lifted code drives it (runtime/bw2/input/input_selftest.c).
+Plan 6 Task 1: the host input queue, the Windows messages it makes and IMM32.
 
 It answers the game's measured setup and reports no input; plan 6 replaces the reads.
 Each test runs one group of the selftest headless and expects "<group>: 0 failed"."""
@@ -96,3 +97,38 @@ def test_di_quit_bad_value(selftest, tmp_path, value):
     assert "di_quit: read 1 asked" in r.stdout and "di_quit: read 1 answered" not in r.stdout, r.stdout[-2000:]
     assert f"BW2_QUIT_AFTER_READS={value!r} is not a positive integer" in r.stderr, r.stderr[-2000:]
     assert "FATAL: d3d9: " in r.stderr, r.stderr[-2000:]
+
+
+
+# ---- plan 6 Task 1: the host input queue, Windows messages and IMM32 ----
+
+def test_queue(selftest, tmp_path):
+    check(selftest, "queue", tmp_path)
+
+
+def test_mouse_msgs(selftest, tmp_path):
+    check(selftest, "mouse_msgs", tmp_path)
+
+
+def test_wheel_msgs(selftest, tmp_path):
+    check(selftest, "wheel_msgs", tmp_path)
+
+
+def test_key_msgs(selftest, tmp_path):
+    check(selftest, "key_msgs", tmp_path)
+
+
+def test_activate(selftest, tmp_path):
+    check(selftest, "activate", tmp_path)
+
+
+def test_close(selftest, tmp_path):
+    check(selftest, "close", tmp_path)
+
+
+def test_drain_points(selftest, tmp_path):
+    check(selftest, "drain_points", tmp_path)
+
+
+def test_imm(selftest, tmp_path):
+    check(selftest, "imm", tmp_path)
