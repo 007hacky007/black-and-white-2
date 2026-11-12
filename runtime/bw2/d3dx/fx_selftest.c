@@ -568,6 +568,31 @@ static void group_fx_pool(const char *a, const char *b, const char *bad) {
     CHECKEQ(d3d_live_count(), live0 + 1);                          /* the effect made without the pool */
 }
 
+/* ---- fx_expr_bounds: PRSI output ranges whose register arithmetic would wrap are refused ---- */
+
+static int prsi_parses(uint32_t reg, uint32_t cnt) {
+    const uint32_t t[] = {
+        0x46580200u,
+        0xFFFEu | 10u << 16, 0x49535250u /* PRSI */, reg, 0, 0, cnt, 0, 0, 1, reg, cnt,
+        0xFFFEu | 10u << 16, 0x434C5846u /* FXLC */, 1, 0x100u << 20 | 1, 1, 0, 7, 0, 0, 4, 0,
+        0x0000FFFFu,
+    };
+    struct fx_expr x;
+    char err[256] = "";
+    int r = fx_expr_parse(t, sizeof t / 4, NULL, &x, err, sizeof err);
+    if (!r) fx_expr_free(&x);
+    else printf("prsi %u+%u: %s\n", reg, cnt, err);
+    return r == 0;
+}
+static void group_fx_expr_bounds(void) {
+    CHECK(prsi_parses(0, 1));
+    CHECK(prsi_parses(1023, 1));
+    CHECK(!prsi_parses(1024, 1));
+    CHECK(!prsi_parses(0x40000000u, 0x40000000u));
+    CHECK(!prsi_parses(0xFFFFFFFFu, 1));
+    CHECK(!prsi_parses(1, 0xFFFFFFFFu));
+}
+
 /* ---- fx_parse_errors: every truncation of a good binary fails cleanly; bad numbers fail ---- */
 
 static void group_fx_parse_errors(const char *path) {
@@ -1363,6 +1388,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "fx_pool") && a3) group_fx_pool(a1, a2, a3);
     else if (!strcmp(argv[1], "fx_parse_errors") && a1) group_fx_parse_errors(a1);
     else if (!strcmp(argv[1], "fx_text")) group_fx_text();
+    else if (!strcmp(argv[1], "fx_expr_bounds")) group_fx_expr_bounds();
     else if (!strcmp(argv[1], "fx_game_parse") && a1) group_fx_game_parse(a1);
     else if (!strcmp(argv[1], "fx_asm") && a1) group_fx_asm(a1);
     else if (!strcmp(argv[1], "fx_expr") && a2) group_fx_expr(a1, atoi(a2));

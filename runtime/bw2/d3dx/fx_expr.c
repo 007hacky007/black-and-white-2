@@ -220,11 +220,13 @@ int fx_expr_parse(const uint32_t *t, uint32_t n, struct fx_effect *e, struct fx_
         x->nranges = d[6];
         x->prsi = calloc(2 * x->nranges + 1, sizeof *x->prsi);
         memcpy(x->prsi, d + 7, 8 * x->nranges);
-        for (uint32_t k = 0; k < x->nranges; k++)
-            if (!grow(&x->nout, 4 * (x->prsi[2 * k] + x->prsi[2 * k + 1]))) {
+        for (uint32_t k = 0; k < x->nranges; k++) {
+            uint32_t reg = x->prsi[2 * k], cnt = x->prsi[2 * k + 1];
+            if (reg > MAX_TABLE / 4 || cnt > MAX_TABLE / 4 - reg || !grow(&x->nout, 4 * (reg + cnt))) {
                 fx_expr_free(x);
-                return ferr(err, errlen, "expression: preshader output register %u", x->prsi[2 * k]);
+                return ferr(err, errlen, "expression: preshader output registers %u+%u", reg, cnt);
             }
+        }
     }
     d = fx_comment(t, n, CC_FXLC, &len);
     if (!d || !len) { fx_expr_free(x); return ferr(err, errlen, "expression: no FXLC"); }

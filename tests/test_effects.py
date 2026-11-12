@@ -113,6 +113,11 @@ def test_fx_parse_errors(selftest, tmp_path):
     print(r.stdout[-1000:])
 
 
+def test_fx_expr_bounds(selftest, tmp_path):
+    """PRSI ranges whose 4 * (register + count) would wrap 32 bits are refused, not wrapped to 0."""
+    check(selftest, "fx_expr_bounds", tmp_path)
+
+
 def test_fx_text_is_later(selftest, tmp_path):
     r = run_group(selftest, "fx_text", tmp_path)
     assert r.returncode == 4 and "fx_text: returned" not in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
