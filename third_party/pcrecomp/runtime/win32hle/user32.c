@@ -82,6 +82,7 @@
 #define WM_RBUTTONUP       0x0205u
 #define WM_MBUTTONDOWN     0x0207u
 #define WM_MBUTTONUP       0x0208u
+#define WM_MOUSEWHEEL      0x020Au
 #define WM_CAPTURECHANGED  0x0215u
 
 #define WS_CHILD       0x40000000u
@@ -758,6 +759,13 @@ void hle_input_key_ex(int down, uint32_t vk, uint32_t scan, int extended) {
     if (t) q_push(t, alt || wvk == VK_MENU || wvk == 0x79 ? (down ? WM_SYSKEYDOWN : WM_SYSKEYUP) : (down ? WM_KEYDOWN : WM_KEYUP), wvk, l);
 }
 void hle_input_key(int down, uint32_t vk, uint32_t scan) { hle_input_key_ex(down, vk, scan, 0); }
+/* The wheel goes to the focus, else the active window, as Windows sends it:
+ * the delta (WHEEL_DELTA 120 a notch) in the high word of wParam, the key
+ * state in the low word, and the point in screen coordinates. */
+void hle_input_wheel(int delta, int sx, int sy) {
+    uint32_t t = hle_focus_window();
+    if (t) q_push(t, WM_MOUSEWHEEL, (uint32_t)delta << 16 | mk_state(), ((uint32_t)(sy & 0xFFFF) << 16) | (uint32_t)(sx & 0xFFFF));
+}
 void hle_input_cursor(int sx, int sy) { g_cursor_x = sx, g_cursor_y = sy; }
 void hle_input_key_state(uint32_t vk, int down) { if (down) g_keys[vk & 0xFF] |= 0x80; else g_keys[vk & 0xFF] &= 1; }
 
