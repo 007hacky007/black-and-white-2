@@ -178,10 +178,10 @@ words, so the test's check is unchanged.
 
 ## For plan 6 (input)
 
-- The game now reads its mouse at the front end, once per frame: `GetDeviceData(20, buf, &n, 0)`
-  from `sub_009AFD20`, after the mode switch `sub_009AF790`. Plan 5's stub answers no input, so
-  the front end shows its menu and waits.
-- No other input call is made in 60 s: no `GetDeviceState`, `GetCursorPos`, `GetAsyncKeyState`
-  or `GetKeyState`. The keys the game names come from `GetKeyNameTextW` and `GetKeyNameTextA`
-  before the front end, as above.
-- `BW2_QUIT_AFTER_READS=<n>` ends a run at the nth device read with exit 0; plan 6 keeps it.
+Plan 6 answered the front end's input; its measurements are in `input.md`. In short:
+- the game reads its mouse at the front end once per frame, `GetDeviceData(20, buf, &n, 0)` from
+  `sub_009AFD20`, after the mode switch `sub_009AF790`; with no input the front end shows its
+  first dialog and waits, as above;
+- with scripted input (`BW2_INPUT_SCRIPT`) the game takes a new profile in that dialog and boots on
+  to its first HLSL effect, plan 9's layer;
+- `BW2_QUIT_AFTER_READS=<n>` still ends a run at the nth device read with exit 0.

@@ -1,7 +1,9 @@
 """Where the boot gets to today: the lifted game boots on the patched tree through Direct3D, its DirectInput
 mouse setup, its shaders and effects (plan 5), its sprite and fonts and its loading screen (plan 7) and its
-DirectSound audio (plan 8) to the front end, where it first reads input (docs/research/frontend.md). The
-run ends at a fixed read count (BW2_QUIT_AFTER_READS), since the front end waits for input."""
+DirectSound audio (plan 8) to the front end, where it first reads input (docs/research/frontend.md). With no
+input the front end waits, so that run ends at a fixed read count (BW2_QUIT_AFTER_READS). With scripted input
+(plan 6, BW2_INPUT_SCRIPT) the game takes a new profile in its first dialog and boots on to its first HLSL
+effect, plan 9's layer (docs/research/input.md)."""
 import os
 import re
 import subprocess
@@ -82,6 +84,58 @@ def test_boot_to_front_end(tmp_path):
     # the sound banks are read in place: nothing is written under the support folder's game overlay
     made = sorted(p for p in (support / "Game").rglob("*") if p.is_file()) if (support / "Game").exists() else []
     assert not made, made
+
+
+# Plan 6: the front end's first dialog, driven through the host input queue at DirectInput read counts
+# (docs/research/input.md): click the name field, six Backspaces clear the default name, type "ab" (A, B),
+# then move to the confirm button and click it. Coordinates and key codes only.
+PROFILE_SCRIPT = "\n".join(
+    ["10 move 510 382", "14 down 0", "16 up 0"]
+    + [f"{22 + 2 * i + j} key 8 0x0E {'up' if j else 'down'}" for i in range(6) for j in (0, 1)]
+    + ["40 key 0x41 0x1E down", "41 key 0x41 0x1E up", "42 key 0x42 0x30 down", "43 key 0x42 0x30 up",
+       "50 move -88 45", "80 down 0", "84 up 0"]) + "\n"
+HLSL_STOP = "[bw2] reached D3DXCreateEffect (HLSL source): owned by a later plan"
+
+
+@pytest.mark.gamefiles
+def test_boot_profile_to_hlsl(tmp_path):
+    # Plan 6: scripted input names a new profile "ab" in the front end's first dialog and confirms it. The
+    # game writes the profile, applies its display settings (a Reset) and stops at its first effect given as
+    # HLSL text, plan 9's layer (exit 4).
+    assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
+    support = tmp_path / "support"
+    script = tmp_path / "profile.script"
+    script.write_text(PROFILE_SCRIPT)
+    env = dict(os.environ, BW2_SUPPORT=str(support), BW2_HEADLESS="1", BW2_FRAME_LOG="1",
+               BW2_INPUT_SCRIPT=str(script))
+    env.pop("BW2_QUIT_AFTER_READS", None)
+    r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
+                       timeout=180, env=env)
+    (tmp_path / "stderr.txt").write_text(r.stderr)
+    tail = r.stderr[-4000:]
+    lines = engine_lines(r.stderr)
+    assert r.returncode == 4, f"exit {r.returncode}\n{tail}"
+    # the stop line names the guest address it came from after the plan text
+    stops = [i for i, ln in enumerate(lines) if ln.startswith(HLSL_STOP)]
+    assert len(stops) == 1, tail
+    stop = stops[0]
+    err = "\n".join(ln for ln in lines[:stop] if not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln))
+    for word in LOUD:
+        assert word not in err, f"{word!r} in stderr\n{tail}"
+    later = [ln for ln in lines if "owned by a later plan" in ln]
+    assert later == [lines[stop]], later
+    # the profile and the settings are written in My Documents, the profile under the typed name
+    docs = support / "C" / "Documents and Settings" / "Player" / "My Documents" / "Black & White 2"
+    for f in (docs / "Profiles" / "~ab" / "Profile.ini", docs / "Settings.ini"):
+        assert f.is_file() and f.stat().st_size > 0, f
+    assert not (docs / "Profiles" / "~Player").exists()
+    made = sorted(p for p in (support / "Game").rglob("*") if p.is_file()) if (support / "Game").exists() else []
+    assert not made, made
+    # the front end read the mouse, and drew its picture after the first read up to the stop
+    assert lines.count(FIRST_READ) == 1, tail
+    after = [tuple(map(int, m.groups())) for m in map(FRAME.match, lines[lines.index(FIRST_READ):]) if m]
+    assert after, tail
+    assert all(2 * f[6] >= f[7] for f in after), [f for f in after if 2 * f[6] < f[7]]
 
 
 def _vm_thunks_called_by_the_game():

@@ -259,6 +259,13 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   `.dll`, and `CoInitializeEx`, `CoFileTimeToDosDateTime` and the two memory-font
   calls are answered. `BW2_FRAME_LOG=1` prints numbers for each `Present` (size,
   mean colour and non-black pixels), and no pixels are stored.
+
+  Phasing (plan 6, 2026-11-12): HLSL compilation (`D3DXCompileShader`,
+  `D3DXCompileShaderFromFileA`, `D3DXCreateEffect` given HLSL text), the fragment
+  linker and `D3DXCreateSphere` are plan 9's, with the HLSL library choice above.
+  The boot reaches the first HLSL effect after the front end's profile dialog:
+  `D3DXCreateEffect` from `sub_00B5237E` with an 11,199-byte source, right after
+  the profile's display settings `Reset` (`docs/research/input.md`).
 - **Audio:** the game's audio library mixes every voice in software and streams
   the result into one looping DirectSound buffer (16-bit stereo PCM at 44,100 Hz,
   21,504 bytes). We answer `IDirectSound` and that buffer on plan 4's COM
@@ -279,6 +286,20 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   The game tree ships no OpenAL DLL. Plan 8 answers DirectSound (above).
 - **Input:** DirectInput 8 keyboard and mouse from AppKit events, plus the
   Win32 mouse messages the game reads.
+  **Plan 6:** the game reads one exclusive DirectInput mouse (`GUID_SysMouse`,
+  buffered, relative axes), once per frame from its front end on, and its keyboard
+  through window messages (`WM_KEYDOWN`, `WM_CHAR`, `WM_KEYUP` through its pump);
+  the exe has no keyboard or joystick device. Both are fed from AppKit events
+  through one host queue: the Mac window's events are translated on the main
+  thread into the game's terms (client pixels, virtual keys and scan codes, wheel
+  units, mouse deltas) and pushed; the guest thread drains the queue in its message
+  pump and, for the kinds that post, at each DirectInput read. IMM32 is answered as
+  Windows with no IME on the US layout (a context can be made and associated; it is
+  never open). `IsDBCSLeadByte` is FALSE (code page 1252) and `PathGetCharTypeW`
+  follows shlwapi's classes. `BW2_INPUT_SCRIPT` (a test and measurement switch)
+  pushes scripted events into the same queue at given read counts; it drives a
+  headless boot through the profile dialog to the HLSL stop
+  (`docs/research/input.md`).
 - **Video:** Bink through pcrecomp's ffmpeg-backed `bink.c`, adapted to D3D9
   surfaces (`_BinkDX9SurfaceType@4`, `_BinkCopyToBuffer@28`).
 - **Files and saves:** the game sees a Windows tree; writes are redirected to
@@ -496,6 +517,38 @@ These are traps NFSU2 hit; the design takes them as requirements.
   menu item, my call: Cmd+Ctrl+F like other Mac apps). Resolutions come from
   the game's own settings menu, and the display's native resolution is
   offered in that list. Retina aware.
+- **Plan 6, the mapping as built:**
+  - left, right and middle buttons as on Windows; buttons 3 and 4 go to
+    DirectInput buttons 3 and 4 only, with no `WM_XBUTTON*` message;
+  - the trackpad's two-finger click arrives as a right-button event and is used as
+    one; Control+click is not a right click;
+  - wheel: 120 per line of a wheel mouse; a trackpad's precise delta gives one
+    notch of 120 per 10 points, with the remainder carried; only whole notches are
+    sent, momentum is ignored, the direction follows the user's natural-scrolling
+    setting, and horizontal scroll is ignored;
+  - Option + left drag = middle button: Alt goes up first if the game thinks it is
+    down, Option's key events are held back until it is released (that release is
+    dropped), and the middle button goes up with that left button;
+  - Cmd is never sent to the game (Cmd keys go to the menus); Caps Lock is sent as
+    `VK_CAPITAL` down and up on each toggle; Fn and keypad Clear are not sent;
+  - DirectInput deltas are the event's deltas in points divided by the letterbox
+    scale, fractions carried; the game moves its own cursor 1:1 with them;
+  - on deactivation every key and button the game thinks is down gets its up, and
+    the foreground DirectInput devices are lost; the D3D device is not lost;
+  - `ClipCursor` clamps the reported coordinates while active and never traps the
+    real pointer; an empty or inverted rect clears the clip;
+  - with the exclusive mouse acquired and the window active, the pointer is warped
+    to the centre of the letterboxed picture, then detached and hidden, and no
+    `WM_MOUSE*` message is sent;
+  - full screen is macOS full screen (its own Space); windowed is a resizable window
+    whose first size is the back buffer scaled to fit 90% of the screen's visible
+    frame; either way the back buffer is letterboxed into the view. A full-screen
+    device starts in full screen, and Cmd+Ctrl+F switches at any time without
+    telling the game;
+  - the game's screen size is the desktop mode from the start, or the back buffer
+    while a full-screen device lives; the mode list stays on the desktop, so the
+    native resolution stays offered;
+  - Cmd-Q and the close button reach the game as `WM_CLOSE`.
 
 ### 7.5 Build and packaging
 
