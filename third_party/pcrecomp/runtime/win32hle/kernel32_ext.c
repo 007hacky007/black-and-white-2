@@ -747,21 +747,63 @@ static void k_OpenFile(void) {
 }
 
 /* GetFullPathNameA(name, buflen, buf, &filePart): a lexical absolute path (no
- * disk access). Relative names are taken against the current directory; the
- * result keeps whatever separators it had, which hle_path matches on either. */
+ * disk access), in the guest's own folders. A relative name is taken against
+ * the guest's current directory (GetCurrentDirectoryA's answer), a rooted one
+ * ("\x") against its drive; '/' becomes '\', and "." and ".." collapse, as
+ * Windows does. A UNC name is left as given. The answer is the length, or the
+ * size needed (with the NUL) when buf is too small, buf then left alone. */
 static void k_GetFullPathNameA(void) {
     const char *name = ASTR(0);
-    char abs[1024];
-    if (name && (name[0] == '/' || name[0] == '\\' || (name[0] && name[1] == ':')))
+    char cwd[1024], g[1024], abs[2048], out[2048];
+    if (!name) name = "";
+    if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
+    hle_guest_path(cwd, g, sizeof g);
+    int sep0 = name[0] == '/' || name[0] == '\\';
+    if (sep0 && (name[1] == '/' || name[1] == '\\'))
+        snprintf(abs, sizeof abs, "%s", name);                       /* UNC */
+    else if (name[0] && name[1] == ':' && (name[2] == '/' || name[2] == '\\'))
         snprintf(abs, sizeof abs, "%s", name);
-    else { char cwd[768]; if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0; snprintf(abs, sizeof abs, "%s/%s", cwd, name ? name : ""); }
-    char *buf = ASTR(2); uint32_t n = A32(1);
-    if (buf && n) { strncpy(buf, abs, n - 1); buf[n - 1] = 0; }
-    if (A32(3) && buf) {
-        char *bs = strrchr(buf, '\\'), *fs = strrchr(buf, '/'), *p = bs > fs ? bs : fs;
-        MEM32(A32(3)) = hle_va(p ? p + 1 : buf);
+    else if (name[0] && name[1] == ':') {                            /* drive-relative */
+        if ((name[0] | 0x20) == (g[0] | 0x20)) snprintf(abs, sizeof abs, "%s\\%s", g, name + 2);
+        else snprintf(abs, sizeof abs, "%c:\\%s", name[0], name + 2);
+    } else if (sep0) snprintf(abs, sizeof abs, "%c:%s", g[0] ? g[0] : 'C', name);
+    else snprintf(abs, sizeof abs, "%s\\%s", g, name);
+    if (abs[0] && abs[1] == ':') {                                   /* X:\ then collapsed segments */
+        size_t k = 3, root = 3;
+        out[0] = abs[0] >= 'a' && abs[0] <= 'z' ? (char)(abs[0] - 32) : abs[0], out[1] = ':', out[2] = '\\';
+        const char *p = abs + 2;
+        while (*p) {
+            while (*p == '\\' || *p == '/') p++;
+            const char *e = p;
+            while (*e && *e != '\\' && *e != '/') e++;
+            size_t l = (size_t)(e - p);
+            if (l == 1 && p[0] == '.') { /* stay */ }
+            else if (l == 2 && p[0] == '.' && p[1] == '.') {
+                if (k > root) { k--; while (k > root && out[k - 1] != '\\') k--; }
+            } else if (l && k + l + 1 < sizeof out) {
+                memcpy(out + k, p, l), k += l;
+                if (*e) out[k++] = '\\';
+            }
+            p = e;
+        }
+        if (k > root && out[k - 1] == '\\') {                        /* a trailing separator stays only if given */
+            size_t al = strlen(abs);
+            if (!(abs[al - 1] == '\\' || abs[al - 1] == '/')) k--;
+        }
+        out[k] = 0;
+    } else {
+        snprintf(out, sizeof out, "%s", abs);
+        for (char *c = out; *c; c++) if (*c == '/') *c = '\\';
     }
-    RET(buf ? (uint32_t)strlen(buf) : (uint32_t)strlen(abs), 4);
+    uint32_t len = (uint32_t)strlen(out), n = A32(1);
+    char *buf = ASTR(2);
+    if (!buf || len + 1 > n) RET(len + 1, 4);
+    memcpy(buf, out, len + 1);
+    if (A32(3)) {
+        char *p = strrchr(buf, '\\');
+        MEM32(A32(3)) = p && p[1] ? hle_va(p + 1) : 0;
+    }
+    RET(len, 4);
 }
 
 /* ---- file mappings ----
