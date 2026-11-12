@@ -43,10 +43,12 @@ class P:
 
 class State:
     """A pass or sampler state. ref names the parameter a usage-1 resource refers to; blob is a usage-0
-    resource (shader tokens or an expression)."""
+    resource (shader tokens or an expression); selector is a usage-2 resource, (array name, expression):
+    the expression's value picks the array's element."""
 
-    def __init__(self, op, value, index=0, ref=None, blob=None):
+    def __init__(self, op, value, index=0, ref=None, blob=None, selector=None):
         self.op, self.value, self.index, self.ref, self.blob = op, value, index, ref, blob
+        self.selector = selector
 
 
 class Pass:
@@ -146,7 +148,7 @@ class _Writer:
             voff = self.u32(sid)
         else:
             voff = self.value(s.value)
-        if s.ref is not None or s.blob is not None:
+        if s.ref is not None or s.blob is not None or s.selector is not None:
             self.resources.append((where, s))
         return [s.op, s.index, toff, voff]
 
@@ -175,7 +177,12 @@ def build(params, techniques=()):
         else:
             sp = where[1]
             loc = [0xFFFFFFFF, params.index(sp), 0, next(i for i, x in enumerate(sp.value) if x is s)]
-        usage, blob = (1, s.ref.encode() + b"\0") if s.ref is not None else (0, s.blob)
+        if s.selector is not None:                      # the name (its size padded to dwords), the expression
+            name = s.selector[0].encode() + b"\0"
+            name += b"\0" * (-len(name) % 4)
+            usage, blob = 2, struct.pack("<I", len(name)) + name + s.selector[1]
+        else:
+            usage, blob = (1, s.ref.encode() + b"\0") if s.ref is not None else (0, s.blob)
         res += struct.pack("<6I", *loc, usage, len(blob)) + blob + b"\0" * (-len(blob) % 4)
     objs = bytearray()
     for i, d in sorted(w.objects.items()):
@@ -185,3 +192,99 @@ def build(params, techniques=()):
     data = bytes(w.data)
     return struct.pack("<2I", 0xFEFF0901, len(data)) + data + head + struct.pack(f"<{len(body)}I", *body) \
         + tail + bytes(objs) + bytes(res)
+
+
+# ---- Task 6: constant tables, expressions and preshaders, as fxc writes them into effects ----
+
+RS_BOOL, RS_INT4, RS_FLOAT4, RS_SAMPLER = range(4)
+# expression register tables
+LIT, IN, OUT, TEMP = 1, 2, 4, 7
+# FXLC opcodes (inputs)
+OPS = {"mov": (0x100, 1), "neg": (0x101, 1), "rcp": (0x103, 1), "frc": (0x104, 1), "exp": (0x105, 1),
+       "log": (0x106, 1), "rsq": (0x107, 1), "sin": (0x108, 1), "cos": (0x109, 1), "min": (0x200, 2),
+       "max": (0x201, 2), "lt": (0x202, 2), "ge": (0x203, 2), "add": (0x204, 2), "mul": (0x205, 2),
+       "cmp": (0x300, 3), "dot": (0x500, 2)}
+
+
+def fourcc(s):
+    return struct.unpack("<I", s.encode())[0]
+
+
+def comment(cc, data):
+    """A comment token holding fourcc cc and data (padded to dwords)."""
+    data = bytes(data) + b"\0" * (-len(data) % 4)
+    return struct.pack("<2I", 0xFFFE | (len(data) // 4 + 1) << 16, fourcc(cc)) + data
+
+
+class Const:
+    """A constant table entry: name, register set, first register, register count and its type, as
+    (class, type, rows, columns, elements, members) with members a list of (name, type)."""
+
+    def __init__(self, name, set, index, count, type):
+        self.name, self.set, self.index, self.count, self.type = name, set, index, count, type
+
+
+def ctab(consts, target="vs_2_0"):
+    """D3DXSHADER_CONSTANTTABLE and what it points at (offsets from its start)."""
+    head = 28
+    info = head
+    data = bytearray(b"\0" * (head + 20 * len(consts)))
+    def put(b):
+        off = len(data)
+        data.extend(b + b"\0" * (-len(b) % 4))
+        return off
+
+    def typeinfo(t):
+        cls, typ, rows, cols, elements, members = t
+        moff = 0
+        if members:
+            subs = [(put(n.encode() + b"\0"), typeinfo(mt)) for n, mt in members]
+            moff = put(b"".join(struct.pack("<2I", a, b) for a, b in subs))
+        return put(struct.pack("<6HI", cls, typ, rows, cols, elements, len(members), moff))
+    creator, tgt = put(b"test\0"), put(target.encode() + b"\0")
+    for i, c in enumerate(consts):
+        name, ti = put(c.name.encode() + b"\0"), typeinfo(c.type)
+        struct.pack_into("<I4HII", data, info + 20 * i, name, c.set, c.index, c.count, 0, ti, 0)
+    struct.pack_into("<7I", data, 0, head, creator, 0, len(consts), info, 0, tgt)
+    return bytes(data)
+
+
+FLOAT4_T = (VECTOR, FLOAT, 1, 4, 0, [])
+FLOAT_T = (SCALAR, FLOAT, 1, 1, 0, [])
+MATRIX_COLUMNS_T = (MATRIX_COLUMNS, FLOAT, 4, 4, 0, [])
+
+
+def ins(op, ncomp, operands, scalar=False):
+    """One FXLC instruction: operands are (table, component offset), the inputs then the output."""
+    code, nin = OPS[op]
+    assert len(operands) == nin + 1, op
+    w = [(1 << 31 if scalar else 0) | code << 20 | ncomp, nin]
+    for table, off in operands:
+        w += [0, table, off]
+    return w
+
+
+def expr(instructions, consts=(), literals=(), prsi=None, version=0x46580200):
+    """An expression's tokens: the version, CTAB, PRSI (a preshader's output ranges), CLIT, FXLC, end."""
+    out = struct.pack("<I", version)
+    out += comment("CTAB", ctab(list(consts), "fx_2_0"))
+    if prsi is not None:
+        start = min(r for r, _ in prsi)
+        count = max(r + n for r, n in prsi) - start
+        out += comment("PRSI", struct.pack(f"<{9 + 2 * len(prsi)}I", start, 0, 0, count, 0, 0, len(prsi),
+                                           *[x for p in prsi for x in p], 0, 0))
+    out += comment("CLIT", struct.pack(f"<I{len(literals)}d", len(literals), *literals))
+    words = [len(instructions)] + [x for i in instructions for x in i] + [0xF0F0F0F0, 0x0F0F0F0F]
+    out += comment("FXLC", struct.pack(f"<{len(words)}I", *words))
+    return out + struct.pack("<I", 0xFFFF)
+
+
+def shader(tokens, consts=None, preshader=None):
+    """Shader tokens (from the assembler) with a CTAB and a PRES comment after the version, as fxc writes."""
+    t = bytes(tokens)
+    extra = b""
+    if consts is not None:
+        extra += comment("CTAB", ctab(list(consts)))
+    if preshader is not None:
+        extra += comment("PRES", preshader)
+    return t[:4] + extra + t[4:]

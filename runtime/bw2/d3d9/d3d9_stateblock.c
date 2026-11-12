@@ -164,6 +164,16 @@ static void dv_CreateStateBlock(void) {    /* (this, type, IDirect3DStateBlock9*
     MEM32(A32(2)) = o;
     RET(D3D_OK, 3);
 }
+/* plan 5 (effects' Begin): a state block holding what m names, captured from the device now */
+uint32_t d3d_stateblock_new(struct d3d_device *d, const struct d3d_sbmask *m) {
+    uint32_t o = sb_new(d);
+    struct d3d_stateblock *b = sb_of(o);
+    b->m = *m;
+    b->m.light = NULL, b->m.nlight = b->m.caplight = 0;
+    for (uint32_t k = 0; k < m->nlight; k++) mark_light(&b->m, m->light[k]);
+    copy_state(&b->st, &d->st, &b->m);
+    return o;
+}
 static void dv_BeginStateBlock(void) {
     struct d3d_device *d = d3d_dev(A32(0));
     if (d->recording) RET(D3DERR_INVALIDCALL, 1);

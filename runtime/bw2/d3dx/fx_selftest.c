@@ -1,7 +1,7 @@
 /*
  * fx_selftest.c - D3DX effects (plan 5 Task 5): the fx_2_0 binary, the
  * parameter methods and effect pools, called as lifted code calls them, on a
- * headless device. Built with the engine (minus main.c) by
+ * headless device; Task 6 adds expressions, techniques and passes. Built with the engine (minus main.c) by
  * tests/test_effects.py; `fx_selftest <group> [args]` runs one group and
  * prints "<group>: <n> failed". The effects are written by tests/fxwrite.py;
  * the expectations below follow the effects test_effects.py builds.
@@ -671,6 +671,684 @@ static void group_fx_game_parse(const char *dir) {
     printf("\nsampler ops:");
     for (int i = 0; i < 256; i++) if (g_sops[i]) printf(" %d", i);
     printf("\n");
+    /* Task 6: every operation resolves in the state table */
+    for (uint32_t i = 0; i < 256; i++)
+        if ((g_ops[i] || g_sops[i]) && !fx_state(i)) { printf("FAIL state operation %u has no table entry\n", i); fails++; }
+    CHECK(fx_state(146)->cls == FXS_VSHADER && fx_state(147)->cls == FXS_PSHADER);
+    CHECK(fx_state(0)->cls == FXS_RENDER && fx_state(0)->num == 7);           /* ZENABLE */
+    CHECK(fx_state(48)->num == 137 && fx_state(59)->num == 152);             /* LIGHTING, CLIPPLANEENABLE */
+    CHECK(fx_state(73)->num == 168 && fx_state(75)->num == 171);             /* COLORWRITEENABLE, BLENDOP */
+    CHECK(fx_state(164)->cls == FXS_TEXTURE && fx_state(170)->cls == FXS_SAMPLER && fx_state(170)->num == 6);
+    CHECK(fx_state(179) == NULL);
+}
+
+/* ==== Task 6: expressions, techniques and passes ==== */
+
+#include "sm.h"
+
+/* IDirect3DDevice9 slots */
+enum { DV_GetBackBuffer = 18, DV_GetRenderTargetData = 32, DV_CreateRenderTarget = 28,
+       DV_CreateOffscreenPlainSurface = 36, DV_SetRenderTarget = 37, DV_Clear = 43, DV_SetRenderState = 57,
+       DV_GetRenderState = 58, DV_GetTexture = 64, DV_SetTexture = 65, DV_SetTextureStageState = 67,
+       DV_GetSamplerState = 68, DV_SetSamplerState = 69, DV_DrawPrimitiveUP = 83, DV_CreateVertexDeclaration = 86,
+       DV_SetVertexDeclaration = 87, DV_SetFVF = 89, DV_CreateVertexShader = 91, DV_SetVertexShader = 92,
+       DV_GetVertexShader = 93, DV_GetVertexShaderConstantF = 95, DV_CreatePixelShader = 106,
+       DV_SetPixelShader = 107, DV_GetPixelShader = 108, DV_GetPixelShaderConstantF = 110 };
+enum { SF_GetDesc = 12, SF_LockRect, SF_UnlockRect };
+enum { SH_GetFunction = 4 };
+#define S_FALSE_ 1u
+
+static void group_fx_asm(const char *path) {
+    uint32_t n;
+    uint8_t *src = read_file(path, &n);
+    uint32_t *t = NULL, nt = 0;
+    char *errs = NULL;
+    if (!src) return;
+    if (sm_assemble((const char *)src, n, NULL, &t, &nt, &errs)) { printf("FAIL errors:\n%s", errs); fails++; }
+    else {
+        printf("tokens:");
+        for (uint32_t i = 0; i < nt; i++) printf(" %08X", t[i]);
+        printf("\n");
+    }
+    free(t), free(errs), free(src);
+}
+
+/* ---- fx_expr: test_effects.py's EXPRS, one VertexShaderConstantF[k] state each ---- */
+
+static int ulp_near(float a, float b) {
+    if (a == b) return 1;
+    if (isnan(a) || isnan(b) || (a < 0) != (b < 0)) return 0;
+    int32_t ia, ib;
+    memcpy(&ia, &a, 4), memcpy(&ib, &b, 4);
+    return abs(ia - ib) <= 1;
+}
+static void expect_vec(const char *what, const float *got, const float *want, int n) {
+    for (int i = 0; i < n; i++)
+        if (!ulp_near(got[i], want[i])) {
+            printf("FAIL %s[%d]: %.9g, want %.9g\n", what, i, got[i], want[i]);
+            fails++;
+        }
+}
+static void group_fx_expr(const char *path, int count) {
+    uint32_t dev = new_device();
+    uint32_t e = create_file(dev, path, 0);
+    if (!e) return;
+    struct fx_effect *fx = fx_effect_of(e);
+    const float A[4] = { 1.5f, -2.25f, 0.3f, 4.0f }, B[4] = { 0.7f, 3.1f, -1.2f, 0.5f };
+    const float C[4] = { -0.25f, 0.125f, 9.0f, -3.5f };
+    float want[16][4];
+    memset(want, 0, sizeof want);
+    for (int i = 0; i < 4; i++) {
+        float t = A[i] * B[i];
+        want[0][i] = t + C[i];                                        /* mad */
+        want[2][i] = 1.0f / A[i];                                     /* rcp */
+        want[3][i] = 1.0f / sqrtf(fabsf(B[i]));                       /* rsq */
+        want[4][i] = A[i] < B[i] ? A[i] : B[i];                       /* min */
+        want[5][i] = A[i] > B[i] ? A[i] : B[i];                       /* max */
+        want[6][i] = A[i] < B[i] ? 1.0f : 0.0f;                       /* lt */
+        want[7][i] = A[i] >= B[i] ? 1.0f : 0.0f;                      /* ge */
+        want[8][i] = C[i] - floorf(C[i]);                             /* frc */
+        want[9][i] = sinf(A[i]);
+        want[10][i] = cosf(A[i]);
+        want[11][i] = -B[i];                                          /* neg */
+        want[12][i] = A[2] * C[i];                                    /* scalar mul */
+        want[14][i] = B[i] >= 0.0f ? A[i] : C[i];                     /* cmp */
+    }
+    float d = 0.0f;
+    for (int i = 0; i < 4; i++) d += A[i] * B[i];
+    want[1][0] = d;                                                   /* dot */
+    want[13][0] = 2.5f + A[3], want[13][1] = 0.75f, want[13][2] = 2.5f;   /* literals */
+    static const char *const names[] = { "mad", "dot", "rcp", "rsq", "min", "max", "lt", "ge", "frc", "sin", "cos",
+                                         "neg", "scalar_mul", "literal", "cmp" };
+    CHECKEQ(count, 15);
+    struct fx_pass *ps = &fx->techs[0].passes[0];
+    CHECKEQ(ps->nstates, (uint32_t)count);
+    for (uint32_t k = 0; k < ps->nstates && k < 15; k++) {
+        struct fx_expr x;
+        char err[256];
+        struct fx_state *s = &ps->states[k];
+        CHECKEQ(s->usage, FX_USAGE_BLOB);
+        if (fx_expr_parse((const uint32_t *)s->blob, s->bloblen / 4, fx, &x, err, sizeof err)) {
+            printf("FAIL %s: %s\n", names[k], err);
+            fails++;
+            continue;
+        }
+        float out[4];
+        CHECKEQ(fx_expr_run(&x, fx, out, 4), 0);
+        expect_vec(names[k], out, want[k], 4);
+        fx_expr_free(&x);
+    }
+    /* the same through a pass: each expression's value reaches its constant */
+    uint32_t np = gmem(4), got = gmem(16 * 15);
+    CHECKEQ(vcall(e, FX_Begin, 2, np, 1u), D3D_OK);
+    CHECKEQ(MEM32(np), 1);
+    CHECKEQ(vcall(e, FX_BeginPass, 1, 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_GetVertexShaderConstantF, 3, 0u, got, 15u), D3D_OK);
+    for (int k = 0; k < 15; k++) {
+        float v[4];
+        for (int i = 0; i < 4; i++) v[i] = gf(got + 16 * (uint32_t)k + 4 * (uint32_t)i);
+        char what[64];
+        snprintf(what, sizeof what, "%s through the pass", names[k]);
+        expect_vec(what, v, want[k], 4);
+    }
+    /* a new input value reaches the constant at the next CommitChanges */
+    uint32_t v4 = gmem(16);
+    for (int i = 0; i < 4; i++) MEM32(v4 + 4 * (uint32_t)i) = f2u(2.0f);
+    CHECKEQ(vcall(e, FX_SetVector, 2, byname(e, "C"), v4), D3D_OK);
+    CHECKEQ(vcall(e, FX_CommitChanges, 0), D3D_OK);
+    CHECKEQ(vcall(dev, DV_GetVertexShaderConstantF, 3, 0u, got, 1u), D3D_OK);
+    CHECKF(gf(got), A[0] * B[0] + 2.0f);
+    CHECKEQ(vcall(e, FX_EndPass, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_End, 0), D3D_OK);
+    vcall(e, FX_Release, 0);
+}
+
+/* ---- fx_expr_game_ops: every FXLC opcode in the game's effects ---- */
+
+static char **list_dir(const char *dir, int *nn) {
+    DIR *dd = opendir(dir);
+    *nn = 0;
+    if (!dd) { printf("FAIL cannot open %s\n", dir); fails++; return NULL; }
+    char **names = NULL;
+    for (struct dirent *de; (de = readdir(dd));)
+        if (de->d_name[0] != '.') names = realloc(names, sizeof *names * (size_t)(*nn + 1)), names[(*nn)++] = strdup(de->d_name);
+    closedir(dd);
+    for (int i = 1; i < *nn; i++)
+        for (int j = i; j > 0 && strcmp(names[j - 1], names[j]) > 0; j--) { char *t = names[j]; names[j] = names[j - 1]; names[j - 1] = t; }
+    return names;
+}
+static uint32_t g_opcount[0x800][4], g_nexpr, g_npre, g_nstate;
+static struct fx_effect *g_ops_fx;
+static void count_expr(const uint32_t *t, uint32_t n, const char *where) {
+    uint32_t k, *ops = fx_expr_ops(t, n, &k);
+    for (uint32_t i = 0; i < k; i++) {
+        uint32_t op = ops[i] >> 16, nin = ops[i] & 0xFFFF;
+        if (op < 0x800 && nin < 4) g_opcount[op][nin]++;
+        if (!fx_expr_opname(op, nin)) { printf("FAIL %s: FXLC opcode 0x%03X (%u inputs) not implemented\n", where, op, nin); fails++; }
+    }
+    free(ops);
+    struct fx_expr x;
+    char err[256];
+    if (fx_expr_parse(t, n, g_ops_fx, &x, err, sizeof err)) { printf("FAIL %s: %s\n", where, err); fails++; return; }
+    for (uint32_t i = 0; i < x.in.n; i++)
+        if (!x.in.e[i].param) { printf("FAIL %s: input '%s' is no parameter\n", where, x.in.e[i].name); fails++; }
+    float out[64];
+    fx_expr_run(&x, g_ops_fx, out, 64);
+    fx_expr_free(&x);
+    g_nexpr++;
+}
+static void state_exprs(struct fx_state *s, const char *name) {
+    if (s->usage == FX_USAGE_BLOB && s->bloblen >= 8 && !(s->param.cls == FXC_OBJECT && FX_IS_SHADER(s->param.type))) {
+        count_expr((const uint32_t *)s->blob, s->bloblen / 4, name), g_nstate++;
+    } else if (s->usage == FX_USAGE_SELECTOR && s->bloblen >= 8) {
+        uint32_t len;
+        memcpy(&len, s->blob, 4);
+        uint32_t skip = 4 + len;
+        count_expr((const uint32_t *)(s->blob + skip), (s->bloblen - skip) / 4, name), g_nstate++;
+    }
+}
+static void sampler_exprs(struct fx_param *leaf, void *ctx) {
+    for (uint32_t i = 0; i < leaf->nstates; i++) state_exprs(&leaf->states[i], ctx);
+}
+static void group_fx_expr_game_ops(const char *dir) {
+    int nn;
+    char **names = list_dir(dir, &nn);
+    for (int i = 0; i < nn; i++) {
+        char path[1024], err[256] = "";
+        snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+        uint32_t n;
+        uint8_t *d = read_file(path, &n);
+        if (!d) continue;
+        struct fx_effect e;
+        memset(&e, 0, sizeof e);
+        if (fx_parse(d, n, &e, err, sizeof err)) { printf("FAIL %s: %s\n", names[i], err); fails++; free(d); continue; }
+        g_ops_fx = &e;
+        for (uint32_t t = 0; t < e.ntechs; t++)
+            for (uint32_t p = 0; p < e.techs[t].npasses; p++)
+                for (uint32_t s = 0; s < e.techs[t].passes[p].nstates; s++) state_exprs(&e.techs[t].passes[p].states[s], names[i]);
+        for (uint32_t k = 0; k < e.nparams; k++) fx_leaves(&e.params[k], sampler_exprs, names[i]);
+        for (uint32_t o = 0; o < e.nobjects; o++) {                 /* preshaders in the shaders' PRES comments */
+            const struct fx_object *ob = &e.objects[o];
+            if (ob->size < 8) continue;
+            const uint32_t *t = (const uint32_t *)ob->data;
+            if ((t[0] & 0xFFFE0000u) != 0xFFFE0000u) continue;
+            uint32_t len;
+            const uint32_t *pre = fx_comment(t, ob->size / 4, 0x53455250u, &len);       /* PRES */
+            if (pre && len) count_expr(pre, len, names[i]), g_npre++;    /* an empty PRES: no preshader */
+        }
+        fx_free(&e);
+        free(d);
+    }
+    printf("expressions %u (preshaders %u, states %u)\nops:", g_nexpr, g_npre, g_nstate);
+    for (uint32_t op = 0; op < 0x800; op++)
+        for (uint32_t k = 0; k < 4; k++)
+            if (g_opcount[op][k]) printf(" %s", fx_expr_opname(op, k) ? fx_expr_opname(op, k) : "?");
+    printf("\ncounts:");
+    for (uint32_t op = 0; op < 0x800; op++)
+        for (uint32_t k = 0; k < 4; k++)
+            if (g_opcount[op][k]) printf(" 0x%03X/%u:%u", op, k, g_opcount[op][k]);
+    printf("\n");
+}
+
+/* ---- drawing ---- */
+
+static uint32_t new_device_sized(void) { return new_device(); }   /* 64 x 64, D24S8 */
+static void read_rt(uint32_t dev, uint32_t rt, uint32_t w, uint32_t h, uint32_t *px) {
+    uint32_t desc = gmem(32), out = gmem(4);
+    CHECKEQ(vcall(rt, SF_GetDesc, 1, desc), D3D_OK);
+    CHECKEQ(vcall(dev, DV_CreateOffscreenPlainSurface, 6, w, h, MEM32(desc), 2u, out, 0u), D3D_OK);
+    uint32_t s = MEM32(out), lr = gmem(8);
+    CHECKEQ(vcall(dev, DV_GetRenderTargetData, 2, rt, s), D3D_OK);
+    CHECKEQ(vcall(s, SF_LockRect, 3, lr, 0u, 0x10u), D3D_OK);
+    for (uint32_t y = 0; y < h; y++) memcpy(px + y * w, hle_ptr(MEM32(lr + 4) + y * MEM32(lr)), w * 4);
+    CHECKEQ(vcall(s, SF_UnlockRect, 0), D3D_OK);
+    vcall(s, 2, 0);
+}
+static uint32_t argb_target(uint32_t dev) {
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(dev, DV_CreateRenderTarget, 8, 64u, 64u, 21u, 0u, 0u, 0u, out, 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetRenderTarget, 2, 0u, MEM32(out)), D3D_OK);
+    return MEM32(out);
+}
+static void clear(uint32_t dev, uint32_t c) { CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, 7u, c, f2u(1.0f), 0u), D3D_OK); }
+static void draw_up(uint32_t dev, uint32_t type, uint32_t prims, const void *v, uint32_t nverts, uint32_t stride) {
+    CHECKEQ(vcall(dev, DV_DrawPrimitiveUP, 4, type, prims, gbytes(v, nverts * stride), stride), D3D_OK);
+}
+/* a strip over clip space -1..1 at z 0.5, position only (a declaration of POSITION float3) */
+static void pos_decl(uint32_t dev) {
+    uint32_t el = gmem(16), out = gmem(4);
+    MEM16(el) = 0, MEM16(el + 2) = 0, MEM8(el + 4) = 2, MEM8(el + 5) = 0, MEM8(el + 6) = 0, MEM8(el + 7) = 0;
+    MEM16(el + 8) = 0xFF, MEM16(el + 10) = 0, MEM8(el + 12) = 17, MEM8(el + 13) = 0, MEM8(el + 14) = 0, MEM8(el + 15) = 0;
+    CHECKEQ(vcall(dev, DV_CreateVertexDeclaration, 2, el, out), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, MEM32(out)), D3D_OK);
+}
+static void full_quad(uint32_t dev) {
+    const float q[4][3] = { { -1, 1, 0.5f }, { 1, 1, 0.5f }, { -1, -1, 0.5f }, { 1, -1, 0.5f } };
+    draw_up(dev, 5, 2, q, 4, 12);
+}
+static int chan_near(uint32_t px, const float *want, int tol) {
+    int c[4] = { (int)(px >> 16 & 0xFF), (int)(px >> 8 & 0xFF), (int)(px & 0xFF), (int)(px >> 24) };
+    for (int i = 0; i < 4; i++) {
+        float w = want[i] < 0 ? 0 : want[i] > 1 ? 1 : want[i];
+        if (abs(c[i] - (int)(w * 255.0f + 0.5f)) > tol) return 0;
+    }
+    return 1;
+}
+static void expect_px(const char *what, uint32_t px, const float *want, int tol) {
+    if (!chan_near(px, want, tol)) {
+        printf("FAIL %s: pixel 0x%08X, want (%g, %g, %g, %g)\n", what, px, want[0], want[1], want[2], want[3]);
+        fails++;
+    }
+}
+static uint32_t g_px[64 * 64];
+static uint32_t rs_get(uint32_t dev, uint32_t s) { uint32_t o = gmem(4); CHECKEQ(vcall(dev, DV_GetRenderState, 2, s, o), D3D_OK); return MEM32(o); }
+static uint32_t ss_get(uint32_t dev, uint32_t smp, uint32_t s) {
+    uint32_t o = gmem(4);
+    CHECKEQ(vcall(dev, DV_GetSamplerState, 3, smp, s, o), D3D_OK);
+    return MEM32(o);
+}
+static uint32_t shader_get(uint32_t dev, int slot) {          /* the bound shader, without keeping a reference */
+    uint32_t o = gmem(4);
+    CHECKEQ(vcall(dev, slot, 1, o), D3D_OK);
+    if (MEM32(o)) vcall(MEM32(o), 2, 0);
+    return MEM32(o);
+}
+
+static uint32_t vs_obj(uint32_t dev);
+
+/* ---- fx_pass_states: test_effects.py's pass_states_effect ---- */
+
+static void group_fx_pass_states(const char *path) {
+    uint32_t dev = new_device_sized(), rt = argb_target(dev);
+    uint32_t e = create_file(dev, path, 0);
+    if (!e) return;
+    uint32_t np = gmem(4), vs0 = vs_obj(dev);
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, vs0), D3D_OK);
+    CHECKEQ(vcall(e, FX_GetCurrentTechnique, 0), vcall(e, FX_GetTechnique, 1, 0u));   /* the first, at first */
+    CHECKEQ(vcall(e, FX_Begin, 2, np, 0u), D3D_OK);
+    CHECKEQ(MEM32(np), 2);
+    CHECKEQ(vcall(e, FX_BeginPass, 1, 0u), D3D_OK);
+    CHECKEQ(rs_get(dev, 7), 1), CHECKEQ(rs_get(dev, 27), 0), CHECKEQ(rs_get(dev, 19), 2);
+    CHECKEQ(ss_get(dev, 1, 6), 1);
+    CHECKEQ(shader_get(dev, DV_GetVertexShader), 0);             /* VertexShader = 0 */
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, vs0), D3D_OK);
+    CHECKEQ(vcall(e, FX_EndPass, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_BeginPass, 1, 1u), D3D_OK);
+    CHECKEQ(rs_get(dev, 7), 0);                                  /* ZENABLE */
+    CHECKEQ(rs_get(dev, 27), 1);                                 /* ALPHABLENDENABLE */
+    CHECKEQ(rs_get(dev, 19), 5), CHECKEQ(rs_get(dev, 20), 6);    /* SRCALPHA, INVSRCALPHA */
+    CHECKEQ(rs_get(dev, 137), 0);                                /* LIGHTING */
+    CHECKEQ(ss_get(dev, 1, 6), 2);                               /* the pass's MinFilter[1] */
+    CHECKEQ(ss_get(dev, 0, 6), 3), CHECKEQ(ss_get(dev, 0, 1), 3);   /* Sampler[0] = smp: its MinFilter, AddressU */
+    CHECKEQ(shader_get(dev, DV_GetVertexShader), 0), CHECKEQ(shader_get(dev, DV_GetPixelShader), 0);
+    /* a draw shows the blend: half-transparent green over red */
+    struct { float x, y, z, rhw; uint32_t c; } q[4] = {
+        { 0, 0, 0.5f, 1, 0x8000FF00u }, { 64, 0, 0.5f, 1, 0x8000FF00u }, { 0, 64, 0.5f, 1, 0x8000FF00u },
+        { 64, 64, 0.5f, 1, 0x8000FF00u } };
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, 0x44u), D3D_OK);           /* XYZRHW | DIFFUSE */
+    clear(dev, 0xFFFF0000u);
+    draw_up(dev, 5, 2, q, 4, sizeof q[0]);
+    read_rt(dev, rt, 64, 64, g_px);
+    const float blend[4] = { 127 / 255.0f, 128 / 255.0f, 0, 0.75f };
+    expect_px("blended", g_px[32 * 64 + 32], blend, 2);
+    CHECKEQ(vcall(e, FX_EndPass, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_EndPass, 0), D3DERR_INVALIDCALL);         /* no pass active */
+    CHECKEQ(vcall(e, FX_BeginPass, 1, 2u), D3DERR_INVALIDCALL);   /* no such pass */
+    CHECKEQ(vcall(e, FX_End, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_BeginPass, 1, 0u), D3DERR_INVALIDCALL);   /* not begun */
+    CHECKEQ(rs_get(dev, 7), 1), CHECKEQ(rs_get(dev, 27), 0);     /* End restored them */
+    CHECKEQ(ss_get(dev, 0, 6), 1);
+    CHECKEQ(shader_get(dev, DV_GetVertexShader), vs0);
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, 0u), D3D_OK);
+    vcall(vs0, 2, 0);
+    vcall(e, FX_Release, 0);
+}
+
+/* ---- fx_shaders: an assembled vs_1_1 and ps_2_0 whose constant tables name WorldViewProj and Tint ---- */
+
+static void set_matrix_rows(uint32_t e, const char *name, const float *m) {
+    uint32_t g = gmem(64);
+    for (int i = 0; i < 16; i++) MEM32(g + 4 * (uint32_t)i) = f2u(m[i]);
+    CHECKEQ(vcall(e, FX_SetMatrix, 2, byname(e, name), g), D3D_OK);
+}
+static void set_vec(uint32_t e, const char *name, float x, float y, float z, float w) {
+    uint32_t g = gmem(16);
+    MEM32(g) = f2u(x), MEM32(g + 4) = f2u(y), MEM32(g + 8) = f2u(z), MEM32(g + 12) = f2u(w);
+    CHECKEQ(vcall(e, FX_SetVector, 2, byname(e, name), g), D3D_OK);
+}
+static void group_fx_shaders(const char *path) {
+    uint32_t dev = new_device_sized(), rt = argb_target(dev);
+    uint32_t e = create_file(dev, path, 0);
+    if (!e) return;
+    pos_decl(dev);
+    /* x scaled by 0.5 then moved right by 0.25 (row vectors): the quad covers x -0.25..0.75 */
+    const float m[16] = { 0.5f, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.25f, 0, 0, 1 };
+    set_matrix_rows(e, "WorldViewProj", m);
+    set_vec(e, "Tint", 1.0f, 0.5f, 0.25f, 1.0f);
+    uint32_t np = gmem(4), t = vcall(e, FX_GetTechnique, 1, 0u);
+    CHECKEQ(vcall(e, FX_ValidateTechnique, 1, t), D3D_OK);
+    CHECKEQ(vcall(e, FX_IsParameterUsed, 2, byname(e, "Tint"), t), 1);
+    CHECKEQ(vcall(e, FX_IsParameterUsed, 2, byname(e, "WorldViewProj"), t), 1);
+    CHECKEQ(vcall(e, FX_IsParameterUsed, 2, byname(e, "Unused"), t), 0);
+    CHECKEQ(vcall(e, FX_Begin, 2, np, 0u), D3D_OK);
+    CHECKEQ(vcall(e, FX_BeginPass, 1, 0u), D3D_OK);
+    CHECK(shader_get(dev, DV_GetVertexShader) != 0);
+    CHECK(shader_get(dev, DV_GetPixelShader) != 0);
+    uint32_t c = gmem(64);                                        /* the matrix's columns in c0-c3 */
+    CHECKEQ(vcall(dev, DV_GetVertexShaderConstantF, 3, 0u, c, 4u), D3D_OK);
+    CHECKF(gf(c), 0.5f), CHECKF(gf(c + 12), 0.25f), CHECKF(gf(c + 20), 1.0f), CHECKF(gf(c + 60), 1.0f);
+    clear(dev, 0xFF000000u);
+    full_quad(dev);
+    read_rt(dev, rt, 64, 64, g_px);
+    const float tint[4] = { 1.0f, 0.5f, 0.25f, 1.0f }, black[4] = { 0, 0, 0, 1 };
+    expect_px("tinted", g_px[32 * 64 + 40], tint, 1);
+    expect_px("left of the quad", g_px[32 * 64 + 10], black, 0);
+    expect_px("inside at the left edge", g_px[32 * 64 + 26], tint, 1);
+    CHECKEQ(vcall(e, FX_EndPass, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_End, 0), D3D_OK);
+    /* GetPassDesc gives the pass's shader tokens */
+    uint32_t pd = gmem(16);
+    CHECKEQ(vcall(e, FX_GetPassDesc, 2, vcall(e, FX_GetPass, 2, t, 0u), pd), D3D_OK);
+    CHECKEQ(MEM32(MEM32(pd + 8)), 0xFFFE0101u), CHECKEQ(MEM32(MEM32(pd + 12)), 0xFFFF0200u);
+    CHECKEQ(vcall(e, FX_OnLostDevice, 0), D3D_OK), CHECKEQ(vcall(e, FX_OnResetDevice, 0), D3D_OK);
+    vcall(e, FX_Release, 0);
+}
+
+/* ---- fx_preshader_commit: the pixel shader's c0 = Tint * Scale, computed by its preshader ---- */
+
+static uint32_t draw_centre(uint32_t dev, uint32_t rt) {
+    clear(dev, 0xFF000000u);
+    full_quad(dev);
+    read_rt(dev, rt, 64, 64, g_px);
+    return g_px[32 * 64 + 32];
+}
+static void group_fx_preshader_commit(const char *path) {
+    uint32_t dev = new_device_sized(), rt = argb_target(dev);
+    uint32_t e = create_file(dev, path, 0);
+    if (!e) return;
+    pos_decl(dev);
+    set_vec(e, "Tint", 1.0f, 0.5f, 0.25f, 1.0f);
+    uint32_t np = gmem(4), sc = byname(e, "Scale");
+    CHECKEQ(vcall(e, FX_IsParameterUsed, 2, sc, vcall(e, FX_GetTechnique, 1, 0u)), 1);   /* through the preshader */
+    CHECKEQ(vcall(e, FX_Begin, 2, np, 0u), D3D_OK);
+    CHECKEQ(vcall(e, FX_BeginPass, 1, 0u), D3D_OK);
+    const float full[4] = { 1.0f, 0.5f, 0.25f, 1.0f }, half[4] = { 0.5f, 0.25f, 0.125f, 0.5f };
+    expect_px("Scale 1", draw_centre(dev, rt), full, 1);
+    uint32_t n0 = g_fx_const_uploads;
+    CHECKEQ(vcall(e, FX_CommitChanges, 0), D3D_OK);              /* nothing changed: nothing uploaded */
+    CHECKEQ(g_fx_const_uploads, n0);
+    CHECKEQ(vcall(e, FX_SetFloat, 2, sc, f2u(0.5f)), D3D_OK);
+    expect_px("Scale 0.5 before CommitChanges", draw_centre(dev, rt), full, 1);
+    CHECKEQ(vcall(e, FX_CommitChanges, 0), D3D_OK);
+    CHECKEQ(g_fx_const_uploads, n0 + 1);                          /* the preshader's c0 only */
+    expect_px("Scale 0.5", draw_centre(dev, rt), half, 1);
+    const float m[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    set_matrix_rows(e, "WorldViewProj", m);
+    CHECKEQ(vcall(e, FX_CommitChanges, 0), D3D_OK);
+    CHECKEQ(g_fx_const_uploads, n0 + 2);                          /* the vertex shader's matrix only */
+    CHECKEQ(vcall(e, FX_CommitChanges, 0), D3D_OK);
+    CHECKEQ(g_fx_const_uploads, n0 + 2);
+    CHECKEQ(vcall(e, FX_EndPass, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_CommitChanges, 0), D3D_OK);              /* no pass: nothing to do */
+    CHECKEQ(vcall(e, FX_End, 0), D3D_OK);
+    vcall(e, FX_Release, 0);
+}
+
+/* ---- fx_pool_commit: Tint shared by two effects in a pool; a third has its own ---- */
+
+static void ps_c0(uint32_t dev, float *v) {
+    uint32_t g = gmem(16);
+    CHECKEQ(vcall(dev, DV_GetPixelShaderConstantF, 3, 0u, g, 1u), D3D_OK);
+    for (int i = 0; i < 4; i++) v[i] = gf(g + 4 * (uint32_t)i);
+}
+static void group_fx_pool_commit(const char *shared, const char *own) {
+    uint32_t dev = new_device_sized(), po = gmem(4), np = gmem(4), v4 = gmem(16);
+    CHECKEQ(call("D3DXCreateEffectPool", 1, po), D3D_OK);
+    uint32_t a = create_file(dev, shared, MEM32(po)), b = create_file(dev, shared, MEM32(po));
+    uint32_t c = create_file(dev, own, MEM32(po));
+    if (!a || !b || !c) return;
+    const float one[4] = { 1, 1, 1, 1 }, green[4] = { 0, 1, 0, 1 };
+    float v[4];
+    CHECKEQ(vcall(b, FX_Begin, 2, np, 1u), D3D_OK);
+    CHECKEQ(vcall(b, FX_BeginPass, 1, 0u), D3D_OK);
+    ps_c0(dev, v), expect_vec("b's Tint at BeginPass", v, one, 4);
+    set_vec(a, "Tint", 0, 1, 0, 1);                               /* through the other effect */
+    CHECKEQ(vcall(b, FX_CommitChanges, 0), D3D_OK);
+    ps_c0(dev, v), expect_vec("b's Tint after a's SetVector and b's CommitChanges", v, green, 4);
+    CHECKEQ(vcall(b, FX_EndPass, 0), D3D_OK);
+    CHECKEQ(vcall(b, FX_End, 0), D3D_OK);
+    CHECKEQ(vcall(c, FX_GetVector, 2, byname(c, "Tint"), v4), D3D_OK);
+    for (int i = 0; i < 4; i++) v[i] = gf(v4 + 4 * (uint32_t)i);
+    expect_vec("c's own Tint", v, one, 4);
+    CHECKEQ(vcall(c, FX_Begin, 2, np, 1u), D3D_OK);
+    CHECKEQ(vcall(c, FX_BeginPass, 1, 0u), D3D_OK);
+    ps_c0(dev, v), expect_vec("c's Tint at BeginPass", v, one, 4);
+    CHECKEQ(vcall(c, FX_EndPass, 0), D3D_OK);
+    CHECKEQ(vcall(c, FX_End, 0), D3D_OK);
+    CHECKEQ(vcall(a, FX_Begin, 2, np, 1u), D3D_OK);              /* a's next BeginPass sees it too */
+    CHECKEQ(vcall(a, FX_BeginPass, 1, 0u), D3D_OK);
+    ps_c0(dev, v), expect_vec("a's Tint at BeginPass", v, green, 4);
+    CHECKEQ(vcall(a, FX_EndPass, 0), D3D_OK);
+    CHECKEQ(vcall(a, FX_End, 0), D3D_OK);
+    vcall(a, FX_Release, 0), vcall(b, FX_Release, 0), vcall(c, FX_Release, 0);
+}
+
+/* ---- fx_selector: VertexShader = vsa[which]; the second shader's bool and int constants ---- */
+
+static uint32_t bound_vs_version(uint32_t dev) {
+    uint32_t vs = shader_get(dev, DV_GetVertexShader), sz = gmem(4);
+    if (!vs) return 0;
+    CHECKEQ(vcall(vs, SH_GetFunction, 2, 0u, sz), D3D_OK);
+    uint32_t fn = gmem(MEM32(sz));
+    CHECKEQ(vcall(vs, SH_GetFunction, 2, fn, sz), D3D_OK);
+    return MEM32(fn);
+}
+static void group_fx_selector(const char *path) {
+    uint32_t dev = new_device_sized();
+    uint32_t e = create_file(dev, path, 0);
+    if (!e) return;
+    uint32_t np = gmem(4), t = vcall(e, FX_GetTechnique, 1, 0u), w = byname(e, "which"), g = gmem(64);
+    CHECKEQ(vcall(e, FX_ValidateTechnique, 1, t), D3D_OK);
+    CHECKEQ(vcall(e, FX_IsParameterUsed, 2, w, t), 1);
+    CHECKEQ(vcall(e, FX_IsParameterUsed, 2, byname(e, "Ints"), t), 1);     /* in an element's constant table */
+    CHECKEQ(vcall(e, FX_Begin, 2, np, 0u), D3D_OK);
+    CHECKEQ(vcall(e, FX_BeginPass, 1, 0u), D3D_OK);
+    CHECKEQ(bound_vs_version(dev), 0xFFFE0101u);
+    CHECKEQ(vcall(e, FX_SetInt, 2, w, 1u), D3D_OK);
+    CHECKEQ(vcall(e, FX_CommitChanges, 0), D3D_OK);
+    CHECKEQ(bound_vs_version(dev), 0xFFFE0200u);
+    CHECKEQ(vcall(dev, 99, 3, 0u, g, 4u), D3D_OK);              /* GetVertexShaderConstantB: b1-b2 are Flags */
+    CHECKEQ(MEM32(g + 4), 0), CHECKEQ(MEM32(g + 8), 1);
+    CHECKEQ(vcall(dev, 97, 3, 0u, g, 1u), D3D_OK);              /* GetVertexShaderConstantI: i0 is Ints */
+    CHECKEQ(MEM32(g), 3), CHECKEQ(MEM32(g + 4), (uint32_t)-4), CHECKEQ(MEM32(g + 8), 5), CHECKEQ(MEM32(g + 12), 6);
+    CHECKEQ(vcall(e, FX_EndPass, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_End, 0), D3D_OK);
+    CHECKEQ(bound_vs_version(dev), 0);                           /* End restored no shader */
+    vcall(e, FX_Release, 0);
+}
+
+/* ---- fx_save_restore: around Begin/End, with and without the D3DXFX_DONOTSAVE* flags ---- */
+
+static uint32_t vs_obj(uint32_t dev) {
+    static const char src[] = "vs_1_1\ndcl_position v0\nmov oPos, v0\n";
+    uint32_t *t = NULL, nt = 0, out = gmem(4);
+    char *errs = NULL;
+    if (sm_assemble(src, sizeof src - 1, NULL, &t, &nt, &errs)) { printf("FAIL asm: %s\n", errs); fails++; return 0; }
+    CHECKEQ(vcall(dev, DV_CreateVertexShader, 2, gbytes(t, 4 * nt), out), D3D_OK);
+    free(t);
+    return MEM32(out);
+}
+struct dstate { uint32_t z, ab, src, minf, vs, ps; };
+static struct dstate dget(uint32_t dev) {
+    struct dstate s = { rs_get(dev, 7), rs_get(dev, 27), rs_get(dev, 19), ss_get(dev, 0, 6),
+                        shader_get(dev, DV_GetVertexShader), shader_get(dev, DV_GetPixelShader) };
+    return s;
+}
+static void group_fx_save_restore(const char *path) {
+    uint32_t dev = new_device_sized();
+    uint32_t e = create_file(dev, path, 0);
+    if (!e) return;
+    uint32_t vs0 = vs_obj(dev), np = gmem(4);
+    static const uint32_t flags[] = { 0, 1, 2, 4 };
+    for (int k = 0; k < 4; k++) {
+        CHECKEQ(vcall(dev, DV_SetRenderState, 2, 7u, 1u), D3D_OK);
+        CHECKEQ(vcall(dev, DV_SetRenderState, 2, 27u, 0u), D3D_OK);
+        CHECKEQ(vcall(dev, DV_SetRenderState, 2, 19u, 2u), D3D_OK);
+        CHECKEQ(vcall(dev, DV_SetSamplerState, 3, 0u, 6u, 1u), D3D_OK);
+        CHECKEQ(vcall(dev, DV_SetVertexShader, 1, vs0), D3D_OK);
+        CHECKEQ(vcall(dev, DV_SetPixelShader, 1, 0u), D3D_OK);
+        struct dstate before = dget(dev);
+        CHECKEQ(vcall(e, FX_Begin, 2, np, flags[k]), D3D_OK);
+        CHECKEQ(vcall(e, FX_BeginPass, 1, 0u), D3D_OK);
+        struct dstate in = dget(dev);
+        CHECKEQ(in.z, 0), CHECKEQ(in.ab, 1), CHECKEQ(in.src, 5), CHECKEQ(in.minf, 2);
+        CHECK(in.vs != 0 && in.vs != vs0 && in.ps != 0);
+        CHECKEQ(vcall(e, FX_EndPass, 0), D3D_OK);
+        CHECKEQ(vcall(e, FX_End, 0), D3D_OK);
+        struct dstate after = dget(dev);
+        int all = flags[k] == 0, none = flags[k] == 1, shader = flags[k] == 2, sampler = flags[k] == 4;
+        printf("flags %u: z %u ab %u src %u minfilter %u vs %s ps %s\n", flags[k], after.z, after.ab, after.src,
+               after.minf, after.vs == vs0 ? "restored" : "pass's", after.ps ? "pass's" : "restored");
+        struct dstate *rs_want = none ? &in : &before, *sh_want = none || shader ? &in : &before;
+        struct dstate *ss_want = none || sampler ? &in : &before;
+        (void)all;
+        CHECKEQ(after.z, rs_want->z), CHECKEQ(after.ab, rs_want->ab), CHECKEQ(after.src, rs_want->src);
+        CHECKEQ(after.minf, ss_want->minf);
+        CHECKEQ(after.vs, sh_want->vs), CHECKEQ(after.ps, sh_want->ps);
+    }
+    CHECKEQ(vcall(dev, DV_SetVertexShader, 1, 0u), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetPixelShader, 1, 0u), D3D_OK);
+    vcall(vs0, 2, 0);
+    vcall(e, FX_Release, 0);
+}
+
+/* ---- fx_validate: t0 has a vs_3_0 blob, t2 a ZFUNC of 99; t1 and t3 are valid ---- */
+
+static void group_fx_validate(const char *path) {
+    uint32_t dev = new_device_sized();
+    uint32_t e = create_file(dev, path, 0);
+    if (!e) return;
+    uint32_t t[4], out = gmem(4);
+    for (uint32_t i = 0; i < 4; i++) t[i] = vcall(e, FX_GetTechnique, 1, i);
+    CHECKEQ(vcall(e, FX_ValidateTechnique, 1, t[0]), D3DERR_INVALIDCALL);
+    CHECKEQ(vcall(e, FX_ValidateTechnique, 1, t[1]), D3D_OK);
+    CHECKEQ(vcall(e, FX_ValidateTechnique, 1, t[2]), D3DERR_INVALIDCALL);
+    CHECKEQ(vcall(e, FX_ValidateTechnique, 1, gstr("t3")), D3D_OK);
+    CHECKEQ(vcall(e, FX_ValidateTechnique, 1, 0u), D3DERR_INVALIDCALL);
+    MEM32(out) = 0xCDCDCDCDu;
+    CHECKEQ(vcall(e, FX_FindNextValidTechnique, 2, 0u, out), D3D_OK), CHECKEQ(MEM32(out), t[1]);
+    CHECKEQ(vcall(e, FX_FindNextValidTechnique, 2, t[1], out), D3D_OK), CHECKEQ(MEM32(out), t[3]);
+    CHECKEQ(vcall(e, FX_FindNextValidTechnique, 2, t[3], out), S_FALSE_), CHECKEQ(MEM32(out), 0);
+    CHECKEQ(vcall(e, FX_FindNextValidTechnique, 2, 0u, 0u), D3DERR_INVALIDCALL);
+    CHECKEQ(vcall(e, FX_GetCurrentTechnique, 0), t[0]);
+    CHECKEQ(vcall(e, FX_SetTechnique, 1, t[1]), D3D_OK), CHECKEQ(vcall(e, FX_GetCurrentTechnique, 0), t[1]);
+    CHECKEQ(vcall(e, FX_SetTechnique, 1, gstr("t3")), D3D_OK), CHECKEQ(vcall(e, FX_GetCurrentTechnique, 0), t[3]);
+    CHECKEQ(vcall(e, FX_SetTechnique, 1, gstr("none")), D3DERR_INVALIDCALL);
+    CHECKEQ(vcall(e, FX_SetTechnique, 1, 0u), D3DERR_INVALIDCALL);
+    CHECKEQ(vcall(e, FX_GetCurrentTechnique, 0), t[3]);
+    uint32_t np = gmem(4);
+    CHECKEQ(vcall(e, FX_Begin, 2, np, 1u), D3D_OK), CHECKEQ(MEM32(np), 2);
+    CHECKEQ(vcall(e, FX_End, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_Begin, 2, 0u, 1u), D3D_OK);              /* the pass count is optional */
+    CHECKEQ(vcall(e, FX_End, 0), D3D_OK);
+    vcall(e, FX_Release, 0);
+}
+
+/* ---- fx_game_render: every technique of the game's effects that validates, every pass drawn ---- */
+
+static uint32_t g_decls[64][2];                                  /* (input mask hash, declaration) */
+static uint32_t decl_for(uint32_t dev, const uint8_t (*usage)[2], int n) {
+    uint32_t key = 0x811C9DC5u;
+    for (int i = 0; i < n; i++) key = (key ^ (uint32_t)(usage[i][0] << 8 | usage[i][1])) * 16777619u;
+    key ^= (uint32_t)n;
+    for (int i = 0; i < 64 && g_decls[i][1]; i++) if (g_decls[i][0] == key) return g_decls[i][1];
+    uint32_t el = gmem(8 * (uint32_t)(n + 1)), out = gmem(4);
+    for (int i = 0; i <= n; i++) {
+        uint32_t p = el + 8 * (uint32_t)i;
+        if (i == n) { MEM16(p) = 0xFF, MEM16(p + 2) = 0, MEM8(p + 4) = 17, MEM8(p + 5) = 0, MEM8(p + 6) = 0, MEM8(p + 7) = 0; break; }
+        MEM16(p) = 0, MEM16(p + 2) = (uint16_t)(16 * i), MEM8(p + 4) = 3, MEM8(p + 5) = 0;   /* FLOAT4 */
+        MEM8(p + 6) = usage[i][0], MEM8(p + 7) = usage[i][1];
+    }
+    CHECKEQ(vcall(dev, DV_CreateVertexDeclaration, 2, el, out), D3D_OK);
+    for (int i = 0; i < 64; i++) if (!g_decls[i][1]) { g_decls[i][0] = key, g_decls[i][1] = MEM32(out); break; }
+    return MEM32(out);
+}
+/* a quad bound by the bound vertex shader's inputs (or XYZ | DIFFUSE | TEX1 without one) */
+static void dummy_quad(uint32_t dev) {
+    uint32_t vs = shader_get(dev, DV_GetVertexShader);
+    if (!vs) {
+        struct { float x, y, z; uint32_t c; float u, v; } q[4] = {
+            { -1, 1, 0.5f, 0xFF808080u, 0, 0 }, { 1, 1, 0.5f, 0xFF808080u, 1, 0 }, { -1, -1, 0.5f, 0xFF808080u, 0, 1 },
+            { 1, -1, 0.5f, 0xFF808080u, 1, 1 } };
+        CHECKEQ(vcall(dev, DV_SetFVF, 1, 0x142u), D3D_OK);
+        draw_up(dev, 5, 2, q, 4, sizeof q[0]);
+        return;
+    }
+    uint32_t sz = gmem(4);
+    CHECKEQ(vcall(vs, SH_GetFunction, 2, 0u, sz), D3D_OK);
+    uint32_t fn = gmem(MEM32(sz));
+    CHECKEQ(vcall(vs, SH_GetFunction, 2, fn, sz), D3D_OK);
+    struct sm_shader s;
+    char err[256];
+    if (sm_decode(hle_ptr(fn), MEM32(sz) / 4, &s, err, sizeof err)) { printf("FAIL decode: %s\n", err); fails++; return; }
+    uint8_t usage[16][2];
+    int n = 0, pos = -1;
+    for (uint32_t i = 0; i < s.nins && n < 16; i++)
+        if (s.ins[i].op == SM_DCL && s.ins[i].dst.type == SM_R_INPUT) {
+            usage[n][0] = (uint8_t)s.ins[i].usage, usage[n][1] = (uint8_t)s.ins[i].usage_index;
+            if (s.ins[i].usage == SM_USAGE_POSITION && !s.ins[i].usage_index) pos = n;
+            n++;
+        }
+    if (s.major < 2 && !n) n = 0;
+    sm_free(&s);
+    CHECKEQ(vcall(dev, DV_SetVertexDeclaration, 1, decl_for(dev, (const uint8_t (*)[2])usage, n)), D3D_OK);
+    float v[4][16][4];
+    static const float xy[4][2] = { { -1, 1 }, { 1, 1 }, { -1, -1 }, { 1, -1 } };
+    for (int k = 0; k < 4; k++)
+        for (int i = 0; i < 16; i++) {
+            v[k][i][0] = i == pos ? xy[k][0] : 0.5f, v[k][i][1] = i == pos ? xy[k][1] : 0.5f;
+            v[k][i][2] = 0.5f, v[k][i][3] = 1.0f;
+        }
+    float flat[4 * 16 * 4];
+    uint32_t stride = 16 * (uint32_t)(n ? n : 1);
+    for (int k = 0; k < 4; k++) memcpy(flat + k * (stride / 4), v[k], stride);
+    draw_up(dev, 5, 2, flat, 4, stride);
+}
+static void group_fx_game_render(const char *dir) {
+    int nn;
+    char **names = list_dir(dir, &nn);
+    uint32_t dev = new_device_sized(), po = gmem(4), np = gmem(4);
+    CHECKEQ(call("D3DXCreateEffectPool", 1, po), D3D_OK);
+    uint32_t techs = 0, valid = 0, passes = 0, drawn = 0;
+    for (int i = 0; i < nn; i++) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+        uint32_t e = create_file(dev, path, MEM32(po));
+        if (!e) continue;
+        uint32_t desc = gmem(16), tdesc = gmem(12), ev = 0, ep = 0;
+        CHECKEQ(vcall(e, FX_GetDesc, 1, desc), D3D_OK);
+        for (uint32_t t = 0; t < MEM32(desc + 8); t++) {
+            uint32_t h = vcall(e, FX_GetTechnique, 1, t);
+            techs++;
+            CHECKEQ(vcall(e, FX_GetTechniqueDesc, 2, h, tdesc), D3D_OK);
+            if (vcall(e, FX_ValidateTechnique, 1, h) != D3D_OK) continue;
+            valid++, ev++;
+            passes += MEM32(tdesc + 4);
+            CHECKEQ(vcall(e, FX_SetTechnique, 1, h), D3D_OK);
+            CHECKEQ(vcall(e, FX_Begin, 2, np, 0u), D3D_OK);
+            CHECKEQ(MEM32(np), MEM32(tdesc + 4));
+            for (uint32_t p = 0; p < MEM32(np); p++) {
+                CHECKEQ(vcall(e, FX_BeginPass, 1, p), D3D_OK);
+                dummy_quad(dev);
+                CHECKEQ(vcall(e, FX_EndPass, 0), D3D_OK);
+                drawn++, ep++;
+            }
+            CHECKEQ(vcall(e, FX_End, 0), D3D_OK);
+        }
+        printf("%s: techniques %u valid %u passes drawn %u\n", names[i], MEM32(desc + 8), ev, ep);
+        fflush(stdout);
+    }
+    printf("render totals: techniques %u valid %u passes %u drawn %u\n", techs, valid, passes, drawn);
 }
 
 int main(int argc, char **argv) {
@@ -686,6 +1364,17 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "fx_parse_errors") && a1) group_fx_parse_errors(a1);
     else if (!strcmp(argv[1], "fx_text")) group_fx_text();
     else if (!strcmp(argv[1], "fx_game_parse") && a1) group_fx_game_parse(a1);
+    else if (!strcmp(argv[1], "fx_asm") && a1) group_fx_asm(a1);
+    else if (!strcmp(argv[1], "fx_expr") && a2) group_fx_expr(a1, atoi(a2));
+    else if (!strcmp(argv[1], "fx_expr_game_ops") && a1) group_fx_expr_game_ops(a1);
+    else if (!strcmp(argv[1], "fx_pass_states") && a1) group_fx_pass_states(a1);
+    else if (!strcmp(argv[1], "fx_shaders") && a1) group_fx_shaders(a1);
+    else if (!strcmp(argv[1], "fx_preshader_commit") && a1) group_fx_preshader_commit(a1);
+    else if (!strcmp(argv[1], "fx_save_restore") && a1) group_fx_save_restore(a1);
+    else if (!strcmp(argv[1], "fx_selector") && a1) group_fx_selector(a1);
+    else if (!strcmp(argv[1], "fx_pool_commit") && a2) group_fx_pool_commit(a1, a2);
+    else if (!strcmp(argv[1], "fx_validate") && a1) group_fx_validate(a1);
+    else if (!strcmp(argv[1], "fx_game_render") && a1) group_fx_game_render(a1);
     else { fprintf(stderr, "fx_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

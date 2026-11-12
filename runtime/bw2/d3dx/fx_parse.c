@@ -257,7 +257,10 @@ static void each_state(struct fx_effect *e, void (*fn)(struct fx_state *)) {
 
 static void free_param(struct fx_param *p);
 static void free_states(struct fx_state *s, uint32_t n) {
-    for (uint32_t i = 0; i < n; i++) free_param(&s[i].param);
+    for (uint32_t i = 0; i < n; i++) {
+        free_param(&s[i].param);
+        if (s[i].expr) fx_expr_free(s[i].expr), free(s[i].expr);
+    }
     free(s);
 }
 static void free_annos(struct fx_param *a, uint32_t n) {
@@ -285,6 +288,7 @@ void fx_free(struct fx_effect *e) {
         free(tq->passes);
     }
     free(e->techs);
+    for (uint32_t i = 0; i < e->nobjects; i++) fx_shader_free(&e->objects[i]);
     free(e->objects);
     free(e->hrec);
     for (uint32_t i = 0; i < e->nstrings; i++) hle_free(hle_ptr(e->strings[i]));

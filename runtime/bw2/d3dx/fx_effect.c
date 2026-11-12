@@ -2,7 +2,6 @@
  * fx_effect.c - ID3DXEffect's ID3DXBaseEffect methods (descriptions, handles
  * and parameter values), D3DXCreateEffect and D3DXCreateEffectPool (plan 5
  * Task 5), and CloneEffect, which the game calls on every effect it loads.
- * Techniques and passes are Task 6's (fx_states.c, fx_expr.c).
  *
  * Values follow D3DX's conversions: numbers convert between bool, int and
  * float on the way in and out (a float set on an int truncates, a bool reads
@@ -10,6 +9,11 @@
  * matrices are stored as declared (rows or columns) and converted at
  * Set/Get; textures (and shaders) in values hold a reference. A call on the
  * wrong kind of parameter gives D3DERR_INVALIDCALL.
+ *
+ * Task 6: the technique and pass methods (SetTechnique, ValidateTechnique,
+ * Begin/BeginPass/CommitChanges/EndPass/End ...), whose work is fx_states.c's.
+ * SetStateManager and the parameter blocks stay unimplemented: they stop
+ * loudly, naming themselves.
  *
  * A pool holds one value per shared parameter name: effects created with the
  * pool bind their shared parameters to it, and a type that differs from the
@@ -518,6 +522,97 @@ static void x_GetPool(void) {                       /* (this, ID3DXEffectPool**)
     MEM32(A32(1)) = c->pool;
     RET(D3D_OK, 2);
 }
+/* ---- techniques and passes (Task 6; the work is fx_states.c's) ---- */
+
+#define S_FALSE 1u
+static void x_SetTechnique(void) {                  /* (this, hTechnique) */
+    struct fx_effect *e = FX(0);
+    struct fx_technique *t = fx_tech_of(e, A32(1));
+    if (!t) RET(D3DERR_INVALIDCALL, 2);
+    e->cur = t;
+    RET(D3D_OK, 2);
+}
+static void x_GetCurrentTechnique(void) {           /* (this) */
+    struct fx_effect *e = FX(0);
+    RET(e->cur ? e->cur->handle : 0, 1);
+}
+static void x_ValidateTechnique(void) {             /* (this, hTechnique) */
+    struct fx_effect *e = FX(0);
+    struct fx_technique *t = fx_tech_of(e, A32(1));
+    RET(t && fx_tech_valid(e, t) ? D3D_OK : D3DERR_INVALIDCALL, 2);
+}
+static void x_FindNextValidTechnique(void) {        /* (this, hTechnique or NULL, D3DXHANDLE*) */
+    struct fx_effect *e = FX(0);
+    uint32_t out = A32(2), i = 0;
+    if (!out) RET(D3DERR_INVALIDCALL, 3);
+    if (A32(1)) {
+        struct fx_technique *t = fx_tech_of(e, A32(1));
+        if (!t) RET(D3DERR_INVALIDCALL, 3);
+        i = (uint32_t)(t - e->techs) + 1;
+    }
+    for (; i < e->ntechs; i++)
+        if (fx_tech_valid(e, &e->techs[i])) { MEM32(out) = e->techs[i].handle; RET(D3D_OK, 3); }
+    MEM32(out) = 0;
+    RET(S_FALSE, 3);
+}
+static void x_IsParameterUsed(void) {               /* (this, hParameter, hTechnique): BOOL */
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
+    struct fx_technique *t = fx_tech_of(e, A32(2));
+    RET(p && t && fx_param_used(e, p, t) ? 1u : 0u, 3);
+}
+static void end_effect(struct fx_effect *e) {      /* End's work: the saved state back */
+    if (e->saved) {
+        uint32_t a[1] = { e->saved };
+        hle_call_guest(MEM32(MEM32(e->saved) + 4u * 5u), 1, a);   /* IDirect3DStateBlock9::Apply */
+        d3d_release(e->saved);
+        e->saved = 0;
+    }
+    e->begun = 0, e->pass = NULL;
+}
+static void x_Begin(void) {                         /* (this, UINT* passes, flags) */
+    struct fx_effect *e = FX(0);
+    uint32_t np = A32(1), flags = A32(2);
+    if (!e->cur) RET(D3DERR_INVALIDCALL, 3);
+    if (e->begun) end_effect(e);
+    if (np) MEM32(np) = e->cur->npasses;
+    e->saved = flags & 1u ? 0 : fx_begin(e, flags);    /* D3DXFX_DONOTSAVESTATE */
+    e->begun = 1, e->begin_flags = flags, e->pass = NULL;
+    RET(D3D_OK, 3);
+}
+static void x_BeginPass(void) {                     /* (this, pass) */
+    struct fx_effect *e = FX(0);
+    uint32_t i = A32(1);
+    if (!e->begun || !e->cur || i >= e->cur->npasses) RET(D3DERR_INVALIDCALL, 2);
+    e->pass = &e->cur->passes[i];
+    fx_apply_pass(e, e->pass, 1);
+    RET(D3D_OK, 2);
+}
+static void x_CommitChanges(void) {                 /* (this) */
+    struct fx_effect *e = FX(0);
+    if (e->pass) fx_apply_pass(e, e->pass, 0);
+    RET(D3D_OK, 1);
+}
+static void x_EndPass(void) {                       /* (this) */
+    struct fx_effect *e = FX(0);
+    if (!e->pass) RET(D3DERR_INVALIDCALL, 1);
+    e->pass = NULL;
+    RET(D3D_OK, 1);
+}
+static void x_End(void) {                           /* (this) */
+    struct fx_effect *e = FX(0);
+    if (e->begun) end_effect(e);
+    RET(D3D_OK, 1);
+}
+static void x_OnLostDevice(void) { (void)FX(0); RET(D3D_OK, 1); }
+static void x_OnResetDevice(void) { (void)FX(0); RET(D3D_OK, 1); }
+static void x_GetStateManager(void) {               /* (this, ID3DXEffectStateManager**): none can be set */
+    (void)FX(0);
+    if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
+    MEM32(A32(1)) = 0;
+    RET(D3D_OK, 2);
+}
+
 static void x_GetDevice(void) {                     /* (this, IDirect3DDevice9**) */
     struct fx_com *c = d3d_host(A32(0), D3DK_EFFECT);
     if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
@@ -600,6 +695,7 @@ static int pool_bind(struct fx_pool *pl, struct fx_effect *e, char *msg, size_t 
 static void effect_destroy(struct d3d_obj *o) {
     struct fx_com *c = (struct fx_com *)o;
     struct fx_effect *e = &c->fx;
+    if (e->saved) d3d_release(e->saved);
     for (uint32_t i = 0; i < e->nparams; i++)
         if (e->params[i].owned) fx_leaves(&e->params[i], release_leaf, NULL);
     for (uint32_t i = 0; i < e->nobjects; i++) com_release(e->objects[i].guest);
@@ -640,6 +736,7 @@ static void x_CloneEffect(void) {                   /* (this, IDirect3DDevice9*,
         fx_leaves(p, clone_leaf, NULL);
     }
     k->fx.pool = c->fx.pool;
+    k->fx.device = dev, k->fx.cur = k->fx.ntechs ? &k->fx.techs[0] : NULL;
     k->base.destroy = effect_destroy;
     k->device = dev, k->pool = c->pool, k->flags = c->flags;
     d3d_addref(dev);
@@ -675,6 +772,7 @@ static void x_D3DXCreateEffect(void) {
         RET(D3DERR_INVALIDCALL, 9);
     }
     c->fx.pool = pl;
+    c->fx.device = dev, c->fx.cur = c->fx.ntechs ? &c->fx.techs[0] : NULL;
     c->base.destroy = effect_destroy;
     c->device = dev, c->pool = pool, c->flags = A32(5);
     d3d_addref(dev);
@@ -716,6 +814,14 @@ static const win32hle_shim g_impls[] = {
     { "ID3DXEffect::SetTexture", x_SetTexture }, { "ID3DXEffect::GetTexture", x_GetTexture },
     { "ID3DXEffect::SetArrayRange", x_SetArrayRange }, { "ID3DXEffect::GetPool", x_GetPool },
     { "ID3DXEffect::GetDevice", x_GetDevice }, { "ID3DXEffect::CloneEffect", x_CloneEffect },
+    { "ID3DXEffect::SetTechnique", x_SetTechnique }, { "ID3DXEffect::GetCurrentTechnique", x_GetCurrentTechnique },
+    { "ID3DXEffect::ValidateTechnique", x_ValidateTechnique },
+    { "ID3DXEffect::FindNextValidTechnique", x_FindNextValidTechnique },
+    { "ID3DXEffect::IsParameterUsed", x_IsParameterUsed }, { "ID3DXEffect::Begin", x_Begin },
+    { "ID3DXEffect::BeginPass", x_BeginPass }, { "ID3DXEffect::CommitChanges", x_CommitChanges },
+    { "ID3DXEffect::EndPass", x_EndPass }, { "ID3DXEffect::End", x_End },
+    { "ID3DXEffect::OnLostDevice", x_OnLostDevice }, { "ID3DXEffect::OnResetDevice", x_OnResetDevice },
+    { "ID3DXEffect::GetStateManager", x_GetStateManager },
     { 0, 0 } };
 static const win32hle_shim g_exports[] = {
     { "D3DXCreateEffect", x_D3DXCreateEffect }, { "D3DXCreateEffectPool", x_D3DXCreateEffectPool }, { 0, 0 } };

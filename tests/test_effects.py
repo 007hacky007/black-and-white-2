@@ -279,3 +279,210 @@ def test_fx_vtable_against_game(tmp_path):
     assert len(calls) >= 300, len(calls)
     assert {"Begin", "BeginPass", "EndPass", "End", "SetTechnique", "SetMatrix", "SetTexture"} <= \
         {methods[s] for _, _, s, _ in calls}
+
+
+# ---- Task 6: expressions, techniques and passes ----
+
+D3DXFX_DONOTSAVESTATE, D3DXFX_DONOTSAVESHADERSTATE, D3DXFX_DONOTSAVESAMPLERSTATE = 1, 2, 4
+
+
+def assemble(exe, tmp_path, src):
+    """Shader tokens from the engine's assembler (the selftest's fx_asm group)."""
+    p = tmp_path / "shader.asm"
+    p.write_text(src)
+    r = check(exe, "fx_asm", tmp_path, p)
+    words = next(ln for ln in r.stdout.splitlines() if ln.startswith("tokens:")).split()[1:]
+    return b"".join(int(w, 16).to_bytes(4, "little") for w in words)
+
+
+VS_WVP = "vs_1_1\ndcl_position v0\nm4x4 oPos, v0, c0\n"
+PS_C0 = "ps_2_0\nmov oC0, c0\n"
+WVP_CONST = F.Const("WorldViewProj", F.RS_FLOAT4, 0, 4, F.MATRIX_COLUMNS_T)
+TINT_CONST = F.Const("Tint", F.RS_FLOAT4, 0, 1, F.FLOAT4_T)
+VS_OBJ, PS_OBJ = F.P(None, F.VERTEXSHADER, F.OBJECT), F.P(None, F.PIXELSHADER, F.OBJECT)
+
+
+def i32(v):
+    return F.scalar(None, F.INT, v)
+
+
+def b32(v):
+    return F.scalar(None, F.BOOL, v)
+
+
+# The expressions fx_expr checks, in order, each a VertexShaderConstantF[k] state of one pass: inputs A, B
+# and C (float4) in c0, c1 and c2; the selftest computes the same in C.
+EXPR_INPUTS = [F.Const("A", F.RS_FLOAT4, 0, 1, F.FLOAT4_T), F.Const("B", F.RS_FLOAT4, 1, 1, F.FLOAT4_T),
+               F.Const("C", F.RS_FLOAT4, 2, 1, F.FLOAT4_T)]
+A, B, C, T = (F.IN, 0), (F.IN, 4), (F.IN, 8), (F.TEMP, 0)
+
+
+def o(k=0):
+    return (F.OUT, k)
+
+
+EXPRS = {
+    "mad": [F.ins("mul", 4, [A, B, T]), F.ins("add", 4, [T, C, o()])],
+    "dot": [F.ins("dot", 4, [A, B, o()])],
+    "rcp": [F.ins("rcp", 1, [(F.IN, k), o(k)]) for k in range(4)],
+    "rsq": [F.ins("rsq", 1, [(F.IN, 4 + k), o(k)]) for k in range(4)],
+    "min": [F.ins("min", 4, [A, B, o()])],
+    "max": [F.ins("max", 4, [A, B, o()])],
+    "lt": [F.ins("lt", 4, [A, B, o()])],
+    "ge": [F.ins("ge", 4, [A, B, o()])],
+    "frc": [F.ins("frc", 4, [C, o()])],
+    "sin": [F.ins("sin", 1, [(F.IN, k), o(k)]) for k in range(4)],
+    "cos": [F.ins("cos", 1, [(F.IN, k), o(k)]) for k in range(4)],
+    "neg": [F.ins("neg", 4, [B, o()])],
+    "scalar_mul": [F.ins("mul", 4, [(F.IN, 2), C, o()], scalar=True)],
+    "literal": [F.ins("add", 1, [(F.LIT, 1), (F.IN, 3), o(0)]), F.ins("mov", 2, [(F.LIT, 0), o(1)])],
+    "cmp": [F.ins("cmp", 4, [B, A, C, o()])],
+}
+
+
+def expr_effect():
+    states = [F.State(148, F.vector(None, [0, 0, 0, 0]), index=k,
+                      blob=F.expr(ins_, EXPR_INPUTS, literals=[0.75, 2.5]))
+              for k, ins_ in enumerate(EXPRS.values())]
+    return F.build([F.vector("A", [1.5, -2.25, 0.3, 4.0]), F.vector("B", [0.7, 3.1, -1.2, 0.5]),
+                    F.vector("C", [-0.25, 0.125, 9.0, -3.5])],
+                   [F.Technique("t", [F.Pass("p", states)])])
+
+
+def test_fx_expr(selftest, tmp_path):
+    r = check(selftest, "fx_expr", tmp_path, write(tmp_path, "expr.fxo", expr_effect()), len(EXPRS))
+    print(r.stdout[-2000:])
+
+
+@pytest.mark.gamefiles
+def test_fx_expr_game_ops(selftest, tmp_path):
+    d = game_binaries(tmp_path)
+    r = check(selftest, "fx_expr_game_ops", tmp_path, d)
+    ops = next(ln for ln in r.stdout.splitlines() if ln.startswith("ops:"))
+    print(r.stdout[-3000:])
+    # Measured: the 117 expressions (104 preshaders, 13 state values) use these opcodes.
+    assert set(ops.split()[1:]) >= {"mov", "neg", "rcp", "rsq", "min", "max", "lt", "add", "mul", "cmp", "dot"}, ops
+    assert "expressions 117" in r.stdout, r.stdout[-2000:]
+
+
+def pass_states_effect():
+    smp = F.P("smp", F.SAMPLER2D, F.OBJECT, value=[F.State(170, i32(3)), F.State(165, i32(3))])
+    # fxc writes "VertexShader = NULL" as the number 0 (p0); an empty shader object is NULL too (p1)
+    p0 = F.Pass("p0", [F.State(0, i32(1)), F.State(13, b32(0)), F.State(6, i32(2)), F.State(170, i32(1), index=1),
+                       F.State(146, i32(0)), F.State(147, i32(0))])
+    p1 = F.Pass("p1", [F.State(0, i32(0)), F.State(13, b32(1)), F.State(6, i32(5)), F.State(7, i32(6)),
+                       F.State(170, i32(2), index=1), F.State(178, F.P(None, F.SAMPLER2D, F.OBJECT), ref="smp"),
+                       F.State(103, i32(2)), F.State(105, i32(0)), F.State(107, i32(2)), F.State(109, i32(0)),
+                       F.State(48, b32(0)), F.State(146, VS_OBJ, blob=b""), F.State(147, PS_OBJ, blob=b"")])
+    return F.build([smp], [F.Technique("t", [p0, p1])])
+
+
+def test_fx_pass_states(selftest, tmp_path):
+    check(selftest, "fx_pass_states", tmp_path, write(tmp_path, "states.fxo", pass_states_effect()))
+
+
+def shaders_effect(exe, tmp_path, preshader=False, tint_flags=0):
+    vs = F.shader(assemble(exe, tmp_path, VS_WVP), [WVP_CONST])
+    if preshader:
+        # c0 = Tint * Scale, computed on the CPU: Tint in c0, Scale in c1 of the preshader's inputs
+        pre = F.expr([F.ins("mul", 4, [(F.IN, 4), (F.IN, 0), (F.OUT, 0)], scalar=True)],
+                     [F.Const("Tint", F.RS_FLOAT4, 0, 1, F.FLOAT4_T), F.Const("Scale", F.RS_FLOAT4, 1, 1, F.FLOAT_T)],
+                     prsi=[(0, 1)], version=0x46580201)
+        ps = F.shader(assemble(exe, tmp_path, PS_C0), [], pre)
+    else:
+        ps = F.shader(assemble(exe, tmp_path, PS_C0), [TINT_CONST])
+    params = [F.P("WorldViewProj", F.FLOAT, F.MATRIX_ROWS, 4, 4,
+                  value=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
+              F.vector("Tint", [1, 1, 1, 1], flags=tint_flags), F.scalar("Scale", F.FLOAT, 1.0),
+              F.vector("Unused", [0, 0, 0, 0])]
+    p = F.Pass("p", [F.State(0, i32(0)), F.State(8, i32(1)), F.State(146, VS_OBJ, blob=vs),
+                     F.State(147, PS_OBJ, blob=ps)])
+    return F.build(params, [F.Technique("t", [p])])
+
+
+def test_fx_shaders(selftest, tmp_path):
+    check(selftest, "fx_shaders", tmp_path, write(tmp_path, "shaders.fxo", shaders_effect(selftest, tmp_path)))
+
+
+def test_fx_preshader_commit(selftest, tmp_path):
+    check(selftest, "fx_preshader_commit", tmp_path,
+          write(tmp_path, "pre.fxo", shaders_effect(selftest, tmp_path, preshader=True)))
+
+
+def test_fx_pool_commit(selftest, tmp_path):
+    # Review Focus: Tint shared through a pool by two effects, set between passes, reaches the other's
+    # shader at its CommitChanges; a third effect's unshared Tint stays its own.
+    check(selftest, "fx_pool_commit", tmp_path,
+          write(tmp_path, "shared.fxo", shaders_effect(selftest, tmp_path, tint_flags=F.SHARED)),
+          write(tmp_path, "own.fxo", shaders_effect(selftest, tmp_path)))
+
+
+def selector_effect(exe, tmp_path):
+    """VertexShader = vsa[which]: an array of two shaders picked by an expression; the second shader's
+    constant table also names a bool2 (b1-b2) and an int4 (i0)."""
+    vs0 = F.shader(assemble(exe, tmp_path, "vs_1_1\ndcl_position v0\nmov oPos, v0\n"), [])
+    vs1 = F.shader(assemble(exe, tmp_path, "vs_2_0\ndcl_position v0\nmov oPos, v0\n"),
+                   [F.Const("Flags", F.RS_BOOL, 1, 2, (F.VECTOR, F.BOOL, 1, 2, 0, [])),
+                    F.Const("Ints", F.RS_INT4, 0, 1, (F.VECTOR, F.INT, 1, 4, 0, []))])
+    which = F.expr([F.ins("mov", 1, [(F.IN, 0), (F.OUT, 0)])], [F.Const("which", F.RS_FLOAT4, 0, 1, F.FLOAT_T)])
+    return F.build([F.P("vsa", F.VERTEXSHADER, F.OBJECT, elements=2, value=[vs0, vs1]),
+                    F.scalar("which", F.INT, 0), F.P("Flags", F.BOOL, F.VECTOR, 1, 2, value=[0, 1]),
+                    F.P("Ints", F.INT, F.VECTOR, 1, 4, value=[3, -4, 5, 6])],
+                   [F.Technique("t", [F.Pass("p", [F.State(146, VS_OBJ, selector=("vsa", which))])])])
+
+
+def test_fx_selector(selftest, tmp_path):
+    check(selftest, "fx_selector", tmp_path, write(tmp_path, "selector.fxo", selector_effect(selftest, tmp_path)))
+
+
+def save_restore_effect(exe, tmp_path):
+    vs = F.shader(assemble(exe, tmp_path, VS_WVP), [WVP_CONST])
+    ps = F.shader(assemble(exe, tmp_path, PS_C0), [TINT_CONST])
+    p = F.Pass("p", [F.State(0, i32(0)), F.State(13, b32(1)), F.State(6, i32(5)), F.State(170, i32(2), index=0),
+                     F.State(146, VS_OBJ, blob=vs), F.State(147, PS_OBJ, blob=ps)])
+    return F.build([F.P("WorldViewProj", F.FLOAT, F.MATRIX_ROWS, 4, 4, value=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+                                                                                  0, 0, 0, 1]),
+                    F.vector("Tint", [1, 0, 0, 1])], [F.Technique("t", [p])])
+
+
+def test_fx_save_restore(selftest, tmp_path):
+    check(selftest, "fx_save_restore", tmp_path, write(tmp_path, "save.fxo", save_restore_effect(selftest, tmp_path)))
+
+
+def validate_effect(exe, tmp_path):
+    vs11 = F.shader(assemble(exe, tmp_path, VS_WVP), [WVP_CONST])
+    vs30 = bytes.fromhex("0003feff") + bytes.fromhex("ffff0000")     # vs_3_0, then the end token
+    wvp = F.P("WorldViewProj", F.FLOAT, F.MATRIX_ROWS, 4, 4, value=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+    return F.build([wvp], [
+        F.Technique("t0", [F.Pass("p", [F.State(146, VS_OBJ, blob=vs30)])]),
+        F.Technique("t1", [F.Pass("p", [F.State(146, VS_OBJ, blob=vs11)])]),
+        F.Technique("t2", [F.Pass("p", [F.State(9, i32(99))])]),                  # ZFUNC 99 is not a D3DCMPFUNC
+        F.Technique("t3", [F.Pass("p", [F.State(9, i32(4))]), F.Pass("q", [F.State(146, VS_OBJ, blob=vs11)])]),
+    ])
+
+
+def test_fx_validate(selftest, tmp_path):
+    check(selftest, "fx_validate", tmp_path, write(tmp_path, "validate.fxo", validate_effect(selftest, tmp_path)))
+
+
+def game_binaries(tmp_path):
+    d = tmp_path / "fx"
+    d.mkdir(exist_ok=True)
+    files = sorted((paths.GAMEFILES / "game" / "Data" / "effects").glob("*.sdv"))
+    assert len(files) == 59
+    for p in files:
+        b = p.read_bytes()
+        (d / (p.stem + ".fxo")).write_bytes(b[b.find(b"\x01\x09\xff\xfe"):])
+    return d
+
+
+@pytest.mark.gamefiles
+def test_fx_game_render(selftest, tmp_path):
+    r = check(selftest, "fx_game_render", tmp_path, game_binaries(tmp_path))
+    lines = r.stdout.splitlines()
+    print("\n".join(ln for ln in lines if not ln.endswith(".fxo")))
+    tot = next(ln for ln in lines if ln.startswith("render totals:"))
+    print(tot)
+    # Measured: 165 techniques and 172 passes; every pass of a valid technique is drawn.
+    m = re.match(r"render totals: techniques (\d+) valid (\d+) passes (\d+) drawn (\d+)", tot)
+    assert m and int(m.group(1)) == 165 and int(m.group(3)) == int(m.group(4)) and int(m.group(2)) > 0, tot

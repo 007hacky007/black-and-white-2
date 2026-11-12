@@ -161,6 +161,8 @@ void d3d_apply_targets(struct d3d_device *d);          /* the bound targets to t
 /* d3d9_stateblock.c: where a Set writes. While a state block is being recorded,
  * that is the block (marked as set) and the device is unchanged; otherwise the device. */
 struct d3d_state *d3d_ws(struct d3d_device *d, enum sbw what, uint32_t i, uint32_t j);
+/* A new state block (reference count 1) holding what m names, captured from d now (plan 5 effects). */
+uint32_t d3d_stateblock_new(struct d3d_device *d, const struct d3d_sbmask *m);
 void d3d9_stateblock_register(void);
 void d3d9_query_register(void);
 
