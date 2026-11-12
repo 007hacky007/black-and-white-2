@@ -72,7 +72,8 @@ def test_resources(selftest, tmp_path, group):
 
 @pytest.mark.parametrize("group", ["tri_colour", "half_pixel", "transforms", "primitive_types", "dynamic_discard",
                                    "depth_objects_draw", "stages", "blend_depth_stencil", "samplers",
-                                   "lighting", "fog_alpha", "cache", "autogen_rt", "vdecl_dupes"])
+                                   "lighting", "fog_alpha", "cache", "autogen_rt", "vdecl_dupes",
+                                   "draw_count"])
 def test_draws(selftest, tmp_path, group):
     check(selftest, group, tmp_path)
 

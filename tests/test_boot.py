@@ -2,8 +2,8 @@
 mouse setup, its shaders and effects (plan 5), its sprite and fonts and its loading screen (plan 7) and its
 DirectSound audio (plan 8) to the front end, where it first reads input (docs/research/frontend.md). With no
 input the front end waits, so that run ends at a fixed read count (BW2_QUIT_AFTER_READS). With scripted input
-(plan 6, BW2_INPUT_SCRIPT) the game takes a new profile in its first dialog and boots on to its first HLSL
-effect, plan 9's layer (docs/research/input.md)."""
+(plan 6, BW2_INPUT_SCRIPT) the game takes a new profile in its first dialog, compiles its first HLSL effect
+through the lifted D3DX (plan 9) and runs on to its first Bink call, plan 10's layer (docs/research/input.md)."""
 import os
 import re
 import subprocess
@@ -23,6 +23,7 @@ FONT = re.compile(r'^\[bw2\] font "([^"]*)" (-?\d+) weight (\d+): (.*)$')
 FRAME = re.compile(r"^\[bw2\] frame (\d+): (\d+)x(\d+), mean (\d+),(\d+),(\d+), nonblack (\d+) of (\d+)$")
 AUDIO_SECOND = re.compile(r"^\[bw2\] audio second (\d+): (\d+) playing, peak (\d+), nonsilent (\d+) of (\d+)$")
 FIRST_READ = "[bw2] DirectInput mouse: first read"
+GPU_ABORT = "[bw2] metal: command buffer failed: "
 READS = 300
 
 
@@ -96,19 +97,19 @@ PROFILE_SCRIPT = "\n".join(
     + [f"{22 + 2 * i + j} key 8 0x0E {'up' if j else 'down'}" for i in range(6) for j in (0, 1)]
     + ["40 key 0x41 0x1E down", "41 key 0x41 0x1E up", "42 key 0x42 0x30 down", "43 key 0x42 0x30 up",
        "50 move -88 45", "80 down 0", "84 up 0"]) + "\n"
-HLSL_STOP = "[bw2] reached D3DXCreateEffect (HLSL source): owned by a later plan"
+BINK_STOP = "[bw2] reached _BinkOpen@8: owned by a later plan"
 
 
 @pytest.mark.gamefiles
-def test_boot_profile_to_hlsl(tmp_path):
+def test_boot_profile_to_bink(tmp_path):
     # Plan 6: scripted input names a new profile "ab" in the front end's first dialog and confirms it. The
-    # game writes the profile, applies its display settings (a Reset) and stops at its first effect given as
-    # HLSL text, plan 9's layer (exit 4).
+    # game writes the profile and applies its display settings (a Reset); plan 9 compiles its first effect given
+    # as HLSL text, and the game draws on to its first Bink call, plan 10's layer (exit 4).
     assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
     support = tmp_path / "support"
     script = tmp_path / "profile.script"
     script.write_text(PROFILE_SCRIPT)
-    env = dict(os.environ, BW2_SUPPORT=str(support), BW2_HEADLESS="1", BW2_FRAME_LOG="1",
+    env = dict(os.environ, BW2_SUPPORT=str(support), BW2_HEADLESS="1", BW2_FRAME_LOG="1", BW2_HLSL_LOG="1",
                BW2_INPUT_SCRIPT=str(script))
     env.pop("BW2_QUIT_AFTER_READS", None)
     r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
@@ -118,7 +119,7 @@ def test_boot_profile_to_hlsl(tmp_path):
     lines = engine_lines(r.stderr)
     assert r.returncode == 4, f"exit {r.returncode}\n{tail}"
     # the stop line names the guest address it came from after the plan text
-    stops = [i for i, ln in enumerate(lines) if ln.startswith(HLSL_STOP)]
+    stops = [i for i, ln in enumerate(lines) if ln.startswith(BINK_STOP)]
     assert len(stops) == 1, tail
     stop = stops[0]
     err = "\n".join(ln for ln in lines[:stop] if not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln))
@@ -133,11 +134,24 @@ def test_boot_profile_to_hlsl(tmp_path):
     assert not (docs / "Profiles" / "~Player").exists()
     made = sorted(p for p in (support / "Game").rglob("*") if p.is_file()) if (support / "Game").exists() else []
     assert not made, made
-    # the front end read the mouse, and drew its picture after the first read up to the stop
+    # the front end read the mouse, and drew its picture after the first read up to its first HLSL effect;
+    # the effect compiled, and the game drew on to the stop (what those frames hold is plan 9 Task 7's to pin)
     assert lines.count(FIRST_READ) == 1, tail
-    after = [tuple(map(int, m.groups())) for m in map(FRAME.match, lines[lines.index(FIRST_READ):]) if m]
+    effects = [i for i, ln in enumerate(lines) if ln.startswith("[bw2] hlsl effect: ")]
+    assert len(effects) == 1 and " -> 0x00000000, " in lines[effects[0]], effects
+    effect = effects[0]
+    window = lines[lines.index(FIRST_READ):effect]
+    after = [tuple(map(int, m.groups())) for m in map(FRAME.match, window) if m]
     assert after, tail
-    assert all(2 * f[6] >= f[7] for f in after), [f for f in after if 2 * f[6] < f[7]]
+    # a frame whose GPU work macOS aborted (the engine's "metal: command buffer failed" line for Metal's
+    # "Impacting Interactivity" error, which another program's GPU load brings) shows only what was drawn before
+    # the abort; such frames are left out (one run under another program's load lost 9 of 79), but never most
+    aborted = {int(FRAME.match(ln).group(1)) for prev, ln in zip(window, window[1:])
+               if FRAME.match(ln) and prev.startswith(GPU_ABORT) and "Impacting Interactivity" in prev}
+    assert len(aborted) * 2 < len(after), (len(aborted), len(after))
+    dark = [f for f in after if 2 * f[6] < f[7] and f[0] not in aborted]
+    assert not dark, dark
+    assert any(FRAME.match(ln) for ln in lines[effect:stop]), tail
 
 
 @pytest.mark.gamefiles

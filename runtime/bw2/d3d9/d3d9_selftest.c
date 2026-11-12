@@ -2087,7 +2087,36 @@ static void group_display_mode(void) {
     EXPECT_MODE(1920, 1080);
 }
 
+/* ---- plan 9: the device's draw counter ---- */
+uint32_t d3d_draw_calls(void);                     /* d3d9_draw.c */
+static void group_draw_count(void) {
+    uint32_t dev = new_device(64, 64);
+    CHECKEQ(vcall(dev, DV_SetFVF, 1, FVF_XYZRHW | FVF_DIFFUSE), D3D_OK);
+    uint32_t W = 0xFFFFFFFFu, out = gmem(4), ptr = gmem(4);
+    struct tlv tri[3] = { { 0, 0, 0.5f, 1, W }, { 32, 0, 0.5f, 1, W }, { 0, 32, 0.5f, 1, W } };
+    CHECKEQ(vcall(dev, DV_CreateVertexBuffer, 6, (uint32_t)sizeof tri, 0u, 0u, POOL_MANAGED, out, 0u), D3D_OK);
+    uint32_t vb = MEM32(out);
+    vcall(vb, VB_Lock, 4, 0u, 0u, ptr, 0u);
+    memcpy(hle_ptr(MEM32(ptr)), tri, sizeof tri);
+    vcall(vb, VB_Unlock, 0);
+    CHECKEQ(vcall(dev, DV_CreateIndexBuffer, 6, 6u, 0u, FMT_INDEX16, POOL_MANAGED, out, 0u), D3D_OK);
+    uint32_t ib = MEM32(out);
+    vcall(ib, VB_Lock, 4, 0u, 0u, ptr, 0u);
+    uint16_t idx[3] = { 0, 1, 2 };
+    memcpy(hle_ptr(MEM32(ptr)), idx, sizeof idx);
+    vcall(ib, VB_Unlock, 0);
+    CHECKEQ(vcall(dev, DV_SetStreamSource, 4, 0u, vb, 0u, (uint32_t)sizeof tri[0]), D3D_OK);
+    CHECKEQ(vcall(dev, DV_SetIndices, 1, ib), D3D_OK);
+    uint32_t n0 = d3d_draw_calls();
+    CHECKEQ(vcall(dev, DV_DrawIndexedPrimitive, 6, PT_TRIANGLELIST, 0u, 0u, 3u, 0u, 1u), D3D_OK);
+    CHECKEQ(d3d_draw_calls() - n0, 1);
+    draw_up(dev, PT_TRIANGLELIST, 1, tri, 3, sizeof tri[0]);
+    CHECKEQ(d3d_draw_calls() - n0, 2);
+    vcall(vb, 2, 0), vcall(ib, 2, 0);
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "draw_count", group_draw_count },
     { "display_mode", group_display_mode },
     { "frame_log", group_frame_log },
     { "vdecl_dupes", group_vdecl_dupes },

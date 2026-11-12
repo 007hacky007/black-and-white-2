@@ -249,11 +249,18 @@ static uint32_t draw(struct d3d_device *d, uint32_t type, uint32_t prims, uint32
     return D3D_OK;
 }
 
+/* The draw calls the device has been given since start-up (all four kinds, whatever they returned); for checks
+ * (plan 9: a lifted mesh's DrawSubset reaches our device). Under the machine lock. */
+static uint32_t g_draw_calls;
+uint32_t d3d_draw_calls(void) { return g_draw_calls; }
+
 static void dv_DrawPrimitive(void) {       /* (this, type, start vertex, primitives) */
+    g_draw_calls++;
     struct d3d_device *d = d3d_dev(A32(0));
     RET(draw(d, A32(1), A32(3), A32(2), 0, 0, NULL), 4);
 }
 static void dv_DrawIndexedPrimitive(void) {   /* (this, type, base vertex, min index, vertices, start index, primitives) */
+    g_draw_calls++;
     struct d3d_device *d = d3d_dev(A32(0));
     RET(draw(d, A32(1), A32(6), A32(5), (int32_t)A32(2), 1, NULL), 7);
 }
@@ -274,12 +281,14 @@ static uint32_t draw_up(struct d3d_device *d, uint32_t type, uint32_t prims, uin
     return draw(d, type, prims, 0, 0, idata != 0, &u);
 }
 static void dv_DrawPrimitiveUP(void) {     /* (this, type, primitives, data, stride) */
+    g_draw_calls++;
     struct d3d_device *d = d3d_dev(A32(0));
     uint32_t nv = prim_vertices(A32(1), A32(2));
     if (!A32(3) || !nv) RET(A32(2) ? D3DERR_INVALIDCALL : D3D_OK, 5);
     RET(draw_up(d, A32(1), A32(2), A32(3), nv * A32(4), A32(4), 0, 0, 0), 5);
 }
 static void dv_DrawIndexedPrimitiveUP(void) {   /* (this, type, min index, vertices, primitives, indices, format, data, stride) */
+    g_draw_calls++;
     struct d3d_device *d = d3d_dev(A32(0));
     uint32_t ni = prim_vertices(A32(1), A32(4)), i32 = A32(6) == D3DFMT_INDEX32;
     if (!A32(5) || !A32(7) || !ni) RET(A32(4) ? D3DERR_INVALIDCALL : D3D_OK, 9);

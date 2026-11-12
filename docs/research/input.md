@@ -23,7 +23,9 @@ matched the stop line exactly, and the line carries the guest address after the 
 test matches its start). The scripted read numbers from "Measured" items 6-9 hit on the first try,
 so nothing was re-measured with frames.
 
-`tests/test_boot.py::test_boot_profile_to_hlsl` pins this:
+`tests/test_boot.py::test_boot_profile_to_hlsl` pinned this until plan 9 (Task 5) compiled the effect
+through the lifted D3DX; the test is now `test_boot_profile_to_bink` and ends at `_BinkOpen@8`
+(docs/research/hlsl.md). It pinned:
 - exit code 4 and exactly one line starting with the HLSL stop above;
 - no loud line before the stop, and no other `owned by a later plan` line;
 - `Profiles/~ab/Profile.ini` and `Settings.ini` under

@@ -632,7 +632,7 @@ static void group_fx_parse_errors(const char *path) {
     free(d);
 }
 
-/* ---- fx_text: HLSL source is plan 7's ---- */
+/* ---- fx_text: HLSL source goes to the lifted D3DX (plan 9), which this binary does not have ---- */
 
 static void group_fx_text(void) {
     uint32_t dev = new_device();

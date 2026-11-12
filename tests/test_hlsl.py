@@ -1,4 +1,5 @@
-"""Plan 9 Task 4: the lifted d3dx9_25.dll, loaded lazily beside the engine, and D3DXCompileShader through it.
+"""Plan 9 Tasks 4-5: the lifted d3dx9_25.dll, loaded lazily beside the engine; D3DXCompileShader, HLSL effects,
+the fragment linker and D3DXCreateSphere through it.
 
 Each test runs the engine's --check-d3dx harness (runtime/bw2/d3dx/d3dx_check.c) after the game's boot setup:
 the check names go in on stdin, one per line, and each prints "<check>: ok" or "<check>: FAIL <why>". Every
@@ -25,6 +26,27 @@ ASM = {
     "vs11.asm": "vs_1_1\ndcl_position v0\ndp4 oPos.x, v0, c0\ndp4 oPos.y, v0, c1\ndp4 oPos.z, v0, c2\n"
                 "dp4 oPos.w, v0, c3\n",
 }
+# Task 5: effects in HLSL text. Line numbers matter for EFFECT_ERROR (its line 3 is broken).
+EFFECT_BODY = ("texture tex;\n"
+               "sampler s = sampler_state { Texture = <tex>; MinFilter = Linear; AddressU = Clamp; };\n"
+               "float4 k = {1, 0.5, 0.25, 1};\n"
+               "float4 vs(float4 p : POSITION) : POSITION { return p; }\n"
+               "float4 ps(float2 t : TEXCOORD0) : COLOR { return tex2D(s, t) * k; }\n")
+EFFECT = EFFECT_BODY + ("technique T { pass P { ZEnable = false; VertexShader = compile vs_2_0 vs();\n"
+                        "    PixelShader = compile ps_2_0 ps(); } }\n")
+EFFECT_SB = EFFECT_BODY + ("technique T { pass P {\n"
+                           "    StateBlock = stateblock_state { ZWriteEnable = false; AlphaBlendEnable = false; };\n"
+                           "    VertexShader = compile vs_2_0 vs(); PixelShader = compile ps_2_0 ps(); } }\n")
+EFFECT_POOL_A = "shared float4 g = {1, 2, 3, 4};\nfloat4 a = {9, 9, 9, 9};\ntechnique T { pass P { } }\n"
+EFFECT_POOL_B = "shared float4 g;\nfloat b;\ntechnique U { pass Q { } }\n"
+EFFECT_ERROR = ("float4 k;\n"
+                "float4 ps() : COLOR { return k; }\n"
+                "float4 broken( { return k; }\n"
+                "technique T { pass P { PixelShader = compile ps_2_0 ps(); } }\n")
+FRAGMENTS = ("void f_pos(float4 p : POSITION, out float4 o : POSITION) { o = p; }\n"
+             "void f_col(float4 c : COLOR0, out float4 oc : COLOR0) { oc = c; }\n"
+             "vertexfragment pos = compile_fragment vs_1_1 f_pos();\n"
+             "vertexfragment col = compile_fragment vs_1_1 f_col();\n")
 FROM_FILE = "hlsl_from_file.hlsl"          # in the support folder's C/, read by the check as C:\hlsl_from_file.hlsl
 
 # Measured in Step 4 (docs/research/hlsl.md):
@@ -57,6 +79,10 @@ def write_inputs(d):
     (d / "vs.hlsl").write_text(VS)
     (d / "error.hlsl").write_text(ERR)
     for name, text in ASM.items():
+        (d / name).write_text(text)
+    for name, text in (("effect.fx", EFFECT), ("effect_sb.fx", EFFECT_SB), ("pool_a.fx", EFFECT_POOL_A),
+                       ("pool_b.fx", EFFECT_POOL_B), ("effect_error.fx", EFFECT_ERROR),
+                       ("fragments.fx", FRAGMENTS)):
         (d / name).write_text(text)
 
 
@@ -200,3 +226,61 @@ def test_hlsl_log(tmp_path):
     assert len(logs) == 1 and re.fullmatch(r"\[bw2\] hlsl shader ps_2_0: \d+ bytes -> 0x00000000, \d+ tokens",
                                            logs[0]), logs
     assert f": {len(PS)} bytes" in logs[0], logs
+
+
+# ---- Task 5: HLSL effects, the fragment linker and the sphere ----
+
+@pytest.mark.gamefiles
+def test_hlsl_effect(tmp_path):
+    # D3DXCreateEffect with HLSL text: the lifted effect compiler makes fx_2_0 bytes, plan 5's path makes the
+    # effect; its pass sets our device's shaders and states, and End puts them back
+    r = run_checks(tmp_path, ["hlsl_effect"])
+    passed(r, "hlsl_effect")
+    assert info(r, "hlsl_effect", "desc") == "techniques 1 parameters 3"
+
+
+@pytest.mark.gamefiles
+def test_hlsl_effect_stateblock(tmp_path):
+    passed(run_checks(tmp_path, ["hlsl_effect_stateblock"]), "hlsl_effect_stateblock")
+
+
+@pytest.mark.gamefiles
+def test_hlsl_effect_pool(tmp_path):
+    passed(run_checks(tmp_path, ["hlsl_effect_pool"]), "hlsl_effect_pool")
+
+
+@pytest.mark.gamefiles
+def test_hlsl_effect_error(tmp_path):
+    # a broken line 3: a failing HRESULT, no effect, D3DX's file(line,col) message, twice the same (the game
+    # asks twice)
+    r = run_checks(tmp_path, ["hlsl_effect_error"])
+    passed(r, "hlsl_effect_error")
+    assert int(info(r, "hlsl_effect_error", "hr"), 16) & 0x80000000
+    # D3DX's file(line,col) form; the April 2005 compiler gives a syntax error (X3000) its line alone
+    assert info(r, "hlsl_effect_error", "line") == "(3)"
+
+
+@pytest.mark.gamefiles
+def test_hlsl_effect_log(tmp_path):
+    r = run_checks(tmp_path, ["hlsl_effect"], extra_env={"BW2_HLSL_LOG": "1"})
+    passed(r, "hlsl_effect")
+    logs = [ln for ln in r.stderr.splitlines() if ln.startswith("[bw2] hlsl effect: ")]
+    assert len(logs) == 1, logs
+    assert re.fullmatch(rf"\[bw2\] hlsl effect: {len(EFFECT)} bytes -> 0x00000000, \d+ bytes, 1 techniques, \d+ ms",
+                        logs[0]), logs
+
+
+@pytest.mark.gamefiles
+def test_hlsl_fragment_linker(tmp_path):
+    r = run_checks(tmp_path, ["hlsl_fragment_linker"])
+    passed(r, "hlsl_fragment_linker")
+    assert info(r, "hlsl_fragment_linker", "fragments") == "2"
+
+
+@pytest.mark.gamefiles
+def test_hlsl_sphere_draw(tmp_path):
+    # D3DXCreateSphere's lifted mesh: 8 slices, 4 stacks; DrawSubset(0) is one DrawIndexedPrimitive on our device
+    r = run_checks(tmp_path, ["hlsl_sphere_draw"])
+    passed(r, "hlsl_sphere_draw")
+    assert info(r, "hlsl_sphere_draw", "mesh") == "vertices 26 faces 48 fvf 0x00000012"
+    assert info(r, "hlsl_sphere_draw", "draws") == "1"

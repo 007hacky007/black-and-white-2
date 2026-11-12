@@ -7,6 +7,9 @@
  * (HLSL and assembly texts) are files the test wrote into DIR. The exit code
  * is 0 only when every check passed.
  *
+ * Task 5 adds HLSL effects (D3DXCreateEffect with text), the fragment linker
+ * and D3DXCreateSphere, the last two handing out the lifted DLL's own objects.
+ *
  * Calls go through the game's own imports (hle_resolve: the shims the game
  * binds to, the D3DXCompileShader forwarders among them) or straight to a
  * lifted export (d3dx_lifted_proc).
@@ -456,6 +459,193 @@ static int c_hlsl_from_file(void) {
     return 1;
 }
 
+/* ---- Task 5: HLSL effects, the fragment linker and the sphere ---- */
+uint32_t d3d_draw_calls(void);                           /* d3d9_draw.c */
+
+/* ID3DXEffect (d3dx9_25: 57 ID3DXBaseEffect slots, then the effect's own); IDirect3DDevice9; ID3DXMesh;
+ * ID3DXFragmentLinker */
+enum { FX_GETDESC = 3, FX_GETPARAMBYNAME = 9, FX_GETTECHBYNAME = 13, FX_GETFLOATARRAY = 33, FX_SETVECTOR = 34,
+       FX_GETVECTOR = 35, FX_SETTECHNIQUE = 58, FX_BEGIN = 63, FX_BEGINPASS = 64, FX_ENDPASS = 66, FX_END = 67 };
+enum { DEV_BEGINSCENE = 41, DEV_ENDSCENE = 42, DEV_SETRS = 57, DEV_GETRS = 58, DEV_GETSS = 68, DEV_SETSS = 69,
+       DEV_SETVS = 92, DEV_GETVS = 93, DEV_SETPS = 107, DEV_GETPS = 108 };
+enum { MESH_DRAWSUBSET = 3, MESH_NUMFACES = 4, MESH_NUMVERTICES = 5, MESH_FVF = 6, MESH_VB = 13 };
+enum { FL_NUMFRAGMENTS = 4, FL_HANDLEBYNAME = 6, FL_ADDFRAGMENTS = 8, FL_LINKVS = 12 };
+enum { RS_ZENABLE = 7, RS_ZWRITEENABLE = 14, RS_ALPHABLENDENABLE = 27, SS_ADDRESSU = 1, SS_MINFILTER = 6 };
+
+struct effect { uint32_t hr, effect, errors; };
+/* D3DXCreateEffect through the game's import, with the text the test wrote */
+static struct effect create_effect(uint32_t dev, const char *file, uint32_t pool, int want_errors) {
+    struct effect e = { 0 };
+    uint32_t n, src = input(file, &n), out = gmem(8);
+    MEM32(out) = MEM32(out + 4) = 0xCDCDCDCDu;           /* both must be written */
+    e.hr = gcall("D3DXCreateEffect", 9, dev, src, n, 0u, 0u, 0u, pool, out, want_errors ? out + 4 : 0u);
+    e.effect = MEM32(out), e.errors = want_errors ? MEM32(out + 4) : 0;
+    return e;
+}
+static uint32_t rs_get(uint32_t dev, uint32_t st) { uint32_t v = gmem(4); vcall(dev, DEV_GETRS, 2, st, v); return MEM32(v); }
+static uint32_t ss_get(uint32_t dev, uint32_t st) { uint32_t v = gmem(4); vcall(dev, DEV_GETSS, 3, 0u, st, v); return MEM32(v); }
+/* the device's current shader (slot DEV_GETVS or DEV_GETPS), released again; 0 for none */
+static uint32_t shader_get(uint32_t dev, int slot) {
+    uint32_t v = gmem(4);
+    if (vcall(dev, slot, 1, v)) return 0xFFFFFFFFu;
+    if (MEM32(v)) release(MEM32(v));
+    return MEM32(v);
+}
+static int kind_is(uint32_t obj, enum d3d_kind kind) {
+    struct d3d_obj *o = obj ? d3d_host_any(obj) : NULL;
+    return o && o->kind == kind;
+}
+
+static int c_hlsl_effect(void) {
+    uint32_t dev = new_device();
+    if (!dev) FAIL("no device");
+    vcall(dev, DEV_SETRS, 2, (uint32_t)RS_ZENABLE, 1u);
+    vcall(dev, DEV_SETSS, 3, 0u, (uint32_t)SS_MINFILTER, 1u), vcall(dev, DEV_SETSS, 3, 0u, (uint32_t)SS_ADDRESSU, 1u);
+    vcall(dev, DEV_SETVS, 1, 0u), vcall(dev, DEV_SETPS, 1, 0u);
+    struct effect e = create_effect(dev, "effect.fx", 0, 1);
+    if (e.hr || !e.effect) FAIL("D3DXCreateEffect 0x%08X, effect 0x%08X: %s", e.hr, e.effect, errtext(e.errors));
+    if (!kind_is(e.effect, D3DK_EFFECT)) FAIL("the effect 0x%08X is not ours", e.effect);
+    uint32_t desc = gmem(16);
+    if (vcall(e.effect, FX_GETDESC, 1, desc)) FAIL("GetDesc");
+    note("desc", "techniques %u parameters %u", MEM32(desc + 8), MEM32(desc + 4));
+    uint32_t k = vcall(e.effect, FX_GETPARAMBYNAME, 2, 0u, gstr("k")), f = gmem(16);
+    if (!k || vcall(e.effect, FX_GETFLOATARRAY, 3, k, f, 4u)) FAIL("k: handle 0x%08X", k);
+    static const float want[4] = { 1, 0.5f, 0.25f, 1 };
+    for (uint32_t i = 0; i < 4; i++)
+        if (u2f(MEM32(f + 4 * i)) != want[i]) FAIL("k[%u] is %g", i, u2f(MEM32(f + 4 * i)));
+    uint32_t t = vcall(e.effect, FX_GETTECHBYNAME, 1, gstr("T")), np = gmem(4);
+    if (!t || vcall(e.effect, FX_SETTECHNIQUE, 1, t)) FAIL("technique T 0x%08X", t);
+    if (vcall(e.effect, FX_BEGIN, 2, np, 0u) || MEM32(np) != 1) FAIL("Begin: %u passes", MEM32(np));
+    if (vcall(e.effect, FX_BEGINPASS, 1, 0u)) FAIL("BeginPass");
+    uint32_t vs = shader_get(dev, DEV_GETVS), ps = shader_get(dev, DEV_GETPS);
+    if (!kind_is(vs, D3DK_VSHADER) || !kind_is(ps, D3DK_PSHADER)) FAIL("in the pass: shaders 0x%08X 0x%08X", vs, ps);
+    uint32_t z = rs_get(dev, RS_ZENABLE), mf = ss_get(dev, SS_MINFILTER), au = ss_get(dev, SS_ADDRESSU);
+    if (z != 0 || mf != 2 || au != 3) FAIL("in the pass: ZENABLE %u, MINFILTER %u, ADDRESSU %u", z, mf, au);
+    if (vcall(e.effect, FX_ENDPASS, 0) || vcall(e.effect, FX_END, 0)) FAIL("EndPass/End");
+    vs = shader_get(dev, DEV_GETVS), ps = shader_get(dev, DEV_GETPS);
+    z = rs_get(dev, RS_ZENABLE), mf = ss_get(dev, SS_MINFILTER), au = ss_get(dev, SS_ADDRESSU);
+    if (vs || ps || z != 1 || mf != 1 || au != 1)
+        FAIL("after End: shaders 0x%08X 0x%08X, ZENABLE %u, MINFILTER %u, ADDRESSU %u", vs, ps, z, mf, au);
+    release(e.effect), release(e.errors), release(dev);
+    return 1;
+}
+
+static int c_hlsl_effect_stateblock(void) {
+    uint32_t dev = new_device();
+    if (!dev) FAIL("no device");
+    vcall(dev, DEV_SETRS, 2, (uint32_t)RS_ZWRITEENABLE, 1u), vcall(dev, DEV_SETRS, 2, (uint32_t)RS_ALPHABLENDENABLE, 1u);
+    struct effect e = create_effect(dev, "effect_sb.fx", 0, 1);
+    if (e.hr || !e.effect) FAIL("D3DXCreateEffect 0x%08X: %s", e.hr, errtext(e.errors));
+    uint32_t np = gmem(4);
+    if (vcall(e.effect, FX_BEGIN, 2, np, 0u) || MEM32(np) != 1 || vcall(e.effect, FX_BEGINPASS, 1, 0u)) FAIL("Begin");
+    uint32_t zw = rs_get(dev, RS_ZWRITEENABLE), ab = rs_get(dev, RS_ALPHABLENDENABLE);
+    uint32_t vs = shader_get(dev, DEV_GETVS), ps = shader_get(dev, DEV_GETPS);
+    if (zw || ab || !kind_is(vs, D3DK_VSHADER) || !kind_is(ps, D3DK_PSHADER))
+        FAIL("in the pass: ZWRITEENABLE %u, ALPHABLENDENABLE %u, shaders 0x%08X 0x%08X", zw, ab, vs, ps);
+    if (vcall(e.effect, FX_ENDPASS, 0) || vcall(e.effect, FX_END, 0)) FAIL("EndPass/End");
+    zw = rs_get(dev, RS_ZWRITEENABLE), ab = rs_get(dev, RS_ALPHABLENDENABLE);
+    if (zw != 1 || ab != 1) FAIL("after End: ZWRITEENABLE %u, ALPHABLENDENABLE %u", zw, ab);
+    release(e.effect), release(e.errors), release(dev);
+    return 1;
+}
+
+static int vec_is(uint32_t effect, const char *name, float x, float y, float z, float w) {
+    uint32_t h = vcall(effect, FX_GETPARAMBYNAME, 2, 0u, gstr(name)), v = gmem(16);
+    if (!h || vcall(effect, FX_GETVECTOR, 2, h, v)) { snprintf(g_why, sizeof g_why, "%s: handle 0x%08X", name, h); return 0; }
+    float got[4] = { u2f(MEM32(v)), u2f(MEM32(v + 4)), u2f(MEM32(v + 8)), u2f(MEM32(v + 12)) };
+    if (got[0] != x || got[1] != y || got[2] != z || got[3] != w) {
+        snprintf(g_why, sizeof g_why, "%s is %g %g %g %g, want %g %g %g %g", name, got[0], got[1], got[2], got[3], x, y, z, w);
+        return 0;
+    }
+    return 1;
+}
+static int c_hlsl_effect_pool(void) {
+    uint32_t dev = new_device(), out = gmem(4);
+    if (!dev) FAIL("no device");
+    if (gcall("D3DXCreateEffectPool", 1, out)) FAIL("D3DXCreateEffectPool");
+    uint32_t pool = MEM32(out);
+    struct effect a = create_effect(dev, "pool_a.fx", pool, 1), b = create_effect(dev, "pool_b.fx", pool, 1);
+    if (a.hr || !a.effect) FAIL("effect a 0x%08X: %s", a.hr, errtext(a.errors));
+    if (b.hr || !b.effect) FAIL("effect b 0x%08X: %s", b.hr, errtext(b.errors));
+    if (!vec_is(b.effect, "g", 1, 2, 3, 4)) return 0;     /* the first effect's default is the pool's value */
+    uint32_t h = vcall(a.effect, FX_GETPARAMBYNAME, 2, 0u, gstr("g")), v = gmem(16);
+    MEM32(v) = f2u(5), MEM32(v + 4) = f2u(6), MEM32(v + 8) = f2u(7), MEM32(v + 12) = f2u(8);
+    if (!h || vcall(a.effect, FX_SETVECTOR, 2, h, v)) FAIL("SetVector on a");
+    if (!vec_is(b.effect, "g", 5, 6, 7, 8) || !vec_is(a.effect, "g", 5, 6, 7, 8)) return 0;
+    if (!vec_is(a.effect, "a", 9, 9, 9, 9)) return 0;
+    release(a.effect), release(b.effect), release(a.errors), release(b.errors), release(pool), release(dev);
+    return 1;
+}
+
+static int c_hlsl_effect_error(void) {
+    uint32_t dev = new_device();
+    if (!dev) FAIL("no device");
+    char first[512] = "";
+    uint32_t hr0 = 0;
+    for (int k = 0; k < 2; k++) {                       /* the game asks twice with the same text */
+        struct effect e = create_effect(dev, "effect_error.fx", 0, 1);
+        if (!(e.hr & 0x80000000u)) FAIL("call %d: hr 0x%08X", k + 1, e.hr);
+        if (e.effect) FAIL("call %d: an effect 0x%08X", k + 1, e.effect);
+        if (!e.errors || e.errors == 0xCDCDCDCDu) FAIL("call %d: no error buffer", k + 1);
+        const char *t = errtext(e.errors);
+        /* D3DX's file(line,col) form; this compiler gives a syntax error its line alone, file(line) */
+        if (!strstr(t, "(3,") && !strstr(t, "(3)")) FAIL("call %d: the errors do not name line 3: %.300s", k + 1, t);
+        if (!k) note("line", "%s", strstr(t, "(3,") ? "(3," : "(3)");
+        if (!k) snprintf(first, sizeof first, "%s", t), hr0 = e.hr;
+        else if (e.hr != hr0 || strcmp(first, t)) FAIL("the second call gave another answer (0x%08X)", e.hr);
+        release(e.errors);
+    }
+    struct effect e = create_effect(dev, "effect_error.fx", 0, 0);      /* no ppErrors: the buffer is released */
+    if (e.hr != hr0 || e.effect) FAIL("without ppErrors: 0x%08X, effect 0x%08X", e.hr, e.effect);
+    note("hr", "0x%08X", hr0);
+    release(dev);
+    return 1;
+}
+
+static int c_hlsl_fragment_linker(void) {
+    uint32_t n, src = input("fragments.fx", &n), out = gmem(8);
+    uint32_t hr = lcall("D3DXGatherFragments", 7, src, n, 0u, 0u, 0u, out, out + 4);
+    if (hr || !MEM32(out)) FAIL("D3DXGatherFragments 0x%08X: %s", hr, errtext(MEM32(out + 4)));
+    uint32_t frags = MEM32(out), dev = new_device(), lo = gmem(4);
+    if (!dev) FAIL("no device");
+    hr = gcall("D3DXCreateFragmentLinker", 3, dev, 0u, lo);
+    uint32_t linker = MEM32(lo);
+    if (hr || !linker) FAIL("D3DXCreateFragmentLinker 0x%08X", hr);
+    hr = vcall(linker, FL_ADDFRAGMENTS, 1, vcall(frags, BUF_PTR, 0));
+    if (hr) FAIL("AddFragments 0x%08X", hr);
+    note("fragments", "%u", vcall(linker, FL_NUMFRAGMENTS, 0));
+    uint32_t hs = gmem(8);
+    MEM32(hs) = vcall(linker, FL_HANDLEBYNAME, 1, gstr("pos"));
+    MEM32(hs + 4) = vcall(linker, FL_HANDLEBYNAME, 1, gstr("col"));
+    if (!MEM32(hs) || !MEM32(hs + 4)) FAIL("fragment handles 0x%08X 0x%08X", MEM32(hs), MEM32(hs + 4));
+    uint32_t vo = gmem(8);
+    hr = vcall(linker, FL_LINKVS, 6, gstr("vs_1_1"), 0u, hs, 2u, vo, vo + 4);
+    if (hr) FAIL("LinkVertexShader 0x%08X: %s", hr, errtext(MEM32(vo + 4)));
+    if (!kind_is(MEM32(vo), D3DK_VSHADER)) FAIL("the linked shader 0x%08X is not our device's", MEM32(vo));
+    release(MEM32(vo)), release(MEM32(vo + 4)), release(linker), release(frags), release(MEM32(out + 4)), release(dev);
+    return 1;
+}
+
+static int c_hlsl_sphere_draw(void) {
+    uint32_t dev = new_device(), out = gmem(4);
+    if (!dev) FAIL("no device");
+    uint32_t hr = gcall("D3DXCreateSphere", 6, dev, f2u(1.0f), 8u, 4u, out, 0u), mesh = MEM32(out);
+    if (hr || !mesh) FAIL("D3DXCreateSphere 0x%08X", hr);
+    note("mesh", "vertices %u faces %u fvf 0x%08X", vcall(mesh, MESH_NUMVERTICES, 0), vcall(mesh, MESH_NUMFACES, 0),
+         vcall(mesh, MESH_FVF, 0));
+    if (vcall(mesh, MESH_VB, 1, out) || !kind_is(MEM32(out), D3DK_VB)) FAIL("its vertex buffer 0x%08X is not ours", MEM32(out));
+    release(MEM32(out));
+    if (vcall(dev, DEV_BEGINSCENE, 0)) FAIL("BeginScene");
+    uint32_t n0 = d3d_draw_calls();
+    hr = vcall(mesh, MESH_DRAWSUBSET, 1, 0u);
+    uint32_t n1 = d3d_draw_calls();
+    if (vcall(dev, DEV_ENDSCENE, 0)) FAIL("EndScene");
+    note("draws", "%u", n1 - n0);
+    if (hr) FAIL("DrawSubset 0x%08X", hr);
+    release(mesh), release(dev);
+    return 1;
+}
+
 static const struct { const char *name; int (*fn)(void); } g_checks[] = {
     { "d3dx_load", c_d3dx_load }, { "d3dx_data_import", c_d3dx_data_import },
     { "d3dx_module_name", c_d3dx_module_name }, { "d3dx_validator", c_d3dx_validator }, { "d3dx_cpu", c_d3dx_cpu },
@@ -463,6 +653,9 @@ static const struct { const char *name; int (*fn)(void); } g_checks[] = {
     { "hlsl_compile_error", c_hlsl_compile_error }, { "hlsl_asm_matches_native", c_hlsl_asm_matches_native },
     { "hlsl_constant_table", c_hlsl_constant_table }, { "hlsl_two_threads", c_hlsl_two_threads },
     { "hlsl_from_file", c_hlsl_from_file },
+    { "hlsl_effect", c_hlsl_effect }, { "hlsl_effect_stateblock", c_hlsl_effect_stateblock },
+    { "hlsl_effect_pool", c_hlsl_effect_pool }, { "hlsl_effect_error", c_hlsl_effect_error },
+    { "hlsl_fragment_linker", c_hlsl_fragment_linker }, { "hlsl_sphere_draw", c_hlsl_sphere_draw },
 };
 
 int bw2_d3dx_check(const char *dir) {

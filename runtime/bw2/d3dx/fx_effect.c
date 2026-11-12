@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include "d3d_com.h"
 #include "d3dx.h"
 #include "fx.h"
@@ -750,17 +751,10 @@ static uint32_t errors(const char *msg) {
     memcpy(hle_ptr(d3dx_buffer_ptr(b)), msg, n);
     return b;
 }
-/* (device, data, len, defines, include, flags, pool, ID3DXEffect**, ID3DXBuffer** errors) */
-static void x_D3DXCreateEffect(void) {
-    uint32_t dev = A32(0), len = A32(2), pool = A32(6), out = A32(7), errs = A32(8);
-    const uint8_t *data = APTR(1);
-    if (errs) MEM32(errs) = 0;
-    if (out) MEM32(out) = 0;
-    if (!dev || !data || !len || !out) RET(D3DERR_INVALIDCALL, 9);
-    d3d_host(dev, D3DK_DEVICE);
-    uint32_t magic = 0;
-    memcpy(&magic, data, len < 4 ? len : 4);
-    if (len < 4 || magic != FX_MAGIC) d3d_later("D3DXCreateEffect (HLSL source)");
+/* An effect from fx_2_0 bytes (the game's own, or the lifted compiler's), with the pool's shared values bound:
+ * D3D_OK and *out, or D3DERR_INVALIDCALL and the reason in *errs (when errs) for a shared type that differs. */
+static uint32_t build_effect(uint32_t dev, const uint8_t *data, uint32_t len, uint32_t pool, uint32_t flags,
+                             uint32_t out, uint32_t errs, uint32_t *ntechs) {
     struct fx_pool *pl = pool ? d3d_host(pool, D3DK_EFFECTPOOL) : NULL;
     struct fx_com *c = calloc(1, sizeof *c);
     char err[256];
@@ -769,16 +763,93 @@ static void x_D3DXCreateEffect(void) {
         fx_free(&c->fx);
         free(c);
         if (errs) MEM32(errs) = errors(err);
-        RET(D3DERR_INVALIDCALL, 9);
+        return D3DERR_INVALIDCALL;
     }
     c->fx.pool = pl;
     c->fx.device = dev, c->fx.cur = c->fx.ntechs ? &c->fx.techs[0] : NULL;
     c->base.destroy = effect_destroy;
-    c->device = dev, c->pool = pool, c->flags = A32(5);
+    c->device = dev, c->pool = pool, c->flags = flags;
     d3d_addref(dev);
     if (pool) d3d_addref(pool);
+    if (ntechs) *ntechs = c->fx.ntechs;
     MEM32(out) = d3d_new(D3DK_EFFECT, "ID3DXEffect", &c->base);
-    RET(D3D_OK, 9);
+    return D3D_OK;
+}
+
+/* A guest COM method (the lifted DLL's objects): obj's vtable slot with obj and n more arguments. */
+static uint32_t guest_method(uint32_t obj, uint32_t slot, int n, const uint32_t *args) {
+    uint32_t a[8] = { obj };
+    for (int i = 0; i < n; i++) a[1 + i] = args[i];
+    return hle_call_guest(MEM32(MEM32(obj) + 4 * slot), n + 1, a);
+}
+/* ID3DXEffectCompiler (d3dx9_25): the 57 ID3DXBaseEffect slots, SetLiteral 57, GetLiteral 58, CompileEffect 59,
+ * CompileShader 60. ID3DXBuffer: GetBufferPointer 3, GetBufferSize 4. */
+enum { EC_COMPILEEFFECT = 59, BUF_POINTER = 3, BUF_SIZE = 4 };
+#define FAILED_HR(hr) (((hr) & 0x80000000u) != 0)
+
+/* HLSL text (plan 9, Ruling 5): the lifted D3DXCreateEffectCompiler and ID3DXEffectCompiler::CompileEffect make
+ * fx_2_0 bytes, which take the binary path. A failing HRESULT comes back as it is, with no effect and the lifted
+ * error buffer in *errs (released when errs is NULL); so does a successful compile's buffer of warnings. */
+static uint32_t effect_from_text(uint32_t dev, uint32_t src, uint32_t len, uint32_t defines, uint32_t include,
+                                 uint32_t flags, uint32_t pool, uint32_t out, uint32_t errs) {
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    uint32_t slots = hle_va(hle_alloc(12));             /* the compiler, the messages, the fx_2_0 buffer */
+    memset(hle_ptr(slots), 0, 12);
+    uint32_t a[7] = { src, len, defines, include, flags, slots, slots + 4 };
+    uint32_t hr = hle_call_guest(d3dx_lifted_proc("D3DXCreateEffectCompiler"), 7, a);
+    uint32_t msgs = MEM32(slots + 4), fx = 0, fxlen = 0, ntechs = 0;
+    if (!FAILED_HR(hr)) {
+        uint32_t compiler = MEM32(slots);
+        if (!compiler) d3d_fail("D3DXCreateEffect: D3DXCreateEffectCompiler gave 0x%08X and no compiler", hr);
+        com_release(msgs);                              /* warnings of the parse; CompileEffect gives its own */
+        MEM32(slots + 4) = 0;
+        uint32_t c[3] = { flags, slots + 8, slots + 4 };
+        hr = guest_method(compiler, EC_COMPILEEFFECT, 3, c);
+        com_release(compiler);
+        msgs = MEM32(slots + 4), fx = MEM32(slots + 8);
+    }
+    if (!FAILED_HR(hr)) {
+        if (!fx) d3d_fail("D3DXCreateEffect: CompileEffect gave 0x%08X and no effect", hr);
+        uint32_t p = guest_method(fx, BUF_POINTER, 0, NULL);
+        fxlen = guest_method(fx, BUF_SIZE, 0, NULL);
+        uint32_t magic = fxlen >= 4 ? MEM32(p) : 0;
+        if (magic != FX_MAGIC)
+            d3d_fail("D3DXCreateEffect: the lifted compiler made %u bytes that are not fx_2_0 (0x%08X)", fxlen, magic);
+        hr = build_effect(dev, hle_ptr(p), fxlen, pool, flags, out, errs, &ntechs);
+        com_release(fx);
+        if (FAILED_HR(hr)) {                            /* a shared type differs: build_effect wrote the reason */
+            com_release(msgs);
+            msgs = 0;
+        }
+    }
+    if (errs && !MEM32(errs)) MEM32(errs) = msgs;        /* (a differing shared type has put its own reason there) */
+    else com_release(msgs);
+    hle_free(hle_ptr(slots));
+    if (d3dx_hlsl_log()) {
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        long ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+        fprintf(stderr, "[bw2] hlsl effect: %u bytes -> 0x%08X, %u bytes, %u techniques, %ld ms\n", len, hr,
+                FAILED_HR(hr) ? 0 : fxlen, ntechs, ms);
+    }
+    return hr;
+}
+
+/* (device, data, len, defines, include, flags, pool, ID3DXEffect**, ID3DXBuffer** errors) */
+static void x_D3DXCreateEffect(void) {
+    uint32_t dev = A32(0), src = A32(1), len = A32(2), defines = A32(3), include = A32(4), flags = A32(5);
+    uint32_t pool = A32(6), out = A32(7), errs = A32(8);
+    const uint8_t *data = APTR(1);
+    if (errs) MEM32(errs) = 0;
+    if (out) MEM32(out) = 0;
+    if (!dev || !data || !len || !out) RET(D3DERR_INVALIDCALL, 9);
+    d3d_host(dev, D3DK_DEVICE);
+    if (pool) d3d_host(pool, D3DK_EFFECTPOOL);
+    uint32_t magic = 0;
+    memcpy(&magic, data, len < 4 ? len : 4);
+    uint32_t hr = len >= 4 && magic == FX_MAGIC ? build_effect(dev, data, len, pool, flags, out, errs, NULL)
+                                                : effect_from_text(dev, src, len, defines, include, flags, pool, out, errs);
+    RET(hr, 9);
 }
 
 static const win32hle_shim g_impls[] = {

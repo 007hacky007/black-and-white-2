@@ -118,10 +118,13 @@ def test_fx_expr_bounds(selftest, tmp_path):
     check(selftest, "fx_expr_bounds", tmp_path)
 
 
-def test_fx_text_is_later(selftest, tmp_path):
+def test_fx_text(selftest, tmp_path):
+    # HLSL text goes to the lifted D3DX's effect compiler (plan 9). The selftest binary has no lifted code
+    # and no d3dx9_25.dll beside it, so the call stops loudly at the lifted DLL's loader, not at a later plan
     r = run_group(selftest, "fx_text", tmp_path)
-    assert r.returncode == 4 and "fx_text: returned" not in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
-    assert "reached D3DXCreateEffect (HLSL source): owned by a later plan" in r.stderr, r.stderr[-2000:]
+    assert r.returncode != 0 and "fx_text: returned" not in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "[bw2] FATAL: d3dx9_25.dll (lifted):" in r.stderr, r.stderr[-2000:]
+    assert "owned by a later plan" not in r.stderr, r.stderr[-2000:]
 
 
 # ---- the game's effects ----

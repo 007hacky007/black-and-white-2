@@ -58,6 +58,7 @@ uint8_t *d3dx_encode_dds(uint32_t fmt, uint32_t w, uint32_t h, uint32_t levels, 
 /* d3dx_lifted.c: the disc's d3dx9_25.dll, lifted (plan 9). An export's guest address; the first call
  * loads the DLL from the engine binary's folder, and a missing or wrong file stops loudly. */
 uint32_t d3dx_lifted_proc(const char *export_name);
+int d3dx_hlsl_log(void);                               /* BW2_HLSL_LOG=1: one line per HLSL compile */
 
 /* d3dx_imageio.m: PNG and JPEG (and other BMPs) through ImageIO */
 int d3dx_imageio_decode(const uint8_t *buf, uint32_t n, uint32_t *w, uint32_t *h, int *has_alpha, uint8_t **argb);

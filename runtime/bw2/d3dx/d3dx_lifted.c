@@ -5,8 +5,10 @@
  * out/d3dx9_25.dll). The first call that needs it maps it at 0x08000000, binds
  * its imports, runs its DllMain (dll.c bw2_lifted_dll_open) and registers it as
  * bw2-d3dx9_25-lifted.dll, so the game's own d3dx9_25.dll lookups keep finding
- * the native D3DX. D3DXCompileShader and D3DXCompileShaderFromFileA forward the
- * game's arguments as they are to the lifted exports.
+ * the native D3DX. D3DXCompileShader, D3DXCompileShaderFromFileA,
+ * D3DXCreateFragmentLinker and D3DXCreateSphere forward the game's arguments as
+ * they are to the lifted exports; HLSL effect text goes to the lifted effect
+ * compiler from fx_effect.c (plan 9 Task 5).
  *
  * D3DX's run-time questions to d3d9.dll are answered on purpose (Ruling 12):
  * Direct3DShaderValidatorCreate9 gives a validator that accepts every shader,
@@ -112,7 +114,7 @@ uint32_t d3dx_lifted_proc(const char *export_name) {
 }
 
 /* ---- the forwarders ---- */
-static int hlsl_log(void) {
+int d3dx_hlsl_log(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("BW2_HLSL_LOG"); on = e && *e && strcmp(e, "0"); }
     return on;
@@ -130,7 +132,7 @@ static void x_D3DXCompileShader(void) {
     uint32_t a[10];
     for (int i = 0; i < 10; i++) a[i] = A32(i);
     uint32_t hr = hle_call_guest(d3dx_lifted_proc("D3DXCompileShader"), 10, a);
-    if (hlsl_log()) log_compile(a[5], a[1], hr, a[7]);
+    if (d3dx_hlsl_log()) log_compile(a[5], a[1], hr, a[7]);
     RET(hr, 10);
 }
 /* (file, defines, include, function, profile, flags, ppShader, ppErrors, ppConstantTable) */
@@ -138,7 +140,7 @@ static void x_D3DXCompileShaderFromFileA(void) {
     uint32_t a[9];
     for (int i = 0; i < 9; i++) a[i] = A32(i);
     uint32_t hr = hle_call_guest(d3dx_lifted_proc("D3DXCompileShaderFromFileA"), 9, a);
-    if (hlsl_log()) {
+    if (d3dx_hlsl_log()) {
         char host[1024];
         struct stat st;
         uint32_t bytes = a[0] && hle_host_path((const char *)hle_ptr(a[0]), host, sizeof host) && !stat(host, &st)
@@ -146,6 +148,18 @@ static void x_D3DXCompileShaderFromFileA(void) {
         log_compile(a[4], bytes, hr, a[6]);
     }
     RET(hr, 9);
+}
+
+/* (device, ShaderCacheSize, ID3DXFragmentLinker**): the lifted linker, which creates its shaders on our device */
+static void x_D3DXCreateFragmentLinker(void) {
+    uint32_t a[3] = { A32(0), A32(1), A32(2) };
+    RET(hle_call_guest(d3dx_lifted_proc("D3DXCreateFragmentLinker"), 3, a), 3);
+}
+/* (device, FLOAT radius, slices, stacks, ID3DXMesh**, ID3DXBuffer** adjacency): the radius travels as its dword */
+static void x_D3DXCreateSphere(void) {
+    uint32_t a[6];
+    for (int i = 0; i < 6; i++) a[i] = A32(i);
+    RET(hle_call_guest(d3dx_lifted_proc("D3DXCreateSphere"), 6, a), 6);
 }
 
 /* ---- the shader validator (Ruling 12) ---- */
@@ -227,6 +241,8 @@ static void x_DebugSetMute(void) { g_mute_calls++; RET(0, 0); }
 static const win32hle_shim g_exports[] = {
     { "D3DXCompileShader", x_D3DXCompileShader },
     { "D3DXCompileShaderFromFileA", x_D3DXCompileShaderFromFileA },
+    { "D3DXCreateFragmentLinker", x_D3DXCreateFragmentLinker },
+    { "D3DXCreateSphere", x_D3DXCreateSphere },
     { "Direct3DShaderValidatorCreate9", x_Direct3DShaderValidatorCreate9 },
     { "DebugSetMute", x_DebugSetMute },
     { 0, 0 } };

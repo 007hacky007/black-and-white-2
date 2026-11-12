@@ -102,3 +102,33 @@ SSE2 selection never runs. Five sit on real integer SIMD instructions:
 
 The SSE2 one is a lifter gap on the selected path: a lifted call of `D3DXFloat32To16Array` (the game's
 own calls go to the native D3DX) stops at `0x0820861D` naming `packssdw`. None of the checks reaches it.
+
+## Effects, the fragment linker and the sphere (Task 5)
+
+`D3DXCreateEffect` given data that does not start with the fx_2_0 magic calls the lifted
+`D3DXCreateEffectCompiler` (7 arguments) and then `ID3DXEffectCompiler::CompileEffect` (vtable slot 59:
+57 `ID3DXBaseEffect` slots, `SetLiteral` 57, `GetLiteral` 58), releases the compiler, and builds the
+effect from the buffer's bytes on plan 5's binary path, pool included. `D3DXCreateFragmentLinker`
+(3 arguments) and `D3DXCreateSphere` (6) forward to the lifted exports as they are.
+
+Measured with the checks' own texts (`tests/test_hlsl.py`), no trap, no unanswered import called and no
+`[module]` line from the lifted DLL:
+
+- the effect with a `sampler_state`, a `float4` initializer and `compile vs_2_0`/`ps_2_0`: 372 bytes of
+  text give 1,000 bytes of fx_2_0, 1 technique and 3 parameters; its pass sets our device's shaders,
+  `ZEnable` and sampler 0's filter and address, and `End` puts them back. The `stateblock_state` form
+  (442 bytes, 1,048 bytes of fx_2_0) needs nothing new in plan 5's parser or states.
+- a syntax error on line 3 gives `E_FAIL` (`0x80004005`) and an error buffer naming the line as
+  `(3)`: this compiler gives an `X3000` syntax error its line alone, not `(line,col)`. A second call
+  gives the same HRESULT and text, and with no `ppErrors` the lifted buffer is released.
+- `D3DXGatherFragments` of two `vs_1_1` fragments, `AddFragments` and `LinkVertexShader` give an
+  `IDirect3DVertexShader9` of our device (the linker's `GetNumberOfFragments`, slot 4, says 2).
+- `D3DXCreateSphere(1.0, 8 slices, 4 stacks)`: 26 vertices, 48 faces, FVF `0x12`
+  (`XYZ | NORMAL`), its vertex buffer ours, and `DrawSubset(0)` one `DrawIndexedPrimitive` on our
+  device (`d3d_draw_calls`, `d3d9_draw.c`).
+
+The boot's own effect (the profile run, `BW2_HLSL_LOG=1`): 11,199 bytes of text give `S_OK`, 5,220
+bytes of fx_2_0 and **2 techniques** (the `ToneMapping.sdv` source the text carries holds one
+`technique` of its own, line 423 of that source, besides the generated one), in 8-25 ms. The boot
+then draws on and stops at `_BinkOpen@8` (`sub_0093C7B0`), plan 10's layer; Task 7 measures that
+stretch.
