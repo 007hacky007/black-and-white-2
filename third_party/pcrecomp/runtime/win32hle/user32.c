@@ -80,8 +80,10 @@
 #define WM_LBUTTONDBLCLK   0x0203u
 #define WM_RBUTTONDOWN     0x0204u
 #define WM_RBUTTONUP       0x0205u
+#define WM_RBUTTONDBLCLK   0x0206u
 #define WM_MBUTTONDOWN     0x0207u
 #define WM_MBUTTONUP       0x0208u
+#define WM_MBUTTONDBLCLK   0x0209u
 #define WM_MOUSEWHEEL      0x020Au
 #define WM_CAPTURECHANGED  0x0215u
 
@@ -239,15 +241,19 @@ static int g_quit; static uint32_t g_quit_code;
 /* A message is in the queue of its window's thread, as on Windows: a second
  * thread pumping its own messages (sound.dll's, with PeekMessage(NULL)) must
  * not take the game window's. */
-static void q_push_to(uint32_t h, uint32_t m, uint32_t w, uint32_t l, uint32_t thread) {
+static void q_push_to_at(uint32_t h, uint32_t m, uint32_t w, uint32_t l, uint32_t thread, uint32_t time) {
     if (g_qn == QN) { memmove(g_q, g_q + 1, sizeof g_q[0] * (QN - 1)); g_qn--; }
-    msg_t x = { h, m, w, l, hle_ticks_ms(), g_cursor_x, g_cursor_y, thread };
+    msg_t x = { h, m, w, l, time, g_cursor_x, g_cursor_y, thread };
     g_q[g_qn++] = x;
 }
-static void q_push(uint32_t h, uint32_t m, uint32_t w, uint32_t l) {
-    win_t *x = W(h == 0xFFFFu ? hle_first_hwnd() : h);   /* HWND_BROADCAST: the top-level windows, the game's */
-    q_push_to(h, m, w, l, x ? x->thread : 0);
+static void q_push_to(uint32_t h, uint32_t m, uint32_t w, uint32_t l, uint32_t thread) {
+    q_push_to_at(h, m, w, l, thread, hle_ticks_ms());
 }
+static void q_push_at(uint32_t h, uint32_t m, uint32_t w, uint32_t l, uint32_t time) {
+    win_t *x = W(h == 0xFFFFu ? hle_first_hwnd() : h);   /* HWND_BROADCAST: the top-level windows, the game's */
+    q_push_to_at(h, m, w, l, x ? x->thread : 0, time);
+}
+static void q_push(uint32_t h, uint32_t m, uint32_t w, uint32_t l) { q_push_at(h, m, w, l, hle_ticks_ms()); }
 void hle_post_message(uint32_t hwnd, uint32_t message, uint32_t wParam, uint32_t lParam) {
     if (message == WM_QUIT) { g_quit = 1, g_quit_code = wParam; return; }
     q_push(hwnd, message, wParam, lParam);
@@ -715,7 +721,28 @@ static uint32_t mk_state(void) {
     return (g_keys[0x01] & 0x80 ? 1u : 0u) | (g_keys[0x02] & 0x80 ? 2u : 0u) | (g_keys[VK_SHIFT] & 0x80 ? 4u : 0u) |
            (g_keys[VK_CONTROL] & 0x80 ? 8u : 0u) | (g_keys[0x04] & 0x80 ? 0x10u : 0u);
 }
-void hle_input_mouse(uint32_t message, int sx, int sy) {
+/* Double clicks, as Windows makes them: a second down of the same button in
+ * the same window, within GetDoubleClickTime (500 ms, between the two
+ * events' times) and inside the SM_CXDOUBLECLK by SM_CYDOUBLECLK (4 by 4)
+ * rectangle centred on the first, in a window whose class has CS_DBLCLKS,
+ * is posted as WM_xBUTTONDBLCLK. A third press starts over. */
+#define CS_DBLCLKS 8u
+#define DBLCLK_MS  500u
+#define DBLCLK_CX  4
+static struct { uint32_t message, hwnd, time; int x, y, armed; } g_click;
+static uint32_t double_click(uint32_t message, uint32_t t, int sx, int sy, uint32_t time) {
+    if (message != WM_LBUTTONDOWN && message != WM_RBUTTONDOWN && message != WM_MBUTTONDOWN) return message;
+    win_t *x = W(t);
+    if (g_click.armed && g_click.message == message && g_click.hwnd == t && time - g_click.time <= DBLCLK_MS &&
+        abs(sx - g_click.x) <= DBLCLK_CX / 2 && abs(sy - g_click.y) <= DBLCLK_CX / 2 && x && (g_cls[x->cls].style & CS_DBLCLKS)) {
+        g_click.armed = 0;
+        return message + 2;                              /* WM_xBUTTONDOWN + 2 = WM_xBUTTONDBLCLK */
+    }
+    g_click.message = message, g_click.hwnd = t, g_click.time = time, g_click.x = sx, g_click.y = sy, g_click.armed = 1;
+    return message;
+}
+void hle_input_mouse(uint32_t message, int sx, int sy) { hle_input_mouse_ex(message, sx, sy, hle_ticks_ms()); }
+void hle_input_mouse_ex(uint32_t message, int sx, int sy, uint32_t time_ms) {
     g_cursor_x = sx, g_cursor_y = sy;
     uint32_t vk = message == WM_LBUTTONDOWN || message == WM_LBUTTONUP ? 1 : message == WM_RBUTTONDOWN || message == WM_RBUTTONUP ? 2
                 : message == WM_MBUTTONDOWN || message == WM_MBUTTONUP ? 4 : 0;
@@ -731,7 +758,8 @@ void hle_input_mouse(uint32_t message, int sx, int sy) {
         t = hle_window_at(sx, sy, &cx, &cy);
     }
     if (!t) return;
-    q_push(t, message, mk_state(), ((uint32_t)(cy & 0xFFFF) << 16) | (uint32_t)(cx & 0xFFFF));
+    message = double_click(message, t, sx, sy, time_ms);
+    q_push_at(t, message, mk_state(), ((uint32_t)(cy & 0xFFFF) << 16) | (uint32_t)(cx & 0xFFFF), time_ms);
 }
 /* A key: lParam bit 24 for an extended key, bit 30 for a repeat (a down for a
  * key already down). The left and right modifiers (VK_LSHIFT .. VK_RMENU)
@@ -1697,6 +1725,14 @@ static void u_GetWindowRect(void) {
     origin(x, &ox, &oy);
     put_rect(A32(1), ox, oy, ox + x->w, oy + x->h);
     RET(1, 2);
+}
+int hle_client_to_screen(uint32_t hwnd, int *px, int *py) {
+    win_t *x = W(hwnd);
+    if (!x) return 0;
+    int ox, oy;
+    origin(x, &ox, &oy);
+    *px += ox, *py += oy;
+    return 1;
 }
 static void u_ClientToScreen(void) {
     win_t *x = W(A32(0));

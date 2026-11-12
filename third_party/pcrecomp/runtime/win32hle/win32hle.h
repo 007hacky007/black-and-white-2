@@ -163,6 +163,10 @@ void     hle_set_pump_hook(void (*fn)(void)); /* called when the queue is empty 
  * mode), input as a mouse and keyboard would give it, and what is where. */
 void     hle_set_screen_size(int w, int h);
 void     hle_input_mouse(uint32_t message, int screen_x, int screen_y);   /* WM_MOUSEMOVE, WM_LBUTTONDOWN, ... */
+/* The same at an event's time (the message's, and the double-click clock's);
+ * a second down in a CS_DBLCLKS window may post WM_xBUTTONDBLCLK instead. */
+void     hle_input_mouse_ex(uint32_t message, int screen_x, int screen_y, uint32_t time_ms);
+int      hle_client_to_screen(uint32_t hwnd, int *x, int *y);             /* ClientToScreen; 0 if not a window */
 void     hle_input_key(int down, uint32_t vk, uint32_t scan);                /* hle_input_key_ex, not extended */
 void     hle_input_key_ex(int down, uint32_t vk, uint32_t scan, int extended); /* lParam bits 24 and 30 */
 void     hle_input_wheel(int delta, int screen_x, int screen_y);          /* WM_MOUSEWHEEL to the focus */
