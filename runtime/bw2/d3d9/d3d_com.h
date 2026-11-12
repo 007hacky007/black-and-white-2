@@ -1,6 +1,6 @@
 /*
  * d3d_com.h - guest COM objects for the D3D9, DirectDraw 7 and D3DX layers
- * (plan 4), and DirectInput 8 (plan 5). A guest object is [vtable][reference count][host id]; the id
+ * (plan 4), and DirectInput 8 and D3DX effects (plan 5). A guest object is [vtable][reference count][host id]; the id
  * indexes a growable table of host structs (no fixed-size tables, spec 7.2).
  * Each method is a stdcall shim whose argument 0 is `this`.
  */
@@ -12,7 +12,7 @@
 enum d3d_kind {
     D3DK_NONE, D3DK_D3D9, D3DK_DEVICE, D3DK_SWAPCHAIN, D3DK_TEXTURE, D3DK_CUBETEXTURE, D3DK_VOLUMETEXTURE,
     D3DK_SURFACE, D3DK_VOLUME, D3DK_VB, D3DK_IB, D3DK_VDECL, D3DK_VSHADER, D3DK_PSHADER, D3DK_STATEBLOCK,
-    D3DK_QUERY, D3DK_DDRAW7, D3DK_D3DXBUFFER, D3DK_DINPUT8, D3DK_DIDEVICE, D3DK_COUNT
+    D3DK_QUERY, D3DK_DDRAW7, D3DK_D3DXBUFFER, D3DK_DINPUT8, D3DK_DIDEVICE, D3DK_EFFECT, D3DK_EFFECTPOOL, D3DK_COUNT
 };
 
 /* Every host struct starts with this. destroy (may be NULL) runs at the last Release. */

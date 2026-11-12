@@ -66,6 +66,22 @@ static const char *const m_ddraw7[] = { UNK, "Compact", "CreateClipper", "Create
     "GetAvailableVidMem", "GetSurfaceFromDC", "RestoreAllSurfaces", "TestCooperativeLevel",
     "GetDeviceIdentifier", "StartModeTest", "EvaluateMode", 0 };
 static const char *const m_d3dxbuffer[] = { UNK, "GetBufferPointer", "GetBufferSize", 0 };
+/* d3dx9_25's ID3DXBaseEffect, then ID3DXEffect (no DeleteParameterBlock or SetRawValue before SDK 26/27) */
+#define BASEEFFECT UNK, "GetDesc", "GetParameterDesc", "GetTechniqueDesc", "GetPassDesc", "GetFunctionDesc", \
+    "GetParameter", "GetParameterByName", "GetParameterBySemantic", "GetParameterElement", "GetTechnique", \
+    "GetTechniqueByName", "GetPass", "GetPassByName", "GetFunction", "GetFunctionByName", "GetAnnotation", \
+    "GetAnnotationByName", "SetValue", "GetValue", "SetBool", "GetBool", "SetBoolArray", "GetBoolArray", "SetInt", \
+    "GetInt", "SetIntArray", "GetIntArray", "SetFloat", "GetFloat", "SetFloatArray", "GetFloatArray", "SetVector", \
+    "GetVector", "SetVectorArray", "GetVectorArray", "SetMatrix", "GetMatrix", "SetMatrixArray", "GetMatrixArray", \
+    "SetMatrixPointerArray", "GetMatrixPointerArray", "SetMatrixTranspose", "GetMatrixTranspose", \
+    "SetMatrixTransposeArray", "GetMatrixTransposeArray", "SetMatrixTransposePointerArray", \
+    "GetMatrixTransposePointerArray", "SetString", "GetString", "SetTexture", "GetTexture", "GetPixelShader", \
+    "GetVertexShader", "SetArrayRange"
+static const char *const m_effect[] = { BASEEFFECT, "GetPool", "SetTechnique", "GetCurrentTechnique",
+    "ValidateTechnique", "FindNextValidTechnique", "IsParameterUsed", "Begin", "BeginPass", "CommitChanges",
+    "EndPass", "End", "GetDevice", "OnLostDevice", "OnResetDevice", "SetStateManager", "GetStateManager",
+    "BeginParameterBlock", "EndParameterBlock", "ApplyParameterBlock", "CloneEffect", 0 };
+static const char *const m_effectpool[] = { UNK, 0 };
 static const char *const m_dinput8[] = { UNK, "CreateDevice", "EnumDevices", "GetDeviceStatus", "RunControlPanel",
     "Initialize", "FindDevice", "EnumDevicesBySemantics", "ConfigureDevices", 0 };
 static const char *const m_didevice8[] = { UNK, "GetCapabilities", "EnumObjects", "GetProperty", "SetProperty",
@@ -107,6 +123,9 @@ const struct d3d_iface d3d_ifaces[] = {
     { "IDirect3DQuery9", m_query, { G(0xD9771460, 0xA695, 0x4F26, 0xBB, 0xD3, 0x27, 0xB8, 0x40, 0xB5, 0x41, 0xCC) } },
     { "IDirectDraw7", m_ddraw7, { G(0x15E65EC0, 0x3B9C, 0x11D2, 0xB9, 0x2F, 0x00, 0x60, 0x97, 0x97, 0xEA, 0x5B) } },
     { "ID3DXBuffer", m_d3dxbuffer, { G(0x8BA5FB08, 0x5195, 0x40E2, 0xAC, 0x58, 0x0D, 0x98, 0x9C, 0x3A, 0x01, 0x02) } },
+    { "ID3DXEffect", m_effect, { G(0xD165CCB1, 0x62B0, 0x4A33, 0xB3, 0xFA, 0xA9, 0x23, 0x00, 0x30, 0x6A, 0x3D),
+        G(0x017C18AC, 0x103F, 0x4417, 0x8C, 0x51, 0x6B, 0xF6, 0xEF, 0x1E, 0x56, 0xBE) } },
+    { "ID3DXEffectPool", m_effectpool, { G(0x9537AB04, 0x3250, 0x412E, 0x82, 0x13, 0xFC, 0xD2, 0xF8, 0x67, 0x79, 0x33) } },
     { "IDirectInput8A", m_dinput8, { G(0xBF798030, 0x483A, 0x4DA2, 0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00) } },
     { "IDirectInputDevice8A", m_didevice8, { G(0x54D41080, 0xDC15, 0x4833, 0xA4, 0x1B, 0x74, 0x8F, 0x73, 0xA3, 0x81, 0x79) } },
     { 0, 0, { { 0 } } },

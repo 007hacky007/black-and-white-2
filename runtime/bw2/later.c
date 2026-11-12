@@ -23,8 +23,8 @@ static const char *const g_later_dlls[] = {
 static const char *const g_later_names[] = {
     "DirectDrawCreate", "DirectDrawEnumerateExA", "DirectSoundCreate", "DirectSoundCreate8",
     "DirectSoundEnumerateA",
-    "D3DXCompileShader", "D3DXCompileShaderFromFileA", "D3DXCreateEffect",
-    "D3DXCreateEffectPool", "D3DXCreateFragmentLinker", "D3DXCreateSprite", "D3DXCreateFontA", "D3DXCreateSphere",
+    "D3DXCompileShader", "D3DXCompileShaderFromFileA", "D3DXCreateFragmentLinker", "D3DXCreateSprite",
+    "D3DXCreateFontA", "D3DXCreateSphere",
     NULL,
 };
 

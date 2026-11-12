@@ -1,5 +1,5 @@
-"""Where the boot stops today: the lifted game boots on the patched tree through Direct3D and its DirectInput
-mouse setup to its first effect (plan 5 Task 1; Task 7 replaces this)."""
+"""Where the boot stops today: the lifted game boots on the patched tree through Direct3D, its DirectInput
+mouse setup and its first effect to the first technique method (plan 5 Task 5; Task 7 replaces this)."""
 import os
 import subprocess
 
@@ -13,10 +13,11 @@ LOUD = ("TRIPWIRE", "trap:", "unresolved indirect call", "unresolved direct call
         "uncaught C++", "FATAL")
 
 
-# Where the boot stops with plan 5's minimal mouse: the game sets up DirectInput, creates its
-# full-screen device, two state blocks and two textures, then calls D3DXCreateEffect with the
-# compiled DownScaleFilter effect (plan 5 "Measured"). Plan 5's effects are not answered yet.
-FIRST_LATER = "D3DXCreateEffect"
+# Where the boot stops with plan 5's effect parameters (Task 5): the game sets up DirectInput, creates its
+# full-screen device, two state blocks and two textures, creates the compiled DownScaleFilter effect,
+# clones it, reads its descriptions and asks ID3DXEffect::ValidateTechnique, which Task 6 answers. Until
+# then that method stops the run loudly (abort), naming itself.
+FIRST_STOP = "FATAL: d3d9: ID3DXEffect::ValidateTechnique not implemented"
 
 
 @pytest.mark.gamefiles
@@ -27,12 +28,13 @@ def test_boot_reaches_effects(tmp_path):
                        timeout=120, env=env)
     (tmp_path / "stderr.txt").write_text(r.stderr)
     tail = r.stderr[-4000:]
-    assert r.returncode == 4, f"exit {r.returncode}\n{tail}"
-    assert "owned by a later plan" in r.stderr, tail
-    assert "reached Direct3DCreate9" not in r.stderr, tail
-    assert f"reached {FIRST_LATER}:" in r.stderr, tail
+    assert r.returncode == -6, f"exit {r.returncode}\n{tail}"            # abort()
+    assert "reached D3DXCreateEffect" not in r.stderr, tail
+    assert "owned by a later plan" not in r.stderr, tail
+    assert FIRST_STOP in r.stderr, tail
+    rest = r.stderr.replace(FIRST_STOP, "")
     for word in LOUD:
-        assert word not in r.stderr, f"{word!r} in stderr\n{tail}"
+        assert word not in rest, f"{word!r} in stderr\n{tail}"
 
 
 def _vm_thunks_called_by_the_game():
