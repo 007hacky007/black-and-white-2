@@ -1,10 +1,14 @@
 /*
  * audio_selftest.c - the host mixer and its output (plan 8 Task 2), driven
- * directly. Sample data lives in hle_alloc blocks, as the game's buffers will.
+ * directly, and DirectSound (Task 3), driven as lifted code drives it:
+ * arguments pushed right to left, a return address, then the shim; COM
+ * methods through the guest vtable, each check also verifying the stdcall pop.
+ * Sample data lives in hle_alloc blocks, as the game's buffers will.
  * Built with the engine (minus main.c) by tests/test_audio.py;
  * `audio_selftest <group> [arg]` runs one group and prints "<group>: <n> failed".
  */
 #include <math.h>
+#include <stdarg.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -15,6 +19,7 @@
 #include "win32hle.h"
 #include "bw2.h"
 #include "audio.h"
+#include "d3d_com.h"
 
 const recomp_dispatch_entry_t recomp_dispatch_table[1] = { { 0, 0 } };
 const uint32_t recomp_dispatch_count = 0;
@@ -308,6 +313,395 @@ static void group_ds_device(void) {
     ds_voice_stop(id);
 }
 
+/* ---- DirectSound (Task 3) ---- */
+static uint32_t run(recomp_func_t f, const char *name, int n, const uint32_t *a) {
+    uint32_t esp0 = g_esp;
+    for (int i = n - 1; i >= 0; i--) { g_esp -= 4; MEM32(g_esp) = a[i]; }
+    g_esp -= 4;
+    MEM32(g_esp) = 0x12345678u;
+    f();
+    if (g_esp != esp0) {
+        printf("FAIL %s: popped %d bytes, want %d\n", name, (int)(g_esp - (esp0 - 4u - 4u * (uint32_t)n)), 4 + 4 * n);
+        fails++;
+        g_esp = esp0;
+    }
+    return g_eax;
+}
+static uint32_t call(const char *name, int n, ...) {
+    uint32_t va = hle_resolve(name);
+    recomp_func_t f = va ? recomp_lookup_import(va) : NULL;
+    if (!f) { printf("FAIL %s: not answered\n", name); fails++; return 0xDEADBEEFu; }
+    uint32_t a[16];
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) a[i] = va_arg(ap, uint32_t);
+    va_end(ap);
+    return run(f, name, n, a);
+}
+static uint32_t vcall(uint32_t obj, int slot, int n, ...) {
+    uint32_t va = MEM32(MEM32(obj) + 4u * (uint32_t)slot);
+    recomp_func_t f = recomp_lookup_import(va);
+    if (!f) { printf("FAIL slot %d of 0x%08X: no method\n", slot, obj); fails++; return 0xDEADBEEFu; }
+    uint32_t a[16] = { obj };
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) a[1 + i] = va_arg(ap, uint32_t);
+    va_end(ap);
+    return run(f, g_cur_import, n + 1, a);
+}
+
+static uint32_t gmem(uint32_t n) { uint32_t p = gblock(n); memset(hle_ptr(p), 0, n); return p; }
+#define G(a, b, c, d0, d1, d2, d3, d4, d5, d6, d7) \
+    { (a) & 0xFF, ((a) >> 8) & 0xFF, ((a) >> 16) & 0xFF, ((a) >> 24) & 0xFF, (b) & 0xFF, ((b) >> 8) & 0xFF, \
+      (c) & 0xFF, ((c) >> 8) & 0xFF, d0, d1, d2, d3, d4, d5, d6, d7 }
+static const uint8_t CLSID_DirectSound[16] = G(0x47D4D946, 0x62E8, 0x11CF, 0x93, 0xBC, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+static const uint8_t CLSID_DirectSound8[16] = G(0x3901CC3F, 0x84B5, 0x4FA4, 0xBA, 0x35, 0xAA, 0x81, 0x72, 0xB8, 0xA0, 0x9B);
+static const uint8_t CLSID_DirectSoundCapture[16] = G(0xB0210780, 0x89CD, 0x11D0, 0xAF, 0x08, 0x00, 0xA0, 0xC9, 0x25, 0xCD, 0x16);
+static const uint8_t IID_IDirectSound[16] = G(0x279AFA83, 0x4981, 0x11CE, 0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60);
+static const uint8_t IID_IDirectSound8[16] = G(0xC50A7E93, 0xF395, 0x4834, 0x9E, 0xF6, 0x7F, 0xA9, 0x9D, 0xE5, 0x09, 0x66);
+static const uint8_t IID_IUnknown[16] = G(0x00000000, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+static const uint8_t DSDEVID_DefaultPlayback[16] = G(0xDEF00000, 0x9C6D, 0x47ED, 0xAA, 0xF1, 0x4D, 0xDA, 0x8F, 0x2B, 0x5C, 0x03);
+static const uint8_t DSDEVID_DefaultCapture[16] = G(0xDEF00001, 0x9C6D, 0x47ED, 0xAA, 0xF1, 0x4D, 0xDA, 0x8F, 0x2B, 0x5C, 0x03);
+static uint32_t gguid(const uint8_t *g) { uint32_t p = gmem(16); memcpy(hle_ptr(p), g, 16); return p; }
+
+#define DS_OK_ 0u
+#define DSERR_INVALIDPARAM_ 0x80070057u
+#define DSERR_UNINITIALIZED_ 0x887800AAu
+#define DSERR_ALREADYINITIALIZED_ 0x88780082u
+#define DSERR_NOAGGREGATION_ 0x80040110u
+#define HWND 0x00010010u
+#define GAME_FLAGS 0x18000u
+#define GAME_BYTES 21504u
+
+/* IDirectSound and IDirectSoundBuffer slots */
+enum { DS_CreateSoundBuffer = 3, DS_GetCaps, DS_DuplicateSoundBuffer, DS_SetCooperativeLevel, DS_Compact,
+       DS_GetSpeakerConfig, DS_SetSpeakerConfig, DS_Initialize };
+enum { DSB_GetCaps = 3, DSB_GetCurrentPosition, DSB_GetFormat, DSB_GetVolume, DSB_GetPan, DSB_GetFrequency,
+       DSB_GetStatus, DSB_Initialize, DSB_Lock, DSB_Play, DSB_SetCurrentPosition, DSB_SetFormat, DSB_SetVolume,
+       DSB_SetPan, DSB_SetFrequency, DSB_Stop, DSB_Unlock, DSB_Restore };
+
+/* CoCreateInstance(CLSID_DirectSound, NULL, CLSCTX_INPROC_SERVER, IID_IDirectSound, &ds), as the game makes it */
+static uint32_t ds_cocreate(const uint8_t *clsid, const uint8_t *iid, uint32_t *hr) {
+    uint32_t out = gmem(4);
+    MEM32(out) = 0xCCCCCCCCu;
+    *hr = call("CoCreateInstance", 5, gguid(clsid), 0u, 1u, gguid(iid), out);
+    return MEM32(out);
+}
+static uint32_t ds_ready(void) {
+    uint32_t hr, ds = ds_cocreate(CLSID_DirectSound, IID_IDirectSound, &hr);
+    CHECKEQ(hr, 0);
+    CHECKEQ(vcall(ds, DS_Initialize, 1, 0u), DS_OK_);
+    CHECKEQ(vcall(ds, DS_SetCooperativeLevel, 2, HWND, 2u), DS_OK_);
+    return ds;
+}
+/* A WAVEFORMATEX (18 bytes) and a DSBUFFERDESC of dwSize size. */
+static uint32_t wave(uint16_t tag, uint16_t ch, uint32_t rate, uint16_t bits) {
+    uint32_t w = gmem(40);
+    uint8_t *p = hle_ptr(w);
+    uint16_t block = (uint16_t)(ch * bits / 8);
+    uint32_t avg = rate * block;
+    memcpy(p, &tag, 2), memcpy(p + 2, &ch, 2), memcpy(p + 4, &rate, 4), memcpy(p + 8, &avg, 4);
+    memcpy(p + 12, &block, 2), memcpy(p + 14, &bits, 2);
+    return w;
+}
+static uint32_t desc(uint32_t size, uint32_t flags, uint32_t bytes, uint32_t wfx) {
+    uint32_t d = gmem(36);
+    MEM32(d) = size, MEM32(d + 4) = flags, MEM32(d + 8) = bytes, MEM32(d + 16) = wfx;
+    return d;
+}
+static uint32_t make_buffer(uint32_t ds, uint32_t d, uint32_t *hr) {
+    uint32_t out = gmem(4);
+    MEM32(out) = 0xCCCCCCCCu;
+    *hr = vcall(ds, DS_CreateSoundBuffer, 3, d, out, 0u);
+    return MEM32(out);
+}
+static uint32_t game_buffer(uint32_t ds) {
+    uint32_t hr, b = make_buffer(ds, desc(20, GAME_FLAGS, GAME_BYTES, wave(1, 2, 44100, 16)), &hr);
+    CHECKEQ(hr, DS_OK_);
+    CHECK(b != 0);
+    return b;
+}
+struct lockout { uint32_t hr, p1, n1, p2, n2; };
+static struct lockout lock(uint32_t b, uint32_t off, uint32_t bytes, uint32_t flags, int want_p2) {
+    uint32_t o = gmem(16);
+    for (int i = 0; i < 4; i++) MEM32(o + 4u * (uint32_t)i) = 0xCCCCCCCCu;
+    struct lockout r;
+    r.hr = vcall(b, DSB_Lock, 7, off, bytes, o, o + 4, want_p2 ? o + 8 : 0u, want_p2 ? o + 12 : 0u, flags);
+    r.p1 = MEM32(o), r.n1 = MEM32(o + 4), r.p2 = MEM32(o + 8), r.n2 = MEM32(o + 12);
+    return r;
+}
+static uint32_t status(uint32_t b) {
+    uint32_t s = gmem(4);
+    MEM32(s) = 0xCCCCCCCCu;
+    CHECKEQ(vcall(b, DSB_GetStatus, 1, s), DS_OK_);
+    return MEM32(s);
+}
+static uint32_t cursor(uint32_t b, int which) {
+    uint32_t c = gmem(8);
+    MEM32(c) = MEM32(c + 4) = 0xCCCCCCCCu;
+    CHECKEQ(vcall(b, DSB_GetCurrentPosition, 2, which ? 0u : c, which ? c + 4 : 0u), DS_OK_);
+    return which ? MEM32(c + 4) : MEM32(c);
+}
+
+static void group_ds_create(void) {
+    uint32_t live0 = d3d_live_count(), hr;
+    /* 1: as the game makes it; nothing answers before Initialize */
+    uint32_t ds = ds_cocreate(CLSID_DirectSound, IID_IDirectSound, &hr);
+    CHECKEQ(hr, 0);
+    CHECK(ds != 0 && ds != 0xCCCCCCCCu);
+    uint32_t c = gmem(4), out = gmem(4);
+    CHECKEQ(vcall(ds, DS_CreateSoundBuffer, 3, desc(20, GAME_FLAGS, GAME_BYTES, wave(1, 2, 44100, 16)), out, 0u),
+            DSERR_UNINITIALIZED_);
+    CHECKEQ(MEM32(out), 0);
+    CHECKEQ(vcall(ds, DS_SetCooperativeLevel, 2, HWND, 2u), DSERR_UNINITIALIZED_);
+    CHECKEQ(vcall(ds, DS_GetSpeakerConfig, 1, c), DSERR_UNINITIALIZED_);
+    /* 2 */
+    CHECKEQ(vcall(ds, DS_Initialize, 1, 0u), DS_OK_);
+    CHECKEQ(vcall(ds, DS_Initialize, 1, 0u), DSERR_ALREADYINITIALIZED_);
+    /* 3 */
+    CHECKEQ(vcall(ds, DS_SetCooperativeLevel, 2, HWND, 2u), DS_OK_);
+    CHECKEQ(vcall(ds, DS_SetCooperativeLevel, 2, HWND, 1u), DS_OK_);
+    CHECKEQ(vcall(ds, DS_SetCooperativeLevel, 2, HWND, 3u), DS_OK_);
+    CHECKEQ(vcall(ds, DS_SetCooperativeLevel, 2, HWND, 2u), DS_OK_);
+    MEM32(c) = 0xCCCCCCCCu;
+    CHECKEQ(vcall(ds, DS_GetSpeakerConfig, 1, c), DS_OK_);
+    CHECKEQ(MEM32(c), 0x00140004u);
+    /* 4: the game's buffer */
+    uint32_t b = game_buffer(ds);
+    CHECK(b != ds);
+    /* 5: the whole buffer, zeroed */
+    struct lockout l = lock(b, 0, 0, 2, 1);
+    CHECKEQ(l.hr, DS_OK_);
+    CHECK(l.p1 != 0);
+    CHECKEQ(l.n1, GAME_BYTES);
+    CHECKEQ(l.p2, 0);
+    CHECKEQ(l.n2, 0);
+    int nonzero = 0;
+    for (uint32_t i = 0; i < GAME_BYTES; i++) nonzero += ((uint8_t *)hle_ptr(l.p1))[i] != 0;
+    CHECKEQ(nonzero, 0);
+    CHECKEQ(vcall(b, DSB_Unlock, 4, l.p1, l.n1, 0u, 0u), DS_OK_);
+    CHECKEQ(status(b), 0);
+    CHECKEQ(cursor(b, 0), 0);
+    CHECKEQ(cursor(b, 1), 512u * 4u);
+    /* 6: playing, looping; the null sink moves the play cursor */
+    CHECKEQ(vcall(b, DSB_Play, 3, 0u, 0u, 1u), DS_OK_);
+    CHECKEQ(status(b), 5);
+    uint32_t moved = 0;
+    double t0 = now_s();
+    while (!moved && now_s() - t0 < 0.2) { moved = cursor(b, 0) != 0; if (!moved) sleep_ms(2); }
+    CHECK(moved);
+    /* 7 */
+    CHECKEQ(vcall(b, DSB_Stop, 0), DS_OK_);
+    CHECKEQ(status(b), 0);
+    uint32_t p = cursor(b, 0);
+    sleep_ms(30);
+    CHECKEQ(cursor(b, 0), p);                           /* stopped: the cursor stays */
+    CHECKEQ(vcall(b, 2, 0), 0);                         /* the buffer's last Release */
+    CHECKEQ(d3d_live_count(), live0 + 1);
+    CHECKEQ(vcall(ds, 2, 0), 0);
+    CHECKEQ(d3d_live_count(), live0);
+    /* IUnknown makes the same object; it holds no buffer, so one Release ends it */
+    ds = ds_cocreate(CLSID_DirectSound, IID_IUnknown, &hr);
+    CHECKEQ(hr, 0);
+    CHECKEQ(vcall(ds, DS_Initialize, 1, gguid(DSDEVID_DefaultPlayback)), DS_OK_);
+    CHECKEQ(vcall(ds, 2, 0), 0);
+    CHECKEQ(d3d_live_count(), live0);
+}
+
+static void group_ds_rules(void) {
+    uint32_t ds = ds_ready(), hr, w = wave(1, 2, 44100, 16);
+    CHECKEQ(vcall(ds, DS_SetCooperativeLevel, 2, HWND, 0u), DSERR_INVALIDPARAM_);
+    CHECKEQ(vcall(ds, DS_SetCooperativeLevel, 2, HWND, 5u), DSERR_INVALIDPARAM_);
+    CHECKEQ(vcall(ds, DS_GetSpeakerConfig, 1, 0u), DSERR_INVALIDPARAM_);
+    uint32_t live = d3d_live_count();
+    CHECKEQ(make_buffer(ds, desc(24, GAME_FLAGS, GAME_BYTES, w), &hr), 0);
+    CHECKEQ(hr, DSERR_INVALIDPARAM_);
+    CHECKEQ(make_buffer(ds, desc(20, GAME_FLAGS, GAME_BYTES + 2, w), &hr), 0);     /* not whole frames */
+    CHECKEQ(hr, DSERR_INVALIDPARAM_);
+    CHECKEQ(make_buffer(ds, desc(20, GAME_FLAGS, 0, w), &hr), 0);
+    CHECKEQ(hr, DSERR_INVALIDPARAM_);
+    CHECKEQ(make_buffer(ds, desc(20, GAME_FLAGS, 0x10000000u, w), &hr), 0);
+    CHECKEQ(hr, DSERR_INVALIDPARAM_);
+    CHECKEQ(make_buffer(ds, desc(20, GAME_FLAGS, 2, wave(1, 1, 22050, 8)), &hr), 0);   /* under 4 bytes */
+    CHECKEQ(hr, DSERR_INVALIDPARAM_);
+    CHECKEQ(make_buffer(ds, desc(20, GAME_FLAGS, GAME_BYTES, 0), &hr), 0);
+    CHECKEQ(hr, DSERR_INVALIDPARAM_);
+    CHECKEQ(vcall(ds, DS_CreateSoundBuffer, 3, 0u, gmem(4), 0u), DSERR_INVALIDPARAM_);
+    CHECKEQ(vcall(ds, DS_CreateSoundBuffer, 3, desc(20, GAME_FLAGS, GAME_BYTES, w), 0u, 0u), DSERR_INVALIDPARAM_);
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(ds, DS_CreateSoundBuffer, 3, desc(20, GAME_FLAGS, GAME_BYTES, w), out, 0x1000u),
+            DSERR_NOAGGREGATION_);
+    CHECKEQ(d3d_live_count(), live);
+    /* the 36-byte (DirectX 7) description, the other allowed flags and the formats the mixer plays */
+    uint32_t b = make_buffer(ds, desc(36, 0x4008u, 4, wave(1, 1, 22050, 8)), &hr);
+    CHECKEQ(hr, DS_OK_);
+    CHECKEQ(vcall(b, 2, 0), 0);
+    b = make_buffer(ds, desc(20, 0x18000u, 4000, wave(1, 1, 11025, 16)), &hr);
+    CHECKEQ(hr, DS_OK_);
+    CHECKEQ(vcall(b, DSB_GetStatus, 1, 0u), DSERR_INVALIDPARAM_);
+    CHECKEQ(vcall(b, 2, 0), 0);
+    CHECKEQ(d3d_live_count(), live);
+    CHECKEQ(vcall(ds, 2, 0), 0);
+}
+
+static void group_ds_buffer_lock(void) {
+    uint32_t ds = ds_ready(), b = game_buffer(ds);
+    struct lockout all = lock(b, 0, 0, 2, 1);
+    uint32_t data = all.p1;
+    CHECKEQ(all.hr, DS_OK_);
+    /* a lock that wraps: 504 bytes at the end, 520 at the start */
+    struct lockout l = lock(b, 21000, 1024, 0, 1);
+    CHECKEQ(l.hr, DS_OK_);
+    CHECKEQ(l.p1, data + 21000);
+    CHECKEQ(l.n1, 504);
+    CHECKEQ(l.p2, data);
+    CHECKEQ(l.n2, 520);
+    CHECKEQ(vcall(b, DSB_Unlock, 4, l.p1, l.n1, l.p2, l.n2), DS_OK_);
+    /* without a second pointer, only the first part */
+    l = lock(b, 21000, 1024, 0, 0);
+    CHECKEQ(l.hr, DS_OK_);
+    CHECKEQ(l.p1, data + 21000);
+    CHECKEQ(l.n1, 504);
+    /* no wrap: the second part is empty */
+    l = lock(b, 100, 512, 0, 1);
+    CHECKEQ(l.hr, DS_OK_);
+    CHECKEQ(l.p1, data + 100);
+    CHECKEQ(l.n1, 512);
+    CHECKEQ(l.p2, 0);
+    CHECKEQ(l.n2, 0);
+    /* past the end, larger than the buffer, empty */
+    CHECKEQ(lock(b, 21504, 4, 0, 1).hr, DSERR_INVALIDPARAM_);
+    CHECKEQ(lock(b, 0, 21508, 0, 1).hr, DSERR_INVALIDPARAM_);
+    CHECKEQ(lock(b, 0, 0, 0, 1).hr, DSERR_INVALIDPARAM_);
+    CHECKEQ(vcall(b, DSB_Lock, 7, 0u, 4u, 0u, 0u, 0u, 0u, 0u), DSERR_INVALIDPARAM_);
+    /* from the write cursor (512 frames ahead of the play cursor) */
+    l = lock(b, 999, 100, 1, 1);
+    CHECKEQ(l.hr, DS_OK_);
+    CHECKEQ(l.p1, data + 512u * 4u);
+    CHECKEQ(l.n1, 100);
+    /* the whole buffer from the write cursor wraps */
+    l = lock(b, 0, 0, 3, 1);
+    CHECKEQ(l.hr, DS_OK_);
+    CHECKEQ(l.p1, data + 2048);
+    CHECKEQ(l.n1, GAME_BYTES - 2048);
+    CHECKEQ(l.p2, data);
+    CHECKEQ(l.n2, 2048);
+    /* Unlock: each nonzero pointer with its count lies in the buffer */
+    CHECKEQ(vcall(b, DSB_Unlock, 4, data - 4, 8u, 0u, 0u), DSERR_INVALIDPARAM_);
+    CHECKEQ(vcall(b, DSB_Unlock, 4, data + GAME_BYTES, 0u, 0u, 0u), DSERR_INVALIDPARAM_);
+    CHECKEQ(vcall(b, DSB_Unlock, 4, data + 21000, 505u, 0u, 0u), DSERR_INVALIDPARAM_);
+    CHECKEQ(vcall(b, DSB_Unlock, 4, data + 21000, 504u, data + 1, 520u), DS_OK_);
+    CHECKEQ(vcall(b, DSB_Unlock, 4, data + 21000, 504u, data + 21504, 4u), DSERR_INVALIDPARAM_);
+    CHECKEQ(vcall(b, DSB_Unlock, 4, data, GAME_BYTES, 0u, 0u), DS_OK_);
+    CHECKEQ(vcall(b, 2, 0), 0);
+    CHECKEQ(vcall(ds, 2, 0), 0);
+}
+
+/* The game's streaming loop (plan 8 "Measured" item 4) in C, with the test mixing. */
+static void group_ds_buffer_stream(void) {
+    ds_out_manual_for_test();
+    uint32_t ds = ds_ready(), b = game_buffer(ds);
+    struct lockout all = lock(b, 0, 0, 2, 1);
+    memset(hle_ptr(all.p1), 0, all.n1);
+    CHECKEQ(vcall(b, DSB_Unlock, 4, all.p1, all.n1, 0u, 0u), DS_OK_);
+    CHECKEQ(vcall(b, DSB_Play, 3, 0u, 0u, 1u), DS_OK_);
+    enum { ROUNDS = 200, MIX = 441 };
+    static float out[2 * ROUNDS * MIX];
+    uint32_t wo = 0, chunks = 0;
+    uint16_t next = 0;
+    for (int r = 0; r < ROUNDS; r++) {
+        uint32_t play = cursor(b, 0);
+        uint32_t free_ = (play + GAME_BYTES - wo) % GAME_BYTES;
+        while (free_ >= 512) {
+            struct lockout l = lock(b, wo, 512, 0, 1);
+            CHECKEQ(l.hr, DS_OK_);
+            CHECKEQ(l.n1 + l.n2, 512);
+            for (uint32_t k = 0; k < l.n1 / 2; k++) s16(l.p1)[k] = (int16_t)next++;
+            for (uint32_t k = 0; k < l.n2 / 2; k++) s16(l.p2)[k] = (int16_t)next++;
+            CHECKEQ(vcall(b, DSB_Unlock, 4, l.p1, l.n1, l.p2, l.n2), DS_OK_);
+            wo = (wo + 512) % GAME_BYTES;
+            free_ -= 512;
+            chunks++;
+        }
+        ds_mix(out + 2 * (size_t)r * MIX, MIX);
+    }
+    int bad = 0;
+    for (uint32_t f = 0; f < ROUNDS * MIX; f++) {
+        float wl = 0.0f, wr = 0.0f;
+        if (f >= GAME_BYTES / 4) {                      /* after the first, silent, buffer */
+            uint32_t j = f - GAME_BYTES / 4;
+            wl = (float)(int16_t)(uint16_t)(2 * j) / 32768.0f;
+            wr = (float)(int16_t)(uint16_t)(2 * j + 1) / 32768.0f;
+        }
+        if (out[2 * f] != wl || out[2 * f + 1] != wr) {
+            if (bad++ < 4) printf("FAIL frame %u: %.9g %.9g, want %.9g %.9g\n", f, out[2 * f], out[2 * f + 1], wl, wr);
+        }
+    }
+    CHECKEQ(bad, 0);
+    printf("ds_buffer_stream: %u chunks written, %u frames checked\n", chunks, ROUNDS * MIX);
+    CHECK(chunks * 512u + 511u >= (ROUNDS - 1) * MIX * 4u);      /* up to the last round's play cursor */
+    CHECKEQ(vcall(b, 2, 0), 0);
+    CHECKEQ(vcall(ds, 2, 0), 0);
+}
+
+/* Each case stops the run; it prints "ds_stops: returned" only if it did not. */
+static void group_ds_stops(const char *what) {
+    uint32_t hr;
+    if (!strcmp(what, "flags")) {
+        uint32_t ds = ds_ready();
+        make_buffer(ds, desc(20, 0x18014u, GAME_BYTES, wave(1, 2, 44100, 16)), &hr);
+    } else if (!strcmp(what, "ds8")) {
+        ds_cocreate(CLSID_DirectSound8, IID_IDirectSound, &hr);
+    } else if (!strcmp(what, "iid")) {
+        ds_cocreate(CLSID_DirectSound, IID_IDirectSound8, &hr);
+    } else if (!strcmp(what, "extensible")) {
+        uint32_t ds = ds_ready(), w = wave(0xFFFE, 2, 44100, 16);
+        MEM32(w + 16) = 22;                             /* cbSize of WAVEFORMATEXTENSIBLE */
+        make_buffer(ds, desc(20, GAME_FLAGS, GAME_BYTES, w), &hr);
+    } else if (!strcmp(what, "format")) {
+        uint32_t ds = ds_ready();
+        make_buffer(ds, desc(20, GAME_FLAGS, GAME_BYTES, wave(1, 6, 44100, 16)), &hr);
+    } else if (!strcmp(what, "play")) {
+        uint32_t ds = ds_ready(), b = game_buffer(ds);
+        vcall(b, DSB_Play, 3, 0u, 0u, 0u);
+    } else if (!strcmp(what, "lockflags")) {
+        uint32_t ds = ds_ready(), b = game_buffer(ds);
+        lock(b, 0, 4, 4, 1);
+    } else if (!strcmp(what, "coop")) {
+        uint32_t ds = ds_ready();
+        vcall(ds, DS_SetCooperativeLevel, 2, HWND, 4u);
+    } else if (!strcmp(what, "dscaps")) {
+        uint32_t ds = ds_ready();
+        vcall(ds, DS_GetCaps, 1, gmem(96));
+    } else if (!strcmp(what, "caps")) {
+        uint32_t ds = ds_ready(), b = game_buffer(ds);
+        vcall(b, DSB_GetCaps, 1, gmem(20));
+    } else if (!strcmp(what, "volume")) {
+        uint32_t ds = ds_ready(), b = game_buffer(ds);
+        vcall(b, DSB_SetVolume, 1, 0u);
+    } else if (!strcmp(what, "capture")) {
+        ds_cocreate(CLSID_DirectSoundCapture, IID_IUnknown, &hr);
+    } else if (!strcmp(what, "create")) {
+        call("DirectSoundCreate", 3, 0u, gmem(4), 0u);
+    } else if (!strcmp(what, "create8")) {
+        call("DirectSoundCreate8", 3, 0u, gmem(4), 0u);
+    } else if (!strcmp(what, "enumerate")) {
+        call("DirectSoundEnumerateA", 2, 0x12345678u, 0u);
+    } else if (!strcmp(what, "init")) {
+        uint32_t ds = ds_cocreate(CLSID_DirectSound, IID_IDirectSound, &hr);
+        vcall(ds, DS_Initialize, 1, gguid(DSDEVID_DefaultCapture));
+    } else if (!strcmp(what, "openal")) {
+        uint32_t name = gmem(32);
+        strcpy(hle_ptr(name), "OpenAL32.dll");
+        call("LoadLibraryA", 1, name);
+    } else {
+        printf("FAIL no stop case %s\n", what);
+        fails++;
+        return;
+    }
+    printf("ds_stops: returned\n");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: audio_selftest <group> [arg]\n"); return 2; }
     hle_mem_init();
@@ -324,6 +718,11 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "ds_out_exit") && argc > 2) group_ds_out_exit(argv[2]);
     else if (!strcmp(argv[1], "ds_audio_log")) group_ds_audio_log();
     else if (!strcmp(argv[1], "ds_device")) group_ds_device();
+    else if (!strcmp(argv[1], "ds_create")) group_ds_create();
+    else if (!strcmp(argv[1], "ds_rules")) group_ds_rules();
+    else if (!strcmp(argv[1], "ds_buffer_lock")) group_ds_buffer_lock();
+    else if (!strcmp(argv[1], "ds_buffer_stream")) group_ds_buffer_stream();
+    else if (!strcmp(argv[1], "ds_stops") && argc > 2) group_ds_stops(argv[2]);
     else { fprintf(stderr, "audio_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

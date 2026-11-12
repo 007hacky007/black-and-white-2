@@ -1,7 +1,8 @@
 /*
  * d3d9_methods.c - every COM interface this layer serves, with its methods in
- * vtable order (the declaration order of the D3D9, DirectDraw 7, D3DX and
- * DirectInput 8 headers; d3dx9_25's for ID3DXSprite and ID3DXFont) and its
+ * vtable order (the declaration order of the D3D9, DirectDraw 7, D3DX,
+ * DirectInput 8, DirectSound, Unknwn and KsProxy headers; d3dx9_25's for
+ * ID3DXSprite and ID3DXFont) and its
  * IID. d3d_vtable() builds a guest vtable from one of these; a method nobody
  * implemented stops loudly, naming itself.
  */
@@ -96,6 +97,13 @@ static const char *const m_didevice8[] = { UNK, "GetCapabilities", "EnumObjects"
     "EnumEffects", "GetEffectInfo", "GetForceFeedbackState", "SendForceFeedbackCommand",
     "EnumCreatedEffectObjects", "Escape", "Poll", "SendDeviceData", "EnumEffectsInFile", "WriteEffectToFile",
     "BuildActionMap", "SetActionMap", "GetImageInfo", 0 };
+static const char *const m_dsound[] = { UNK, "CreateSoundBuffer", "GetCaps", "DuplicateSoundBuffer",
+    "SetCooperativeLevel", "Compact", "GetSpeakerConfig", "SetSpeakerConfig", "Initialize", 0 };
+static const char *const m_dsbuffer[] = { UNK, "GetCaps", "GetCurrentPosition", "GetFormat", "GetVolume", "GetPan",
+    "GetFrequency", "GetStatus", "Initialize", "Lock", "Play", "SetCurrentPosition", "SetFormat", "SetVolume",
+    "SetPan", "SetFrequency", "Stop", "Unlock", "Restore", 0 };
+static const char *const m_classfactory[] = { UNK, "CreateInstance", "LockServer", 0 };
+static const char *const m_kspropset[] = { UNK, "Get", "Set", "QuerySupport", 0 };
 
 #define G(a, b, c, d0, d1, d2, d3, d4, d5, d6, d7) \
     { (a) & 0xFF, ((a) >> 8) & 0xFF, ((a) >> 16) & 0xFF, ((a) >> 24) & 0xFF, (b) & 0xFF, ((b) >> 8) & 0xFF, \
@@ -136,5 +144,10 @@ const struct d3d_iface d3d_ifaces[] = {
     { "ID3DXFont", m_font, { G(0xD79DBB70, 0x5F21, 0x4D36, 0xBB, 0xC2, 0xFF, 0x52, 0x5C, 0x21, 0x3C, 0xDC) } },
     { "IDirectInput8A", m_dinput8, { G(0xBF798030, 0x483A, 0x4DA2, 0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00) } },
     { "IDirectInputDevice8A", m_didevice8, { G(0x54D41080, 0xDC15, 0x4833, 0xA4, 0x1B, 0x74, 0x8F, 0x73, 0xA3, 0x81, 0x79) } },
+    { "IDirectSound", m_dsound, { G(0x279AFA83, 0x4981, 0x11CE, 0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60) } },
+    { "IDirectSoundBuffer", m_dsbuffer, { G(0x279AFA85, 0x4981, 0x11CE, 0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60) } },
+    /* dsound.dll's private class factory (plan 8 Task 4) */
+    { "IClassFactory", m_classfactory, { G(0x00000001, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) } },
+    { "IKsPropertySet", m_kspropset, { G(0x31EFAC30, 0x515C, 0x11D0, 0xA9, 0xAA, 0x00, 0xAA, 0x00, 0x61, 0xBE, 0x93) } },
     { 0, 0, { { 0 } } },
 };

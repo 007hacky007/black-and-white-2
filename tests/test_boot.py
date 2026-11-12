@@ -21,6 +21,7 @@ FRAME = re.compile(r"^\[bw2\] frame (\d+): (\d+)x(\d+), mean (\d+),(\d+),(\d+), 
 
 
 @pytest.mark.gamefiles
+@pytest.mark.xfail(strict=True, reason="plan 8: the boot passes DirectSound; Task 5 rewrites this test")
 def test_boot_to_audio(tmp_path):
     # Plan 7: the game makes its sprite and its 49 fonts (the 48 Arial Narrow ones from the face it adds
     # with AddFontMemResourceEx), loads its script plugin, shows its loading screen and stops at the

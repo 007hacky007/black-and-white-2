@@ -127,15 +127,6 @@ static int in_child(void (*fn)(void), char *out, size_t n) {
 static uint32_t g_child_name;
 static void c_load(void) { call("LoadLibraryA", 1, g_child_name); }
 static void c_load_image(void) { call("LoadImageA", 6, 0u, g_child_name, 0u, 0u, 0u, 0x2010u); }
-static void c_dsound_class(void) {
-    static const uint8_t clsid[16] = { 0x46, 0xD9, 0xD4, 0x47, 0xE8, 0x62, 0xCF, 0x11,
-                                       0x93, 0xBC, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 };
-    static const uint8_t iid[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46 };
-    uint32_t c = gmem(16), i = gmem(16), out = gmem(4);
-    memcpy(hle_ptr(c), clsid, 16), memcpy(hle_ptr(i), iid, 16);
-    call("CoCreateInstance", 5, c, 0u, 1u, i, out);
-}
-
 int main(void) {
     hle_mem_init();
     bw2_register_shims();
@@ -441,15 +432,15 @@ int main(void) {
         CHECK(call("LoadImageA", 6, 0u, 0u, 2u, 0u, 0u, 0x10u) == 0x1C000003u);  /* an icon: win32hle's placeholder */
     }
 
-    /* the audio layer is a later plan's: each stop exits 4, naming it */
+    /* OpenAL is a later plan's (plan 8 answers DirectSound): each load exits 4, naming it */
     {
         char err[8192];
         uint32_t name = gmem(32);
-        strcpy(hle_ptr(name), "dsound.dll");
         g_child_name = name;
-        CHECK(in_child(c_load, err, sizeof err) == 4 && strstr(err, "reached dsound.dll: owned by a later plan"));
-        CHECK(in_child(c_dsound_class, err, sizeof err) == 4
-              && strstr(err, "reached DirectSound (CoCreateInstance): owned by a later plan"));
+        strcpy(hle_ptr(name), "wrap_oal.dll");
+        CHECK(in_child(c_load, err, sizeof err) == 4 && strstr(err, "reached wrap_oal.dll: owned by a later plan"));
+        strcpy(hle_ptr(name), "OPENAL32");
+        CHECK(in_child(c_load, err, sizeof err) == 4 && strstr(err, "reached openal32.dll: owned by a later plan"));
     }
 
     printf("shims selftest: %d failed\n", fails);

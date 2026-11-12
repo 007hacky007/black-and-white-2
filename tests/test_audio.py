@@ -1,9 +1,11 @@
-"""Plan 8 Task 2: the host mixer and its output (runtime/bw2/audio/audio_selftest.c).
+"""Plan 8 Tasks 2 and 3: the host mixer and its output, and IDirectSound with its streaming buffers
+(runtime/bw2/audio/audio_selftest.c).
 
 Each test runs one group of the selftest headless and expects "<group>: 0 failed".
 The groups put their sample data in hle_alloc blocks; nothing here is game material."""
 import os
 import re
+import signal
 import subprocess
 
 import pytest
@@ -94,3 +96,62 @@ def test_ds_audio_log_off(selftest, tmp_path):
 def test_ds_device(selftest, tmp_path):
     r = check(selftest, "ds_device", tmp_path, headless=False)
     assert NOTICE not in r.stderr, r.stderr[-2000:]
+
+
+BUFFER_LINE = "[bw2] audio buffer 1: 2 ch, 44100 Hz, 16 bit, 21504 bytes, flags 0x18000"
+
+
+def test_ds_create(selftest, tmp_path):
+    r = check(selftest, "ds_create", tmp_path, BW2_AUDIO_LOG="1")
+    buffers = [ln for ln in r.stderr.splitlines() if "audio buffer" in ln]
+    assert buffers == [BUFFER_LINE], r.stderr[-2000:]
+    assert NOTICE not in r.stderr, r.stderr[-2000:]
+
+
+def test_ds_create_log_off(selftest, tmp_path):
+    r = check(selftest, "ds_create", tmp_path)
+    assert "audio buffer" not in r.stderr, r.stderr[-2000:]
+
+
+@pytest.mark.parametrize("group", ["ds_rules", "ds_buffer_lock"])
+def test_ds_buffer_rules(selftest, tmp_path, group):
+    check(selftest, group, tmp_path)
+
+
+def test_ds_buffer_stream(selftest, tmp_path):
+    r = check(selftest, "ds_buffer_stream", tmp_path)
+    m = re.search(r"ds_buffer_stream: (\d+) chunks written, (\d+) frames checked", r.stdout)
+    assert m and int(m.group(2)) == 200 * 441, r.stdout[-2000:]
+
+
+@pytest.mark.parametrize("case, message", [
+    ("flags", "IDirectSound::CreateSoundBuffer flags 0x18014: bits 0x14 not implemented"),
+    ("ds8", "CLSID_DirectSound8 {3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}: IDirectSound8 not implemented"),
+    ("iid", "IID {C50A7E93-F395-4834-9EF6-7FA99DE50966} not implemented"),
+    ("extensible", "format tag 0xFFFE, 2 channels, 16 bits"),
+    ("format", "format tag 0x1, 6 channels, 16 bits"),
+    ("play", "IDirectSoundBuffer::Play flags 0x0"),
+    ("lockflags", "IDirectSoundBuffer::Lock flags 0x4 not implemented"),
+    ("coop", "IDirectSound::SetCooperativeLevel DSSCL_WRITEPRIMARY not implemented"),
+    ("dscaps", "IDirectSound::GetCaps not implemented"),
+    ("caps", "IDirectSoundBuffer::GetCaps not implemented"),
+    ("volume", "IDirectSoundBuffer::SetVolume not implemented"),
+    ("capture", "dsound: DirectSoundCapture not implemented"),
+    ("create", "dsound: DirectSoundCreate not implemented"),
+    ("create8", "dsound: DirectSoundCreate8 not implemented"),
+    ("enumerate", "dsound: DirectSoundEnumerateA not implemented"),
+    ("init", "IDirectSound::Initialize of device {DEF00001-9C6D-47ED-AAF1-4DDA8F2B5C03} not implemented"),
+])
+def test_ds_stops(selftest, tmp_path, case, message):
+    r = run_group(selftest, "ds_stops", tmp_path, case)
+    assert r.returncode == -signal.SIGABRT and "ds_stops: returned" not in r.stdout, \
+        f"exit {r.returncode}\n" + r.stdout[-2000:] + r.stderr[-2000:]
+    line = [ln for ln in r.stderr.splitlines() if "FATAL" in ln]
+    assert len(line) == 1 and line[0].startswith("[bw2] FATAL: d3d9: ") and message in line[0], r.stderr[-2000:]
+    assert line[0].count("(from guest 0x") == 1, line[0]
+
+
+def test_ds_stops_openal(selftest, tmp_path):
+    r = run_group(selftest, "ds_stops", tmp_path, "openal")
+    assert r.returncode == 4 and "ds_stops: returned" not in r.stdout, f"exit {r.returncode}\n" + r.stderr[-2000:]
+    assert "[bw2] reached openal32.dll: owned by a later plan" in r.stderr, r.stderr[-2000:]
