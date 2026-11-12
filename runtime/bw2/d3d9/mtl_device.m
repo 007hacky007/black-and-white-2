@@ -153,32 +153,7 @@ static void commit_wait(MtlCtx *c) { mtl_commit(c, 1); }
 void mtl_flush(struct mtl_ctx *cc) { commit_wait(ctx(cc)); }
 
 /* ---- context ---- */
-static void make_window(MtlCtx *c, uint32_t w, uint32_t h) {
-    bw2_main_sync(^{
-        NSRect r = NSMakeRect(0, 0, w, h);
-        NSWindow *win = [[NSWindow alloc] initWithContentRect:r
-                                                    styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                                                              NSWindowStyleMaskMiniaturizable
-                                                      backing:NSBackingStoreBuffered defer:NO];
-        win.title = @"Black & White 2";
-        win.releasedWhenClosed = NO;
-        [win center];
-        CAMetalLayer *layer = [CAMetalLayer layer];
-        layer.device = c.dev;
-        layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        layer.framebufferOnly = YES;
-        layer.contentsScale = win.backingScaleFactor;
-        layer.drawableSize = CGSizeMake(w * win.backingScaleFactor, h * win.backingScaleFactor);
-        layer.displaySyncEnabled = c.vsync ? YES : NO;
-        win.contentView.wantsLayer = YES;
-        win.contentView.layer = layer;
-        [win makeKeyAndOrderFront:nil];
-        c.window = win;
-        c.layer = layer;
-    });
-}
-
-struct mtl_ctx *mtl_ctx_new(uint32_t width, uint32_t height, int vsync) {
+struct mtl_ctx *mtl_ctx_new(uint32_t width, uint32_t height, int vsync, uint32_t hwnd, int fullscreen) {
     MtlCtx *c = [MtlCtx new];
     c.dev = device();
     c.queue = [c.dev newCommandQueue];
@@ -200,27 +175,21 @@ struct mtl_ctx *mtl_ctx_new(uint32_t width, uint32_t height, int vsync) {
     sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
     sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
     c.linear = [c.dev newSamplerStateWithDescriptor:sd];
-    if (!bw2_headless()) make_window(c, width, height);
-    return (__bridge_retained struct mtl_ctx *)c;
+    struct mtl_ctx *cc = (__bridge_retained struct mtl_ctx *)c;
+    if (!bw2_headless()) bw2_mac_window_open(cc, hwnd, width, height, fullscreen);   /* mac_window.m */
+    return cc;
 }
 
 void mtl_ctx_free(struct mtl_ctx *cc) {
     MtlCtx *c = (__bridge_transfer MtlCtx *)(void *)cc;
     commit_wait(c);
-    NSWindow *w = c.window;
-    if (w) bw2_main_sync(^{ [w orderOut:nil]; [w close]; });
+    if (c.window) bw2_mac_window_close(cc);
     c.window = nil;
+    c.layer = nil;
 }
 
-void mtl_ctx_resize(struct mtl_ctx *cc, uint32_t width, uint32_t height) {
-    MtlCtx *c = ctx(cc);
-    NSWindow *w = c.window;
-    CAMetalLayer *layer = c.layer;
-    if (!w) return;
-    bw2_main_sync(^{
-        [w setContentSize:NSMakeSize(width, height)];
-        layer.drawableSize = CGSizeMake(width * w.backingScaleFactor, height * w.backingScaleFactor);
-    });
+void mtl_ctx_resize(struct mtl_ctx *cc, uint32_t width, uint32_t height, int fullscreen) {
+    if (ctx(cc).window) bw2_mac_window_mode(cc, width, height, fullscreen);
 }
 
 void mtl_release(mtl_obj o) { if (o) CFRelease(o); }

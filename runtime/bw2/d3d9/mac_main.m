@@ -37,16 +37,39 @@ void bw2_mac_guest_done(void) {
     }
 }
 
+void bw2_mac_install_app_delegate(void);   /* mac_window.m: Cmd-Q reaches the game as WM_CLOSE */
+
+static NSMenu *submenu(NSMenu *bar, NSString *title) {
+    NSMenuItem *item = [[NSMenuItem alloc] init];
+    NSMenu *m = [[NSMenu alloc] initWithTitle:title];
+    item.submenu = m;
+    [bar addItem:item];
+    return m;
+}
+
+/* The menus (plan 6): the app menu (Hide Cmd-H, Quit Cmd-Q), View (Enter Full Screen, Cmd+Ctrl+F;
+ * AppKit retitles it while in full screen) and Window (Minimize Cmd-M). */
+static void menus(void) {
+    NSMenu *bar = [[NSMenu alloc] init];
+    NSMenu *app = submenu(bar, @"Black & White 2");
+    [app addItemWithTitle:@"Hide Black & White 2" action:@selector(hide:) keyEquivalent:@"h"];
+    [app addItem:[NSMenuItem separatorItem]];
+    [app addItemWithTitle:@"Quit Black & White 2" action:@selector(terminate:) keyEquivalent:@"q"];
+    NSMenu *view = submenu(bar, @"View");
+    NSMenuItem *fs = [view addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:)
+                              keyEquivalent:@"f"];
+    fs.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagControl;
+    NSMenu *window = submenu(bar, @"Window");
+    [window addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+    [NSApp setMainMenu:bar];
+    NSApp.windowsMenu = window;
+}
+
 static void app_setup(void) {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-    NSMenu *bar = [[NSMenu alloc] init];
-    NSMenuItem *appItem = [[NSMenuItem alloc] init];
-    [bar addItem:appItem];
-    NSMenu *appMenu = [[NSMenu alloc] init];
-    [appMenu addItemWithTitle:@"Quit Black & White 2" action:@selector(terminate:) keyEquivalent:@"q"];
-    [appItem setSubmenu:appMenu];
-    [NSApp setMainMenu:bar];
+    bw2_mac_install_app_delegate();
+    menus();
     [NSApp finishLaunching];
     [NSApp activateIgnoringOtherApps:YES];
 }

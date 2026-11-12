@@ -121,6 +121,7 @@ static void destroy_device(struct d3d_obj *o) {
     mtl_heap_forget_ctx(d->mtl);
     mtl_archive_save();
     mtl_ctx_free(d->mtl);
+    d3d_mode_device(d, 0, 0, 0, 1);              /* a full-screen device's mode goes with it */
     d3d_state_free(&d->st);
     if (g_d3d_cur == d) g_d3d_cur = NULL;
     uint32_t d3d9 = d->d3d9;
@@ -150,7 +151,8 @@ uint32_t d3d9_create_device(uint32_t d3d9, uint32_t adapter, uint32_t type, uint
     d->base.destroy = destroy_device;
     d->d3d9 = d3d9, d->adapter = adapter, d->devtype = type, d->focus = focus, d->flags = flags;
     memcpy(d->pp, pp, sizeof pp);
-    d->mtl = mtl_ctx_new(pp[0], pp[1], pp[13] != D3DPRESENT_INTERVAL_IMMEDIATE);
+    /* the game window: hDeviceWindow, or the focus window when that is NULL (as D3D9 does) */
+    d->mtl = mtl_ctx_new(pp[0], pp[1], pp[13] != D3DPRESENT_INTERVAL_IMMEDIATE, pp[7] ? pp[7] : focus, !pp[8]);
     d->cursor_shown = 0;
     for (int i = 0; i < 256; i++) d->gamma[i] = d->gamma[256 + i] = d->gamma[512 + i] = (uint16_t)(i * 257);
     uint32_t dev = d3d_new(D3DK_DEVICE, "IDirect3DDevice9", &d->base);
@@ -161,6 +163,7 @@ uint32_t d3d9_create_device(uint32_t d3d9, uint32_t adapter, uint32_t type, uint
     make_targets(d);
     d3d_state_defaults(&d->st, pp[9] != 0, pp[0], pp[1]);
     g_d3d_cur = d;
+    d3d_mode_device(d, !pp[8], pp[0], pp[1], 0);
     *out = dev;
     return D3D_OK;
 }
@@ -384,7 +387,8 @@ static void dv_Reset(void) {               /* (this, D3DPRESENT_PARAMETERS*) */
     make_targets(d);
     d3d_state_defaults(&d->st, pp[9] != 0, pp[0], pp[1]);
     d->in_scene = 0;
-    mtl_ctx_resize(d->mtl, pp[0], pp[1]);
+    mtl_ctx_resize(d->mtl, pp[0], pp[1], !pp[8]);
+    d3d_mode_device(d, !pp[8], pp[0], pp[1], 0);
     RET(D3D_OK, 2);
 }
 
@@ -406,7 +410,7 @@ static void dv_GetDeviceCaps(void) {       /* (this, D3DCAPS9*) */
 }
 static void put_display_mode(uint32_t m) {
     uint32_t w, h;
-    d3d_display_size(&w, &h);
+    d3d_current_mode(&w, &h);
     MEM32(m) = w, MEM32(m + 4) = h, MEM32(m + 8) = 60, MEM32(m + 12) = D3DFMT_X8R8G8B8;
 }
 static void dv_GetDisplayMode(void) {      /* (this, swapchain, D3DDISPLAYMODE*) */

@@ -1821,6 +1821,25 @@ static void group_translate_reset(void) {
     CHECK(NEAR(t.scroll_rem, 3));
 }
 
+/* window_size (plan 6 Task 4): the first windowed size is the back buffer in points, scaled down
+ * (never up) to fit 90% of the screen's visible frame, the aspect kept. */
+static int near(double a, double b) { return fabs(a - b) < 1e-9; }
+static void group_window_size(void) {
+    double w = 0, h = 0;
+    bw2_window_fit(1512, 945, 1024, 768, &w, &h);
+    CHECK(near(w, 1024) && near(h, 768));
+    bw2_window_fit(1512, 945, 1920, 1080, &w, &h);       /* 90% of the width is the tighter bound */
+    if (!near(w, 1360.8) || !near(h, 765.45)) { printf("FAIL window_size: %.6f x %.6f\n", w, h); fails++; }
+    bw2_window_fit(1512, 945, 1000, 1000, &w, &h);       /* 90% of the height */
+    CHECK(near(w, 850.5) && near(h, 850.5));
+    bw2_window_fit(1512, 945, 640, 480, &w, &h);
+    CHECK(near(w, 640) && near(h, 480));
+    bw2_window_fit(1360.8, 850.5, 1512, 945, &w, &h);    /* the same aspect: both bounds at once */
+    CHECK(near(w, 1224.72) && near(h, 765.45));
+    bw2_window_fit(0, 0, 800, 600, &w, &h);              /* no visible frame known: the back buffer */
+    CHECK(near(w, 800) && near(h, 600));
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: input_selftest <group> [arg]\n"); return 2; }
     hle_mem_init();
@@ -1855,6 +1874,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "caps")) group_caps();
     else if (!strcmp(argv[1], "mouse_events")) group_mouse_events();
     else if (!strcmp(argv[1], "translate_reset")) group_translate_reset();
+    else if (!strcmp(argv[1], "window_size")) group_window_size();
     else { fprintf(stderr, "input_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

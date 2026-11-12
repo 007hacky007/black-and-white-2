@@ -22,6 +22,26 @@ void d3d_display_size(uint32_t *w, uint32_t *h) {
     if (m) CGDisplayModeRelease(m);
 }
 
+/* The full-screen device whose back buffer is the current mode, or none. */
+static const void *g_fs_dev;
+static uint32_t g_fs_w, g_fs_h;
+
+void d3d_current_mode(uint32_t *w, uint32_t *h) {
+    if (g_fs_dev) *w = g_fs_w, *h = g_fs_h;
+    else d3d_display_size(w, h);
+}
+static void publish_mode(void) {
+    uint32_t w, h;
+    d3d_current_mode(&w, &h);
+    hle_set_screen_size((int)w, (int)h);
+}
+void d3d_mode_device(const void *dev, int fullscreen, uint32_t w, uint32_t h, int gone) {
+    if (!gone && fullscreen) g_fs_dev = dev, g_fs_w = w, g_fs_h = h;
+    else if (g_fs_dev == dev) g_fs_dev = NULL;
+    else return;                                 /* another device's windowed change: the mode stays */
+    publish_mode();
+}
+
 /* The mode list: the standard sizes that fit, plus the display's own, sorted, no duplicates. */
 static const uint16_t g_std[][2] = {
     { 640, 480 }, { 800, 600 }, { 1024, 768 }, { 1152, 864 }, { 1280, 720 }, { 1280, 800 }, { 1280, 960 },
@@ -171,7 +191,7 @@ static void a_EnumAdapterModes(void) {                /* (this, adapter, format,
 static void a_GetAdapterDisplayMode(void) {           /* (this, adapter, D3DDISPLAYMODE*) */
     uint32_t w, h, m = A32(2);
     if (!ADAPTER_OK(A32(1)) || !m) RET(D3DERR_INVALIDCALL, 3);
-    d3d_display_size(&w, &h);
+    d3d_current_mode(&w, &h);
     MEM32(m) = w, MEM32(m + 4) = h, MEM32(m + 8) = 60, MEM32(m + 12) = D3DFMT_X8R8G8B8;
     RET(D3D_OK, 3);
 }
@@ -235,6 +255,7 @@ static const win32hle_shim g_impls[] = {
 static const win32hle_shim g_exports[] = { { "Direct3DCreate9", x_Direct3DCreate9 }, { 0, 0 } };
 
 void d3d9_adapter_register(void) {
+    publish_mode();                              /* the desktop, until a full-screen device */
     d3d_impls(g_impls);
     win32hle_register(g_exports);
 }

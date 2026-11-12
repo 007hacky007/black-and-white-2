@@ -114,3 +114,12 @@ def test_frame_log(selftest, tmp_path, monkeypatch):
         r = run_group(selftest, "frame_log", tmp_path)
         assert r.returncode == 0 and "frame_log: 0 failed" in r.stdout, r.stdout[-4000:] + r.stderr[-4000:]
         assert "[bw2] frame " not in r.stderr, r.stderr[-4000:]
+
+
+# ---- Plan 6 Task 4: the current display mode ----
+
+def test_display_mode(selftest, tmp_path):
+    # the desktop before any device, the full-screen device's back buffer while it lives (also for
+    # GetSystemMetrics and a window that covered the screen), the desktop again after a windowed Reset
+    # or the last Release; the mode list stays the desktop's throughout
+    check(selftest, "display_mode", tmp_path)

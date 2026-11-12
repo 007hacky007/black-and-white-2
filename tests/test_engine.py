@@ -1291,3 +1291,20 @@ def test_window_device_presents(tmp_path):
     b = _engine(tmp_path, "ret", {K32: ["ExitProcess"]})
     r = _run(tmp_path, b, "--selftest-window")
     assert r.returncode == 0 and "window ok 60" in r.stdout, r.stdout + r.stderr[-2000:]
+
+
+# ---- Plan 6 Task 4: the game's window takes Mac input (opens one on screen; opt in with BW2_GUI=1) ----
+
+@pytest.mark.skipif(os.environ.get("BW2_GUI") != "1", reason="opens a window: set BW2_GUI=1")
+def test_window_input(tmp_path):
+    # synthetic NSEvents posted to a windowed 640x480 device's window reach the game window's procedure
+    # as Windows messages: a click at the view's centre, the A key, a 3-line scroll, then the close button
+    b = _engine(tmp_path, "ret", {K32: ["ExitProcess"]})
+    r = _run(tmp_path, b, "--selftest-input-window")
+    assert r.returncode == 0, r.stdout + r.stderr[-2000:]
+    lines = r.stdout.splitlines()
+    want = ["WM_LBUTTONDOWN 320,240", "WM_LBUTTONUP 320,240", "WM_KEYDOWN 41 001E0001", "WM_MOUSEWHEEL 360",
+            "WM_CLOSE", "input window ok"]
+    it = iter(lines)
+    missing = [w for w in want if not any(ln == w for ln in it)]
+    assert not missing, f"missing (in order) {missing}:\n" + r.stdout + r.stderr[-2000:]

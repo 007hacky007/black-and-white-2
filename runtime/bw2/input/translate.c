@@ -112,6 +112,13 @@ void bw2_letterbox(const struct bw2_geom *g, double *x0, double *y0, double *sca
     *y0 = (g->view_h - g->bb_h * s) / 2;
 }
 
+void bw2_window_fit(double vis_w, double vis_h, uint32_t bb_w, uint32_t bb_h, double *w, double *h) {
+    double s = 1;
+    if (vis_w > 0 && vis_h > 0 && isfinite(vis_w) && isfinite(vis_h) && bb_w && bb_h)
+        s = fmin(1.0, fmin(vis_w * 0.9 / bb_w, vis_h * 0.9 / bb_h));
+    *w = bb_w * s, *h = bb_h * s;
+}
+
 /* View points to back-buffer pixels, with one rounding: d * bb / view on the filling side. */
 static double to_pixels(const struct bw2_geom *g, double d) {
     return width_bound(g) ? d * g->bb_w / g->view_w : d * g->bb_h / g->view_h;

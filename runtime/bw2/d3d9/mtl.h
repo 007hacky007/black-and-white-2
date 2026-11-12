@@ -15,10 +15,17 @@ enum mtl_textype { MT_2D, MT_CUBE, MT_3D };
 #define MT_MIPGEN 2u                     /* mipmaps generated on the GPU */
 #define MT_OPAQUE 4u                     /* an X8 format: alpha reads (and starts) as one */
 
-struct mtl_ctx *mtl_ctx_new(uint32_t width, uint32_t height, int vsync);   /* opens the window unless headless */
+/* Opens the game window (the guest's hwnd, windowed or Mac full screen) unless headless. */
+struct mtl_ctx *mtl_ctx_new(uint32_t width, uint32_t height, int vsync, uint32_t hwnd, int fullscreen);
 void mtl_ctx_free(struct mtl_ctx *c);
-void mtl_ctx_resize(struct mtl_ctx *c, uint32_t width, uint32_t height);
+void mtl_ctx_resize(struct mtl_ctx *c, uint32_t width, uint32_t height, int fullscreen);   /* on Reset */
 void mtl_release(mtl_obj o);
+
+/* mac_window.m: the game's NSWindow and its BW2View (plan 6). Open makes the window, its Metal layer
+ * and the input view, and names hwnd as the input's window; mode follows a Reset. Not headless. */
+void bw2_mac_window_open(struct mtl_ctx *c, uint32_t hwnd, uint32_t bb_w, uint32_t bb_h, int fullscreen);
+void bw2_mac_window_mode(struct mtl_ctx *c, uint32_t bb_w, uint32_t bb_h, int fullscreen);
+void bw2_mac_window_close(struct mtl_ctx *c);
 
 /* Textures: storage format from the table; swizzle applies to sampling only. */
 mtl_obj mtl_tex_new(struct mtl_ctx *c, enum mtl_store st, enum mtl_textype type, uint32_t w, uint32_t h,

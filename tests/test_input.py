@@ -150,3 +150,9 @@ def test_di_input(selftest, tmp_path, group):
                                    "caps", "mouse_events", "translate_reset"])
 def test_translate(selftest, tmp_path, group):
     check(selftest, group, tmp_path)
+
+
+# ---- plan 6 Task 4: the game's window on the Mac ----
+
+def test_window_size(selftest, tmp_path):
+    check(selftest, "window_size", tmp_path)

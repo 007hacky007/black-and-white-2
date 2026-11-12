@@ -96,5 +96,8 @@ void bw2_translate_reset(struct bw2_translator *t);     /* on deactivation: forg
 int  bw2_keymap(unsigned mac_keycode, uint32_t *vk, uint32_t *scan, int *extended);   /* 0: not sent */
 void bw2_letterbox(const struct bw2_geom *g, double *x0, double *y0, double *scale);  /* the picture's
                                          top-left from the view's top-left, in points, and points per pixel */
+/* The first windowed size, in points: the back buffer (a pixel as a point) scaled down, never up, to fit
+ * 90% of the screen's visible frame, the aspect kept. No visible frame: the back buffer. */
+void bw2_window_fit(double vis_w, double vis_h, uint32_t bb_w, uint32_t bb_h, double *w, double *h);
 
 #endif

@@ -2008,7 +2008,87 @@ static void group_vdecl_dupes(void) {
     vcall(vd, 2, 0);
 }
 
+/* ---- plan 6 Task 4: the current display mode ---- */
+
+/* GetAdapterDisplayMode and GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN) both give w x h. */
+static void expect_mode(int line, uint32_t w, uint32_t h) {
+    uint32_t m = gmem(16);
+    uint32_t hr = vcall(g_d3d9, D9_GetAdapterDisplayMode, 2, 0u, m);
+    uint32_t cx = call("GetSystemMetrics", 1, 0u), cy = call("GetSystemMetrics", 1, 1u);
+    if (hr == D3D_OK && MEM32(m) == w && MEM32(m + 4) == h && MEM32(m + 12) == FMT_X8R8G8B8 && cx == w && cy == h)
+        return;
+    printf("FAIL %s:%d: display mode %ux%u (hr 0x%X), screen %ux%u, want %ux%u\n", __FILE__, line, MEM32(m),
+           MEM32(m + 4), hr, cx, cy, w, h);
+    fails++;
+}
+#define EXPECT_MODE(w, h) expect_mode(__LINE__, w, h)
+
+/* The adapter's mode list as "WxH " pairs. */
+static void mode_list(char *out, size_t cap) {
+    uint32_t n = vcall(g_d3d9, D9_GetAdapterModeCount, 2, 0u, FMT_X8R8G8B8), m = gmem(16);
+    size_t k = 0;
+    out[0] = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        CHECKEQ(vcall(g_d3d9, D9_EnumAdapterModes, 4, 0u, FMT_X8R8G8B8, i, m), D3D_OK);
+        k += (size_t)snprintf(out + k, cap - k, "%ux%u ", MEM32(m), MEM32(m + 4));
+    }
+}
+
+static void group_display_mode(void) {
+    g_d3d9 = new_d3d9();
+    /* before any device: the desktop */
+    EXPECT_MODE(1920, 1080);
+    static char before[1024], during[1024];
+    mode_list(before, sizeof before);
+    CHECK(strstr(before, "1920x1080 ") != NULL);
+    /* a window that covers the screen, and a full-screen 1024x768 device on it */
+    uint32_t wc = gmem(40), nm = gstr("bw2dm");
+    memset(hle_ptr(wc), 0, 40);
+    MEM32(wc + 4) = hle_resolve("DefWindowProcA"), MEM32(wc + 16) = 0x00400000u, MEM32(wc + 36) = nm;
+    CHECK(call("RegisterClassA", 1, wc) != 0);
+    uint32_t hwnd = call("CreateWindowExA", 12, 0u, nm, gstr(""), 0x90000000u, 0u, 0u, 1920u, 1080u, 0u, 0u,
+                         0x00400000u, 0u);
+    CHECK(hwnd != 0);
+    uint32_t pp = pp_new(1024, 768, FMT_X8R8G8B8, 1), out = gmem(4), r = gmem(16);
+    MEM32(pp + 28) = hwnd, MEM32(pp + 32) = 0, MEM32(pp + 48) = 60;
+    CHECKEQ(vcall(g_d3d9, D9_CreateDevice, 6, 0u, HAL, hwnd, CREATE_HWVP, pp, out), D3D_OK);
+    uint32_t dev = MEM32(out);
+    EXPECT_MODE(1024, 768);
+    CHECK(call("GetWindowRect", 2, hwnd, r) != 0);
+    CHECK(MEM32(r) == 0 && MEM32(r + 4) == 0 && MEM32(r + 8) == 1024 && MEM32(r + 12) == 768);
+    /* the mode list stays the desktop's, so the larger modes stay offered */
+    mode_list(during, sizeof during);
+    CHECK(!strcmp(before, during));
+    uint32_t m = gmem(16);
+    CHECKEQ(vcall(dev, DV_GetDisplayMode, 2, 0u, m), D3D_OK);
+    CHECK(MEM32(m) == 1024 && MEM32(m + 4) == 768 && MEM32(m + 12) == FMT_X8R8G8B8);
+    /* Reset to the same full-screen mode (the game's profile Reset) keeps it */
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp), D3D_OK);
+    EXPECT_MODE(1024, 768);
+    /* Reset to windowed gives the desktop back */
+    MEM32(pp + 32) = 1, MEM32(pp + 48) = 0;
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp), D3D_OK);
+    EXPECT_MODE(1920, 1080);
+    CHECKEQ(vcall(dev, DV_GetDisplayMode, 2, 0u, m), D3D_OK);
+    CHECK(MEM32(m) == 1920 && MEM32(m + 4) == 1080);
+    /* full screen again, then the device's last Release gives the desktop back */
+    MEM32(pp + 32) = 0, MEM32(pp + 48) = 60;
+    CHECKEQ(vcall(dev, DV_Reset, 1, pp), D3D_OK);
+    EXPECT_MODE(1024, 768);
+    CHECKEQ(vcall(dev, 2, 0), 0);
+    EXPECT_MODE(1920, 1080);
+    mode_list(during, sizeof during);
+    CHECK(!strcmp(before, during));
+    /* a windowed device leaves the desktop as it is */
+    MEM32(pp + 32) = 1, MEM32(pp + 48) = 0;
+    CHECKEQ(vcall(g_d3d9, D9_CreateDevice, 6, 0u, HAL, hwnd, CREATE_HWVP, pp, out), D3D_OK);
+    EXPECT_MODE(1920, 1080);
+    CHECKEQ(vcall(MEM32(out), 2, 0), 0);
+    EXPECT_MODE(1920, 1080);
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "display_mode", group_display_mode },
     { "frame_log", group_frame_log },
     { "vdecl_dupes", group_vdecl_dupes },
     { "autogen_rt", group_autogen_rt },

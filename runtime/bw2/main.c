@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "win32hle.h"
 #include "host.h"
 #include "bw2.h"
@@ -78,6 +79,83 @@ static uint32_t window_selftest(void) {
     return frames == 60 ? 0 : 1;
 }
 
+/* --selftest-input-window: a windowed 640x480 device on a game window (CS_DBLCLKS); synthetic NSEvents
+ * posted to its Mac window (a click at the view's centre, the A key, a 3-line scroll, then the close
+ * button) reach the window procedure as Windows messages, pumped as the game pumps. Prints what the
+ * procedure was given. Opens a window (plan 6 Task 4). */
+int bw2_mac_selftest_input(void);
+void bw2_mac_selftest_close(void);
+static int g_iw_close;
+static void iw_record(uint32_t h, uint32_t m, uint32_t w, uint32_t l) {
+    (void)h;
+    int x = (int16_t)(l & 0xFFFF), y = (int16_t)(l >> 16);
+    switch (m) {
+    case 0x0200: printf("WM_MOUSEMOVE %d,%d\n", x, y); break;
+    case 0x0201: printf("WM_LBUTTONDOWN %d,%d\n", x, y); break;
+    case 0x0202: printf("WM_LBUTTONUP %d,%d\n", x, y); break;
+    case 0x0203: printf("WM_LBUTTONDBLCLK %d,%d\n", x, y); break;
+    case 0x0100: printf("WM_KEYDOWN %X %08X\n", w, l); break;
+    case 0x0101: printf("WM_KEYUP %X %08X\n", w, l); break;
+    case 0x0102: printf("WM_CHAR %X\n", w); break;
+    case 0x020A: printf("WM_MOUSEWHEEL %d\n", (int16_t)(w >> 16)); break;
+    case 0x0010: printf("WM_CLOSE\n"); g_iw_close = 1; break;
+    case 0x0006: printf("WM_ACTIVATE %X\n", w); break;
+    default: return;
+    }
+    fflush(stdout);
+}
+static uint32_t gcall(const char *name, int n, const uint32_t *a) { return hle_call_guest(hle_resolve(name), n, a); }
+/* Peek, translate, dispatch until the queue is empty, for at least ms milliseconds or until *until. */
+static void iw_pump(uint32_t msg, int ms, const int *until) {
+    for (int t = 0; t < ms; t += 10) {
+        uint32_t peek[5] = { msg, 0, 0, 0, 1 };
+        while (gcall("PeekMessageA", 5, peek)) {
+            gcall("TranslateMessage", 1, &msg);
+            gcall("DispatchMessageA", 1, &msg);
+        }
+        if (until && *until) return;
+        mach_leave();
+        usleep(10000);
+        mach_enter();
+    }
+}
+static uint32_t input_window_selftest(void) {
+    mach_enter();
+    hle_proc_hook = iw_record;
+    uint32_t wc = hle_va(hle_alloc(40)), nm = hle_va(hle_alloc(16)), msg = hle_va(hle_alloc(28));
+    memset(hle_ptr(wc), 0, 40);
+    strcpy(hle_ptr(nm), "bw2iw");
+    MEM32(wc) = 8u;                                       /* CS_DBLCLKS */
+    MEM32(wc + 4) = hle_resolve("DefWindowProcA"), MEM32(wc + 16) = 0x00400000u, MEM32(wc + 36) = nm;
+    uint32_t ok = gcall("RegisterClassA", 1, &wc) != 0;
+    uint32_t cw[12] = { 0, nm, nm, 0x90000000u, 0, 0, 640, 480, 0, 0, 0x00400000u, 0 };   /* WS_POPUP|WS_VISIBLE */
+    uint32_t hwnd = ok ? gcall("CreateWindowExA", 12, cw) : 0;
+    uint32_t v = 32, d3d = hle_call_guest(hle_resolve("Direct3DCreate9"), 1, &v);
+    uint32_t pp = hle_va(hle_alloc(56)), out = hle_va(hle_alloc(4)), dev = 0;
+    memset(hle_ptr(pp), 0, 56);
+    MEM32(pp) = 640, MEM32(pp + 4) = 480, MEM32(pp + 8) = 22, MEM32(pp + 12) = 1, MEM32(pp + 24) = 1;
+    MEM32(pp + 28) = hwnd, MEM32(pp + 32) = 1;
+    uint32_t cd[6] = { 0, 1, hwnd, 0x40u, pp, out };
+    if (hwnd && d3d && !vm(d3d, 16, 6, cd)) dev = MEM32(out);
+    if (dev) {
+        iw_pump(msg, 500, NULL);                          /* the window opens and takes the focus */
+        printf("posting\n");
+        fflush(stdout);
+        if (!bw2_mac_selftest_input()) dev = 0;
+        iw_pump(msg, 500, NULL);
+        bw2_mac_selftest_close();
+        iw_pump(msg, 5000, &g_iw_close);
+    }
+    if (dev) vm(dev, 2, 0, NULL);
+    if (d3d) vm(d3d, 2, 0, NULL);
+    hle_proc_hook = NULL;
+    mach_leave();
+    int pass = dev && g_iw_close;
+    printf("%s\n", pass ? "input window ok" : "input window FAILED");
+    fflush(stdout);
+    return pass ? 0 : 1;
+}
+
 /* --selftest-mainsync: a block sent from the guest's thread runs on the process main thread. */
 static uint32_t mainsync_selftest(void) {
     __block int on_main = 0;
@@ -89,7 +167,7 @@ static uint32_t mainsync_selftest(void) {
 
 int main(int argc, char **argv) {
     const char *game = NULL, *exe = "white.exe";
-    int strict = 0, st_dispatch = 0, st_mem = 0, st_mainsync = 0, st_window = 0, nlifted = 0, ncall = -1;
+    int strict = 0, st_dispatch = 0, st_mem = 0, st_mainsync = 0, st_window = 0, st_input_window = 0, nlifted = 0, ncall = -1;
     uint32_t call_args[8];
     struct { const char *name; uint32_t base; } lifted[8];
     for (int i = 1; i < argc; i++) {
@@ -114,6 +192,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--selftest-eh-depth")) hle_on_exit = report_eh_depth;
         else if (!strcmp(argv[i], "--selftest-mainsync")) st_mainsync = 1;
         else if (!strcmp(argv[i], "--selftest-window")) st_window = 1;
+        else if (!strcmp(argv[i], "--selftest-input-window")) st_input_window = 1;
         else { fprintf(stderr, "bw2: unknown argument %s\n", argv[i]); return usage(); }
     }
     if (getenv("BW2_TRACE_IMPORTS")) win32hle_trace = 1;   /* one line per import call, with its caller */
@@ -125,9 +204,9 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (st_mainsync) return (int)bw2_run_on_main_stack(mainsync_selftest);
-    if (st_window) {
+    if (st_window || st_input_window) {
         bw2_register_shims();
-        return (int)bw2_run_on_main_stack(window_selftest);
+        return (int)bw2_run_on_main_stack(st_window ? window_selftest : input_window_selftest);
     }
     if (!game) return usage();
     char support[PATH_MAX];
