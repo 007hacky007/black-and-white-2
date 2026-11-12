@@ -682,6 +682,10 @@ int main(void) {
         CHECK(a != 0 && !(a >= 0x7F000000u && a <= 0x7FFFFFFFu) && hle_ptr(a) && MEM32(a) == 0);
         CHECK(bw2_bind_resolve("_adjust_fdiv") == a);
         CHECK(bw2_bind_resolve("GetTickCount") == hle_resolve_or_stub("GetTickCount"));
+        /* a stub that stops when called tells itself apart from an answer */
+        CHECK(hle_is_stub(hle_resolve_or_stub("bw2_selftest_no_such_import")) == 1);
+        CHECK(hle_is_stub(hle_resolve("bw2_selftest_no_such_import")) == 1);
+        CHECK(hle_is_stub(hle_resolve("GetTickCount")) == 0 && hle_is_stub(0) == 0 && hle_is_stub(0x00401000u) == 0);
     }
 
     /* k32_dll_features: DisableThreadLibraryCalls, and IsProcessorFeaturePresent from cpu.c's CPU */

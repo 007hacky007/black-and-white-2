@@ -289,6 +289,13 @@ uint32_t hle_resolve_or_stub(const char *name) {
     return g_shim[g_shim_n++].va;
 }
 
+/* 1 when va is a stub hle_resolve_or_stub made (it stops when called), else 0. */
+int hle_is_stub(uint32_t va) {
+    if (va < SHIM_BASE || va >= SHIM_BASE + SHIM_STEP * (uint32_t)g_shim_n) return 0;
+    uint32_t i = (va - SHIM_BASE) / SHIM_STEP;
+    return g_shim[i].va == va && g_shim[i].fn == hle_unimplemented;
+}
+
 /* ------------------------------------------------------- native -> guest */
 uint32_t hle_call_guest(uint32_t va, int nargs, const uint32_t *args) {
     mach_enter();

@@ -120,6 +120,8 @@ uint32_t hle_resolve(const char *name);
  * unknown name and returns its VA (used as the resolver for a permissive bind,
  * so an unresolved import aborts with its name when first called, not at bind). */
 uint32_t hle_resolve_or_stub(const char *name);
+/* 1 when va is such a stub (an import nothing answers), else 0. */
+int hle_is_stub(uint32_t va);
 
 /* Human name for a synthetic shim VA (for traces/faults), or NULL. */
 const char *hle_name(uint32_t va);
