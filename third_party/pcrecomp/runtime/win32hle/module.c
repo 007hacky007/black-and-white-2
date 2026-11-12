@@ -41,13 +41,27 @@ static const char *const g_system[] = {
     "ntdll", "msvcrt", "imm32", "mpr", "rpcrt4", "uuid", "dplayx", "d3dim",
 };
 
+/* A module's base name, lower case, with Windows' default extension: a name
+ * with no '.' gets ".dll", and a trailing '.' means "no extension" (it is
+ * dropped and nothing is added). */
 static void base_of(const char *path, char *out, size_t n) {
     const char *b = path + strlen(path);
     while (b > path && b[-1] != '\\' && b[-1] != '/' && b[-1] != ':') b--;
     size_t k = 0;
     for (; b[k] && k + 1 < n; k++) out[k] = (char)(b[k] >= 'A' && b[k] <= 'Z' ? b[k] + 32 : b[k]);
     out[k] = 0;
-    if (!strchr(out, '.') && k + 4 < n) strcat(out, ".dll");
+    if (k && out[k - 1] == '.') out[k - 1] = 0;
+    else if (!strchr(out, '.') && k + 4 < n) strcat(out, ".dll");
+}
+/* The same rule on a whole path, case kept, for finding its file: only the
+ * part after the last '\\' or '/' is looked at ("C:\\a.b\\Thing" gets ".dll"). */
+static void with_default_ext(const char *path, char *out, size_t n) {
+    size_t len = strlen(path);
+    const char *b = path + len;
+    while (b > path && b[-1] != '\\' && b[-1] != '/') b--;
+    if (len && path[len - 1] == '.') snprintf(out, n, "%.*s", (int)(len - 1), path);
+    else if (!strchr(b, '.')) snprintf(out, n, "%s.dll", path);
+    else snprintf(out, n, "%s", path);
 }
 
 static int find_mod(uint32_t h) {
@@ -84,8 +98,8 @@ static uint32_t system_module(const char *name) {
     char b[64];
     base_of(name, b, sizeof b);
     char *dot = strrchr(b, '.');
-    if (dot && strcmp(dot, ".dll")) return 0;
-    if (dot) *dot = 0;
+    if (!dot || strcmp(dot, ".dll")) return 0;            /* "dsound." names a file "dsound", not the DLL */
+    *dot = 0;
     for (size_t k = 0; k < sizeof g_system / sizeof *g_system; k++)
         if (!strcmp(b, g_system[k])) {
             int i = find_by_name(name);
@@ -125,11 +139,16 @@ static void k_GetModuleFileNameA(void) {                 /* (hModule, buf, size)
 }
 
 static void k_LoadLibraryA(void) {
-    const char *name = ASTR(0);
-    if (!name) { hle_set_last_error(ERROR_MOD_NOT_FOUND); RET(0, 1); }
-    int i = find_by_name(name);
+    const char *arg = ASTR(0);
+    if (!arg) { hle_set_last_error(ERROR_MOD_NOT_FOUND); RET(0, 1); }
+    /* Lookups by base name (base_of) apply the default extension themselves;
+     * the file is looked for under the name with it ("ScriptLibraryR" is
+     * ScriptLibraryR.dll), and that name is what a failure prints. */
+    char name[600];
+    with_default_ext(arg, name, sizeof name);
+    int i = find_by_name(arg);
     if (i >= 0) { g_mod[i].refs++; RET(g_mod[i].base, 1); }
-    uint32_t s = system_module(name);
+    uint32_t s = system_module(arg);
     if (s) RET(s, 1);
     char host[1024];
     int found = hle_host_path(name, host, sizeof host);
@@ -142,10 +161,13 @@ static void k_LoadLibraryA(void) {
     if (hle_lifted_dll_hook) {                           /* a DLL whose code is lifted: the host loads it */
         char b[64];
         uint32_t h = 0;
-        base_of(name, b, sizeof b);
+        base_of(arg, b, sizeof b);
         int r = hle_lifted_dll_hook(b, found ? host : NULL, &h);
         if (r > 0) RET(h, 1);
-        if (r < 0) RET(0, 1);
+        if (r < 0) {                                     /* with a file, the hook said why it failed */
+            if (!found) fprintf(stderr, "[module] LoadLibraryA(\"%s\"): not found\n", name);
+            RET(0, 1);
+        }
     }
     pe_image img;
     if (!found || recomp_pe_map_any(host, &img) != 0) {
