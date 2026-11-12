@@ -194,6 +194,14 @@ def test_vertex_shaders(selftest, tmp_path, group):
     check(selftest, group, tmp_path)
 
 
+@pytest.mark.parametrize("case", ["endif", "endrep", "rep_endif", "if_endloop", "open"])
+def test_unbalanced_flow_is_loud(selftest, tmp_path, case):
+    """An end with no open block of its kind stops loudly instead of walking off the nesting stack."""
+    r = run_group(selftest, "flow_loud", tmp_path, case)
+    assert r.returncode != 0 and "flow_loud: returned" not in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "without a matching" in r.stderr, r.stderr[-2000:]
+
+
 def test_vs30_is_loud(selftest, tmp_path):
     r = run_group(selftest, "vs_loud", tmp_path)
     assert r.returncode != 0 and "vs_loud: returned" not in r.stdout, r.stdout[-2000:]

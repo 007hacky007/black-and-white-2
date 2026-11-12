@@ -291,40 +291,58 @@ static void arith(struct tr *t) {
 static uint32_t body(struct tr *t, uint32_t i, int *loops) {
     const struct sm_shader *s = t->s;
     struct sb *b = t->b;
-    int stack[64], depth = 0;
+    enum { B_IF, B_LOOP, B_REP };
+    struct { int kind, n; } stack[64];
+    int depth = 0;
     for (; i < s->nins; i++) {
         const struct sm_ins *in = &s->ins[i];
         t->ins = in;
         switch (in->op) {
         case SM_NOP: case SM_DCL: case SM_DEF: case SM_DEFI: case SM_DEFB: break;
-        case SM_LABEL: return i;
+        case SM_LABEL:
+            if (depth) unsupported(t, "a block left open without a matching end");
+            return i;
         case SM_RET: put(b, "  return;\n"); break;
-        case SM_IF: put(b, "  if ("); bool_test(t, 0); put(b, ") {\n"); depth++; break;
-        case SM_ELSE: put(b, "  } else {\n"); break;
-        case SM_ENDIF: put(b, "  }\n"); depth--; break;
+        case SM_IF:
+            if (depth >= 64) unsupported(t, "nesting this deep");
+            stack[depth].kind = B_IF, stack[depth++].n = 0;
+            put(b, "  if ("); bool_test(t, 0); put(b, ") {\n");
+            break;
+        case SM_ELSE:
+            if (!depth || stack[depth - 1].kind != B_IF) unsupported(t, "else without a matching if");
+            put(b, "  } else {\n");
+            break;
+        case SM_ENDIF:
+            if (!depth || stack[depth - 1].kind != B_IF) unsupported(t, "endif without a matching if");
+            put(b, "  }\n"); depth--;
+            break;
         case SM_LOOP: {
             if (in->src[1].type != SM_R_CONSTINT) unsupported(t, "a loop not counted by an integer constant");
             if (depth >= 64) unsupported(t, "nesting this deep");
             int n = (*loops)++;
-            stack[depth++] = n;
+            stack[depth].kind = B_LOOP, stack[depth++].n = n;
             put(b, "  { int sv%d = s.aL; int4 li%d = k.i[%u]; s.aL = li%d.y;\n"
                    "  for (int n%d = 0; n%d < clamp(li%d.x, 0, 255); n%d++, s.aL += li%d.z) {\n",
                 n, n, in->src[1].index, n, n, n, n, n, n);
             break;
         }
         case SM_ENDLOOP:
-            if (!depth) unsupported(t, "endloop without loop");
+            if (!depth || stack[depth - 1].kind != B_LOOP) unsupported(t, "endloop without a matching loop");
             depth--;
-            put(b, "  }\n  s.aL = sv%d; }\n", stack[depth]);
+            put(b, "  }\n  s.aL = sv%d; }\n", stack[depth].n);
             break;
         case SM_REP: {
             if (in->src[0].type != SM_R_CONSTINT) unsupported(t, "a rep not counted by an integer constant");
+            if (depth >= 64) unsupported(t, "nesting this deep");
             int n = (*loops)++;
             put(b, "  for (int n%d = 0; n%d < clamp(k.i[%u].x, 0, 255); n%d++) {\n", n, n, in->src[0].index, n);
-            depth++;
+            stack[depth].kind = B_REP, stack[depth++].n = n;
             break;
         }
-        case SM_ENDREP: put(b, "  }\n"); depth--; break;
+        case SM_ENDREP:
+            if (!depth || stack[depth - 1].kind != B_REP) unsupported(t, "endrep without a matching rep");
+            put(b, "  }\n"); depth--;
+            break;
         case SM_CALL: put(b, "  sm_l%u(s, c, k);\n", in->src[0].index); break;
         case SM_CALLNZ:
             put(b, "  if (");
@@ -334,6 +352,7 @@ static uint32_t body(struct tr *t, uint32_t i, int *loops) {
         default: arith(t);
         }
     }
+    if (depth) unsupported(t, "a block left open without a matching end");
     return i;
 }
 

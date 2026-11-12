@@ -1037,6 +1037,24 @@ static void group_vs_loud(void) {
     printf("vs_loud: returned\n");
 }
 
+/* unbalanced flow control (an end with no open block of its kind) stops the run, naming it */
+static void group_flow_loud(const char *which) {
+    uint32_t dev = new_device(16, 16), out = gmem(4);
+    uint32_t t[16], n = 0;
+    t[n++] = 0xFFFE0200u;
+    t[n++] = 0x0200001Fu, t[n++] = 0x80000000u, t[n++] = 0x900F0000u;         /* dcl_position v0 */
+    if (!strcmp(which, "rep_endif")) t[n++] = 0x01000026u, t[n++] = 0xF0E40000u;  /* rep i0 */
+    if (!strcmp(which, "if_endloop") || !strcmp(which, "open")) t[n++] = 0x01000028u, t[n++] = 0xE0E40800u; /* if b0 */
+    if (strcmp(which, "open")) {
+        t[n++] = !strcmp(which, "endrep") ? 0x00000027u : !strcmp(which, "if_endloop") ? 0x0000001Du : 0x0000002Bu;
+        t[n++] = 0x0000002Bu;                                                   /* endif */
+    }
+    t[n++] = 0x02000001u, t[n++] = 0xC00F0000u, t[n++] = 0x90E40000u;          /* mov oPos, v0 */
+    t[n++] = 0x0000FFFFu;
+    vcall(dev, DV_CreateVertexShader, 2, gbytes(t, 4 * n), out);
+    printf("flow_loud: returned\n");
+}
+
 /* ---- Task 4: pixel shaders on Metal ---- */
 
 enum { DV_CreateCubeTexture = 25, DV_CreatePixelShader = 106, DV_SetPixelShader = 107, DV_GetPixelShader = 108,
@@ -1560,6 +1578,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "shader_objects")) group_shader_objects();
     else if (!strcmp(argv[1], "vs_cache")) group_vs_cache();
     else if (!strcmp(argv[1], "vs_loud")) group_vs_loud();
+    else if (!strcmp(argv[1], "flow_loud") && arg) group_flow_loud(arg);
     else if (!strcmp(argv[1], "ps_ops")) group_ps_ops();
     else if (!strcmp(argv[1], "ps_modifiers")) group_ps_modifiers();
     else if (!strcmp(argv[1], "ps_tex")) group_ps_tex();
