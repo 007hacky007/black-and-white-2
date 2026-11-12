@@ -391,6 +391,14 @@ int main(void) {
         uint32_t u32 = call("LoadLibraryA", 1, name);
         CHECK(u32 != 0 && u32 != k32 && call("LoadLibraryA", 1, name2) == u32);
 
+        /* d3d9.dll is a system module, as on Windows: its GetProcAddress answers from the shim tables */
+        strcpy(hle_ptr(name), "d3d9.dll");
+        strcpy(hle_ptr(name2), "D3D9");
+        uint32_t d3d9 = call("GetModuleHandleA", 1, name);
+        CHECK(d3d9 != 0 && call("LoadLibraryA", 1, name2) == d3d9);
+        strcpy(hle_ptr(name2), "Direct3DCreate9");
+        CHECK(call("GetProcAddress", 2, d3d9, name2) == hle_resolve("Direct3DCreate9") && hle_resolve("Direct3DCreate9"));
+
         /* what the lifted-DLL hook is given: the base name, and the host file with the extension added */
         mkdir("support/C/PlugIns", 0755);
         mkdir("support/C/a.b", 0755);
