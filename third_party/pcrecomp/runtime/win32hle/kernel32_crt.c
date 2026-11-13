@@ -357,6 +357,44 @@ static void date_or_time(int is_time) {
 }
 static void k_GetDateFormatA(void) { date_or_time(0); }
 static void k_GetTimeFormatA(void) { date_or_time(1); }
+/* GetDateFormatW / GetTimeFormatW (lcid, flags, &SYSTEMTIME or NULL, fmt, buf, n in WCHARs): the locale's
+ * default pictures, the text as UTF-16 (it is ASCII). Answered: a date with flags 0 or DATE_SHORTDATE
+ * ("M/d/yyyy"), a time with flags 0 ("h:mm:ss tt") or TIME_NOSECONDS ("h:mm tt"), or an ASCII picture with
+ * flags 0, as Windows' en-US answers; anything else stops by name. */
+static void date_or_time_w(int is_time) {
+    const char *name = is_time ? "GetTimeFormatW" : "GetDateFormatW";
+    uint32_t flags = A32(1);
+    const uint16_t *wf = (const uint16_t *)APTR(3);
+    char fmt[256];
+    if ((wf && flags) || flags & ~(is_time ? 2u : 1u))
+        hle_fatal("%s(0x%04X, flags 0x%X%s) from guest 0x%08X: only the default pictures (date flags 0 or 1, "
+                  "time flags 0 or 2) or a picture with flags 0 are answered", name, A32(0), flags,
+                  wf ? ", a picture" : "", g_cur_func);
+    if (wf) {
+        size_t k = 0;
+        for (; wf[k]; k++) {
+            if (wf[k] >= 0x80 || k + 1 >= sizeof fmt)
+                hle_fatal("%s: a picture that is not short ASCII, from guest 0x%08X", name, g_cur_func);
+            fmt[k] = (char)wf[k];
+        }
+        fmt[k] = 0;
+    } else {
+        strcpy(fmt, !is_time ? "M/d/yyyy" : flags ? "h:mm tt" : "h:mm:ss tt");
+    }
+    uint16_t now[8];
+    const uint16_t *st = (const uint16_t *)APTR(2);
+    if (!st) now_systemtime(now), st = now;
+    char out[256];
+    int len = fmt_picture(fmt, st, out, sizeof out);
+    int n = (int)A32(5);
+    if (!n) RET((uint32_t)len, 6);
+    if (n < len) { hle_set_last_error(ERROR_INSUFFICIENT_BUFFER); RET(0, 6); }
+    uint16_t *buf = (uint16_t *)APTR(4);
+    for (int i = 0; i < len; i++) buf[i] = (uint8_t)out[i];
+    RET((uint32_t)len, 6);
+}
+static void k_GetDateFormatW(void) { date_or_time_w(0); }
+static void k_GetTimeFormatW(void) { date_or_time_w(1); }
 
 /* --- environment: the host's, filtered to nothing a game would misread --- */
 /* The block the guest is handed (GetEnvironmentStrings), so in its memory. */
@@ -520,6 +558,8 @@ const win32hle_shim win32hle_kernel32_crt[] = {
     { "EnumSystemLocalesA",           k_EnumSystemLocalesA },
     { "GetDateFormatA",               k_GetDateFormatA },
     { "GetTimeFormatA",               k_GetTimeFormatA },
+    { "GetDateFormatW",               k_GetDateFormatW },
+    { "GetTimeFormatW",               k_GetTimeFormatW },
     { "GetEnvironmentStrings",        k_GetEnvironmentStrings },
     { "GetEnvironmentStringsA",       k_GetEnvironmentStrings },
     { "GetEnvironmentStringsW",       k_GetEnvironmentStringsW },
