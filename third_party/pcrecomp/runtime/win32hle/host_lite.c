@@ -95,6 +95,8 @@ typedef struct {
     int      fp_top;
     uint16_t fpu_cw;
     uint64_t mm[8];
+    xmm_t    xmm[8];
+    uint32_t mxcsr;
 } regs_t;
 
 static void regs_save(regs_t *r) {
@@ -103,6 +105,7 @@ static void regs_save(regs_t *r) {
     r->fs=g_fs_base; r->cur=g_cur_func;
     memcpy(r->st, g_st, sizeof g_st); r->fp_top=g_fp_top; r->fpu_cw=g_fpu_cw;
     memcpy(r->mm, g_mm, sizeof g_mm);
+    memcpy(r->xmm, g_xmm, sizeof g_xmm); r->mxcsr=g_mxcsr;
 }
 static void regs_load(const regs_t *r) {
     g_eax=r->eax; g_ecx=r->ecx; g_edx=r->edx; g_esp=r->esp;
@@ -110,6 +113,7 @@ static void regs_load(const regs_t *r) {
     g_fs_base=r->fs; g_cur_func=r->cur;
     memcpy(g_st, r->st, sizeof g_st); g_fp_top=r->fp_top; g_fpu_cw=r->fpu_cw;
     memcpy(g_mm, r->mm, sizeof g_mm);
+    memcpy(g_xmm, r->xmm, sizeof g_xmm); g_mxcsr=r->mxcsr;
 }
 
 /* A guest thread's stack and simulated TIB. Lifted code reads fs:[n] as
@@ -141,6 +145,7 @@ void mach_enter(void) {
             g_ms.r.esp    = lo + GUEST_STACK - 64;
             g_ms.r.fs     = make_tib(lo, lo + GUEST_STACK);
             g_ms.r.fpu_cw = 0x027F;
+            g_ms.r.mxcsr  = 0x1F80;
             g_ms.inited   = 1;
         }
         mach_take();
