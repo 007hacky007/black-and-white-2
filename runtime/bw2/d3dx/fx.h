@@ -87,10 +87,11 @@ struct fx_object {                           /* a string's text, a shader's toke
 };
 
 /* parameter blocks (plan 10 Task 4, Ruling 10): a set made while a block records is one record, the
- * parameter and its whole value after the set, in call order */
+ * parameter and the bytes the set wrote (a prefix of its value), in call order */
 struct fx_record {
     struct fx_param *p;
-    uint8_t *data;                           /* p->bytes; holds a reference to each texture or shader it names */
+    uint32_t bytes;                          /* the prefix the setter wrote; Apply writes only these */
+    uint8_t *data;                           /* holds a reference to each texture or shader inside the prefix */
 };
 struct fx_block {
     uint32_t handle;                         /* EndParameterBlock's D3DXHANDLE: a guest dword of its own */
@@ -148,9 +149,9 @@ extern uint64_t g_fx_serial;                 /* bumped by every parameter change
 
 /* fx_effect.c */
 struct fx_effect *fx_effect_of(uint32_t effect);   /* an ID3DXEffect's host structures */
-/* Where a setter writes p's value: p->data, or while a block records a new record's bytes (a copy of p's
- * newest record in the block, else of its live value, with its own references). */
-uint8_t *fx_dest(struct fx_effect *e, struct fx_param *p);
+/* Where a setter writes the first `bytes` of p's value: p->data, or while a block records a new record of
+ * that many bytes (zeroed, holding no reference until the setter writes and swaps into it). */
+uint8_t *fx_dest(struct fx_effect *e, struct fx_param *p, uint32_t bytes);
 
 /* ---- fx_expr.c (Task 6): constant tables, and FXLC expressions (state values, array selectors and
  * shader preshaders) run on the CPU in float32 ---- */

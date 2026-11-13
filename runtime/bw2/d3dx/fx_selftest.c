@@ -1482,6 +1482,27 @@ static void group_fx_block_partial(const char *path) {
     CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, b2), D3D_OK);
     CHECKEQ(vcall(e, FX_GetFloatArray, 3, v, out, 4u), D3D_OK);
     CHECKF(gf(out), 6), CHECKF(gf(out + 4), 8), CHECKF(gf(out + 8), 3), CHECKF(gf(out + 12), 4);
+    /* native (Wine's test, written against it): a record keeps only the bytes its set wrote, so a live set
+     * between End and Apply keeps the elements the record did not name */
+    CHECKEQ(vcall(e, FX_SetFloatArray, 3, v, gbytes((float[4]){ 1, 2, 3, 4 }, 16), 4u), D3D_OK);
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetFloatArray, 3, v, gbytes((float[1]){ 9 }, 4), 1u), D3D_OK);
+    uint32_t b3 = vcall(e, FX_EndParameterBlock, 0);
+    CHECKEQ(vcall(e, FX_SetFloatArray, 3, v, gbytes((float[4]){ 0, 0, 0, 0 }, 16), 4u), D3D_OK);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, b3), D3D_OK);
+    CHECKEQ(vcall(e, FX_GetFloatArray, 3, v, out, 4u), D3D_OK);
+    CHECKF(gf(out), 9), CHECKF(gf(out + 4), 0), CHECKF(gf(out + 8), 0), CHECKF(gf(out + 12), 0);
+    /* the same for SetVectorArray: only the first vector is the record's */
+    uint32_t arr = byname(e, "arr"), big = gmem(64);
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetVectorArray, 3, arr, gbytes((float[4]){ 41, 42, 43, 44 }, 16), 1u), D3D_OK);
+    uint32_t b4 = vcall(e, FX_EndParameterBlock, 0);
+    for (int k = 0; k < 16; k++) MEM32(big + 4 * (uint32_t)k) = f2u(-1.0f - (float)k);
+    CHECKEQ(vcall(e, FX_SetFloatArray, 3, arr, big, 16u), D3D_OK);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, b4), D3D_OK);
+    CHECKEQ(vcall(e, FX_GetFloatArray, 3, arr, out, 16u), D3D_OK);
+    for (int k = 0; k < 4; k++) CHECKF(gf(out + 4 * (uint32_t)k), 41.0f + (float)k);
+    for (int k = 4; k < 16; k++) CHECKF(gf(out + 4 * (uint32_t)k), -1.0f - (float)k);
     CHECKEQ(vcall(e, FX_Release, 0), 0);
     vcall(dev, 2, 0);
 }
@@ -1516,6 +1537,12 @@ static void group_fx_block_refs(const char *path) {
     CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, b2), D3D_OK);          /* NULL, then tex, into the live slot */
     CHECKEQ(get_tex(e, t), tex);
     CHECKEQ(refs(tex2), 1), CHECKEQ(refs(tex), r0 + 3);
+    /* the live texture set again while recording: no record and no reference, as Wine's SetTexture */
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetTexture, 2, t, tex), D3D_OK);
+    CHECKEQ(refs(tex), r0 + 3);
+    uint32_t b3 = vcall(e, FX_EndParameterBlock, 0);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, b3), D3DERR_INVALIDCALL);   /* an empty block */
     CHECKEQ(vcall(e, FX_Release, 0), 0);
     CHECKEQ(refs(tex), r0), CHECKEQ(refs(tex2), 1);
     CHECKEQ(vcall(tex, 2, 0), 0), CHECKEQ(vcall(tex2, 2, 0), 0);
@@ -1640,6 +1667,16 @@ static void group_fx_block_setters(const char *path, const char *mpath) {
     for (int k = 0; k < 16; k++) CHECKF(gf(out + 4 * (uint32_t)k), 100.0f + (float)k);
     CHECKEQ(vcall(me, FX_GetMatrix, 2, mr, out), D3D_OK);
     for (int k = 0; k < 16; k++) CHECKF(gf(out + 4 * (uint32_t)k), 100.0f + (float)k);
+    /* a matrix array set of one: the record holds that matrix only, and a later live set keeps the second */
+    CHECKEQ(vcall(me, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(me, FX_SetMatrixArray, 3, ma, m, 1u), D3D_OK);
+    uint32_t mb2 = vcall(me, FX_EndParameterBlock, 0);
+    MEM32(mp) = m + 64, MEM32(mp + 4) = m;
+    CHECKEQ(vcall(me, FX_SetMatrixPointerArray, 3, ma, mp, 2u), D3D_OK);     /* live: m + 64, then m */
+    CHECKEQ(vcall(me, FX_ApplyParameterBlock, 1, mb2), D3D_OK);
+    CHECKEQ(vcall(me, FX_GetMatrixArray, 3, ma, out, 2u), D3D_OK);
+    for (int k = 0; k < 16; k++) CHECKF(gf(out + 4 * (uint32_t)k), 100.0f + (float)k);
+    for (int k = 16; k < 32; k++) CHECKF(gf(out + 4 * (uint32_t)k), 100.0f + (float)(k - 16));
     CHECKEQ(vcall(me, FX_Release, 0), 0);
     CHECKEQ(d3d_live_count(), live0);
     vcall(dev, 2, 0);

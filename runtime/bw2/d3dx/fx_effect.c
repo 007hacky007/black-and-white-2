@@ -15,9 +15,11 @@
  * SetStateManager stays unimplemented: it stops loudly, naming itself.
  *
  * Plan 10 Task 4 (Ruling 10): parameter blocks. While a block records, every
- * setter writes through fx_dest into a new record of the block, and the
+ * setter writes through fx_dest into a new record of the block holding only
+ * the bytes it writes (a prefix of the value, as native keeps), and the
  * parameter's live value, its dirty serial and its references stay as they
- * were; ApplyParameterBlock writes the records in order as SetValue would.
+ * were; ApplyParameterBlock writes each record's prefix in order as SetValue
+ * would, so the bytes a record does not name keep their live values.
  *
  * A pool holds one value per shared parameter name: effects created with the
  * pool bind their shared parameters to it, and a type that differs from the
@@ -96,39 +98,43 @@ static void dirty(struct fx_param *p) { *p->serial = ++g_fx_serial; }
 
 /* ---- parameter blocks: where a setter writes (plan 10 Task 4, Ruling 10) ---- */
 
-/* the references held by buf, a value laid out as p's: taken (add) or dropped */
-struct refs_ctx { const struct fx_param *p; const uint8_t *buf; int add; };
-static void refs_leaf(struct fx_param *leaf, void *ctx) {
+/* a leaf of p's value lies inside the first `bytes` of it (a record's prefix) */
+static int in_prefix(const struct fx_param *p, const struct fx_param *leaf, uint32_t bytes) {
+    return (size_t)(leaf->data - p->data) + 4 <= bytes;
+}
+/* the references a record's prefix holds, dropped */
+struct refs_ctx { const struct fx_param *p; const uint8_t *buf; uint32_t bytes; };
+static void unref_leaf(struct fx_param *leaf, void *ctx) {
     const struct refs_ctx *c = ctx;
-    if (!holds_ref(leaf) || !leaf->data) return;
-    uint32_t v = rd32(c->buf + (leaf->data - c->p->data));
-    if (c->add) com_addref(v);
-    else com_release(v);
+    if (!holds_ref(leaf) || !leaf->data || !in_prefix(c->p, leaf, c->bytes)) return;
+    com_release(rd32(c->buf + (leaf->data - c->p->data)));
 }
-static void value_refs(struct fx_param *p, const uint8_t *buf, int add) {
-    struct refs_ctx c = { p, buf, add };
-    fx_leaves(p, refs_leaf, &c);
-}
-uint8_t *fx_dest(struct fx_effect *e, struct fx_param *p) {
+/* Native keeps only the bytes a set writes (Wine's record_parameter is given the setter's byte count), so a
+ * record is that prefix. It starts zeroed and holding nothing: every setter writes its whole prefix, and the
+ * reference swap on it takes the record's own references. */
+uint8_t *fx_dest(struct fx_effect *e, struct fx_param *p, uint32_t bytes) {
     struct fx_block *b = e->recording;
     if (!b) return p->data;
-    const uint8_t *from = p->data;                   /* the newest record of p in this block, else its live value */
-    for (uint32_t i = b->n; i-- > 0;)
-        if (b->recs[i].p == p) { from = b->recs[i].data; break; }
+    if (bytes > p->bytes) d3d_fail("fx_dest: a %u-byte record of a %u-byte parameter", bytes, p->bytes);
     if (b->n == b->cap) {
-        b->cap = b->cap ? 2 * b->cap : 16;
-        b->recs = realloc(b->recs, sizeof *b->recs * b->cap);
+        uint32_t cap = b->cap ? 2 * b->cap : 16;
+        struct fx_record *r = realloc(b->recs, sizeof *r * cap);
+        if (!r) d3d_fail("ID3DXEffect parameter block: out of host memory for %u records", cap);
+        b->recs = r, b->cap = cap;
     }
-    uint8_t *d = malloc(p->bytes ? p->bytes : 1);
-    memcpy(d, from, p->bytes);
-    value_refs(p, d, 1);                             /* the record's own references; the setter swaps on it */
-    b->recs[b->n++] = (struct fx_record){ p, d };
+    uint8_t *d = calloc(1, bytes ? bytes : 1);
+    if (!d) d3d_fail("ID3DXEffect parameter block: out of host memory for a %u-byte record", bytes);
+    b->recs[b->n++] = (struct fx_record){ p, bytes, d };
     return d;
 }
 /* a set's dirty mark, which a recording skips (Apply marks it) */
 static void touch(struct fx_effect *e, struct fx_param *p) { if (!e->recording) dirty(p); }
 static void block_free(struct fx_block *b) {
-    for (uint32_t i = 0; i < b->n; i++) value_refs(b->recs[i].p, b->recs[i].data, 0), free(b->recs[i].data);
+    for (uint32_t i = 0; i < b->n; i++) {
+        struct refs_ctx c = { b->recs[i].p, b->recs[i].data, b->recs[i].bytes };
+        fx_leaves(b->recs[i].p, unref_leaf, &c);
+        free(b->recs[i].data);
+    }
     free(b->recs);
     if (b->handle) hle_free(hle_ptr(b->handle));
     free(b);
@@ -314,21 +320,23 @@ static void x_GetAnnotationByName(void) {           /* (this, h, name) */
 
 /* ---- values ---- */
 
-/* src and dst laid out as p's value: each reference src names is taken, each one dst held is dropped */
-struct swap_ctx { const struct fx_param *p; const uint8_t *src, *dst; };
+/* src and dst laid out as the first `bytes` of p's value: each reference src names there is taken, each
+ * one dst held there is dropped */
+struct swap_ctx { const struct fx_param *p; const uint8_t *src, *dst; uint32_t bytes; };
 static void swap_refs(struct fx_param *leaf, void *ctx) {
     const struct swap_ctx *c = ctx;
-    if (!holds_ref(leaf) || !leaf->data) return;
+    if (!holds_ref(leaf) || !leaf->data || !in_prefix(c->p, leaf, c->bytes)) return;
     size_t off = (size_t)(leaf->data - c->p->data);
     uint32_t nv = rd32(c->src + off), ov = rd32(c->dst + off);
     if (nv != ov) com_addref(nv), com_release(ov);
 }
-/* SetValue's work: p's whole value from src, where fx_dest says (ApplyParameterBlock's too) */
-static void set_value(struct fx_effect *e, struct fx_param *p, const uint8_t *src) {
-    uint8_t *dst = fx_dest(e, p);
-    struct swap_ctx c = { p, src, dst };
+/* SetValue's work: the first `bytes` of p's value from src, where fx_dest says (ApplyParameterBlock's too,
+ * with a record's prefix) */
+static void set_value(struct fx_effect *e, struct fx_param *p, const uint8_t *src, uint32_t bytes) {
+    uint8_t *dst = fx_dest(e, p, bytes);
+    struct swap_ctx c = { p, src, dst, bytes };
     fx_leaves(p, swap_refs, &c);
-    memcpy(dst, src, p->bytes);
+    memcpy(dst, src, bytes);
     touch(e, p);
 }
 static void x_SetValue(void) {                      /* (this, h, data, bytes) */
@@ -336,7 +344,7 @@ static void x_SetValue(void) {                      /* (this, h, data, bytes) */
     struct fx_param *p = fx_param_of(e, A32(1));
     const uint8_t *src = APTR(2);
     if (!p || !src || !p->bytes || A32(3) < p->bytes) RET(D3DERR_INVALIDCALL, 4);
-    set_value(e, p, src);
+    set_value(e, p, src, p->bytes);
     RET(D3D_OK, 4);
 }
 static void x_GetValue(void) {                      /* (this, h, data, bytes) */
@@ -351,7 +359,7 @@ static void x_SetBool(void) {                       /* (this, h, BOOL) */
     struct fx_effect *e = FX(0);
     struct fx_param *p = fx_param_of(e, A32(1));
     if (!scalar1(p)) RET(D3DERR_INVALIDCALL, 3);
-    wr32(fx_dest(e, p), conv(A32(2), FXT_BOOL, p->type));
+    wr32(fx_dest(e, p, 4), conv(A32(2), FXT_BOOL, p->type));
     touch(e, p);
     RET(D3D_OK, 3);
 }
@@ -366,7 +374,7 @@ static void x_SetInt(void) {                        /* (this, h, INT) */
     struct fx_param *p = fx_param_of(e, A32(1));
     uint32_t n = A32(2);
     if (!scalar1(p) && !colour_vec(p)) RET(D3DERR_INVALIDCALL, 3);
-    uint8_t *d = fx_dest(e, p);
+    uint8_t *d = fx_dest(e, p, scalar1(p) ? 4 : 4 * p->cols);
     if (scalar1(p)) wr32(d, conv(n, FXT_INT, p->type));
     else {                                          /* a D3DCOLOR: r, g, b (and a) */
         wr32(d, f2u((float)(n >> 16 & 0xFF) / 255.0f));
@@ -395,7 +403,7 @@ static void x_SetFloat(void) {                      /* (this, h, FLOAT) */
     struct fx_effect *e = FX(0);
     struct fx_param *p = fx_param_of(e, A32(1));
     if (!scalar1(p)) RET(D3DERR_INVALIDCALL, 3);
-    wr32(fx_dest(e, p), conv(A32(2), FXT_FLOAT, p->type));
+    wr32(fx_dest(e, p, 4), conv(A32(2), FXT_FLOAT, p->type));
     touch(e, p);
     RET(D3D_OK, 3);
 }
@@ -413,7 +421,7 @@ static void set_array(uint32_t from) {              /* (this, h, values*, count)
     uint32_t src = A32(2), n = A32(3);
     if (!numeric(p) || (!src && n)) RET(D3DERR_INVALIDCALL, 4);
     if (n > p->bytes / 4) n = p->bytes / 4;
-    uint8_t *d = fx_dest(e, p);
+    uint8_t *d = fx_dest(e, p, 4 * n);
     for (uint32_t i = 0; i < n; i++) wr32(d + 4 * i, conv(MEM32(src + 4 * i), from, p->type));
     touch(e, p);
     RET(D3D_OK, 4);
@@ -433,6 +441,10 @@ static void x_GetIntArray(void) { get_array(FXT_INT); }
 static void x_SetFloatArray(void) { set_array(FXT_FLOAT); }
 static void x_GetFloatArray(void) { get_array(FXT_FLOAT); }
 
+/* the bytes the first n members of an array take: an array setter's record (plan 10 Task 4) */
+static uint32_t members_extent(const struct fx_param *p, uint32_t n) {
+    return n ? (uint32_t)(p->members[n - 1].data - p->data) + p->members[n - 1].bytes : 0;
+}
 static int vec_like(const struct fx_param *p) { return numeric(p) && (p->cls == FXC_SCALAR || p->cls == FXC_VECTOR); }
 static void vec_set(const struct fx_param *p, uint8_t *dst, uint32_t v) {
     if (p->type == FXT_INT && p->bytes == 4) {      /* an int vector of one: a D3DCOLOR */
@@ -456,7 +468,7 @@ static void x_SetVector(void) {                     /* (this, h, D3DXVECTOR4*) *
     struct fx_effect *e = FX(0);
     struct fx_param *p = fx_param_of(e, A32(1));
     if (!vec_like(p) || p->elements || !A32(2)) RET(D3DERR_INVALIDCALL, 3);
-    vec_set(p, fx_dest(e, p), A32(2));
+    vec_set(p, fx_dest(e, p, p->bytes), A32(2));
     touch(e, p);
     RET(D3D_OK, 3);
 }
@@ -472,7 +484,7 @@ static void x_SetVectorArray(void) {                /* (this, h, D3DXVECTOR4*, c
     uint32_t v = A32(2), n = A32(3);
     if (!p || p->cls != FXC_VECTOR || !numeric(p) || !p->elements || n > p->elements || (!v && n))
         RET(D3DERR_INVALIDCALL, 4);
-    uint8_t *d = fx_dest(e, p);
+    uint8_t *d = fx_dest(e, p, members_extent(p, n));
     for (uint32_t i = 0; i < n; i++) vec_set(&p->members[i], d + (p->members[i].data - p->data), v + 16 * i);
     touch(e, p);
     RET(D3D_OK, 4);
@@ -490,7 +502,7 @@ static void set_matrix(int transpose) {             /* (this, h, D3DXMATRIX*) */
     struct fx_effect *e = FX(0);
     struct fx_param *p = fx_param_of(e, A32(1));
     if (!matrix(p) || p->elements || !A32(2)) RET(D3DERR_INVALIDCALL, 3);
-    mat_set(p, fx_dest(e, p), A32(2), transpose);
+    mat_set(p, fx_dest(e, p, p->bytes), A32(2), transpose);
     touch(e, p);
     RET(D3D_OK, 3);
 }
@@ -506,7 +518,7 @@ static void set_matrices(int transpose, int pointers) {   /* (this, h, matrices,
     struct fx_param *p = fx_param_of(e, A32(1));
     uint32_t m = A32(2), n = A32(3);
     if (!matrix(p) || !p->elements || n > p->elements || (!m && n)) RET(D3DERR_INVALIDCALL, 4);
-    uint8_t *d = fx_dest(e, p);
+    uint8_t *d = fx_dest(e, p, members_extent(p, n));
     for (uint32_t i = 0; i < n; i++)
         mat_set(&p->members[i], d + (p->members[i].data - p->data), pointers ? MEM32(m + 4 * i) : m + 64 * i,
                 transpose);
@@ -541,7 +553,7 @@ static void x_SetString(void) {                     /* (this, h, LPCSTR) */
     uint32_t s = hle_guest_strdup(ASTR(2));
     e->strings = realloc(e->strings, sizeof *e->strings * (e->nstrings + 1));
     e->strings[e->nstrings++] = s;
-    wr32(fx_dest(e, p), s);
+    wr32(fx_dest(e, p, 4), s);
     touch(e, p);
     RET(D3D_OK, 3);
 }
@@ -556,14 +568,13 @@ static void x_SetTexture(void) {                    /* (this, h, IDirect3DBaseTe
     struct fx_param *p = fx_param_of(e, A32(1));
     uint32_t t = A32(2);
     if (!p || p->cls != FXC_OBJECT || !FX_IS_TEXTURE(p->type) || p->elements) RET(D3DERR_INVALIDCALL, 3);
-    uint8_t *d = fx_dest(e, p);                     /* the live slot, or a record (which holds its own reference) */
+    if (rd32(p->data) == t) RET(D3D_OK, 3);        /* the live texture already: no set and no record (Wine) */
+    uint8_t *d = fx_dest(e, p, 4);                  /* the live slot, or a zeroed record (which takes its own reference) */
     uint32_t old = rd32(d);
-    if (old != t) {
-        com_addref(t);
-        wr32(d, t);
-        com_release(old);
-        touch(e, p);
-    }
+    com_addref(t);
+    wr32(d, t);
+    com_release(old);
+    touch(e, p);
     RET(D3D_OK, 3);
 }
 static void x_GetTexture(void) {                    /* (this, h, IDirect3DBaseTexture9**) */
@@ -705,7 +716,7 @@ static void x_ApplyParameterBlock(void) {           /* (this, hParameterBlock) *
     while (b && b->handle != h) b = b->next;
     if (!b) d3d_fail("ID3DXEffect::ApplyParameterBlock of 0x%08X, which is not a parameter block of this effect", h);
     if (!b->n) RET(D3DERR_INVALIDCALL, 2);         /* an empty block, as Wine's d3dx9 answers */
-    for (uint32_t i = 0; i < b->n; i++) set_value(e, b->recs[i].p, b->recs[i].data);
+    for (uint32_t i = 0; i < b->n; i++) set_value(e, b->recs[i].p, b->recs[i].data, b->recs[i].bytes);
     RET(D3D_OK, 2);
 }
 
