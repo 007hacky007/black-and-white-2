@@ -441,10 +441,23 @@ static void find_closer(void *o) {
     free(f->names);
     free(f);
 }
+/* NTFS compares names upper-cased (measured on Windows 11: "aB" before "a_b",
+ * and "Zeta", "[q", "^r", "_y", "~x" in that order), where strcasecmp lower-cases
+ * and so puts '_', '[', '\\', ']', '^' and '`' before the letters. Bytes past
+ * ASCII compare as they are; a tie (a case-sensitive disk) goes by the bytes. */
+static int upper_cmp(const char *x, const char *y) {
+    for (;; x++, y++) {
+        int a = (unsigned char)*x, b = (unsigned char)*y;
+        if (a >= 'a' && a <= 'z') a -= 32;
+        if (b >= 'a' && b <= 'z') b -= 32;
+        if (a != b || !a) return a - b;
+    }
+}
 static int by_name(const void *a, const void *b) {
     const char *x = ((const found_t *)a)->name, *y = ((const found_t *)b)->name;
     int dx = !strcmp(x, ".") ? 0 : !strcmp(x, "..") ? 1 : 2, dy = !strcmp(y, ".") ? 0 : !strcmp(y, "..") ? 1 : 2;
-    return dx != dy ? dx - dy : strcasecmp(x, y);
+    int c = upper_cmp(x, y);
+    return dx != dy ? dx - dy : c ? c : strcmp(x, y);
 }
 
 /* Windows wildcard match, without case: * any run, ? one character; "*.*"
