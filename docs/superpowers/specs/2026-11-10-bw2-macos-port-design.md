@@ -314,6 +314,12 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   pushes scripted events into the same queue at given read counts; it drives a
   headless boot through the profile dialog (plan 9: on to the first Bink call)
   (`docs/research/input.md`).
+  **Plan 11:** script blocks anchored on the game's movie events (`after open`,
+  `after last`: `_BinkOpen@8` and the last frame's copy) and on wall time (`after
+  seconds`), since read counts drift with the frame rate; keys held for a wall-clock
+  time (a down, an `after seconds` block, the up); and a `quit` verb that exits 0 at a
+  read the script names. Each firing prints one line, and the tests assert them all
+  (`docs/research/saves.md`).
 - **Video:** Bink through pcrecomp's ffmpeg-backed `bink.c`, adapted to D3D9
   surfaces (`_BinkDX9SurfaceType@4`, `_BinkCopyToBuffer@28`).
   **Plan 10:** the six `binkw32.dll` imports the game calls are answered from
@@ -343,6 +349,15 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   `OPEN_ALWAYS` (or `OPEN_EXISTING`) opens the file in the game tree, as Windows
   does. The overlay gets writes and creates only. The boot to the front end
   writes nothing under `<support>/Game/`.
+  **Plan 11:** the save path's file calls (folder makes, finds, moves, deletes,
+  folder removal, DOS times, the load dialog's dates) answer as a Windows 11 probe
+  measured them, each checked in the shims selftest. Saves, `Settings.ini` and the
+  profile live under the support folder's My Documents (`C/Documents and
+  Settings/Player/My Documents/Black & White 2/`), and the game writes its settings
+  and profile on its own quit (and when its pause bar opens), not on a run a switch
+  ends. A save is made from the first land's pause bar and loaded from the front end
+  by script, and a resolution change is kept across a restart
+  (`docs/research/saves.md`).
 
 ## 6. Hard problems and how we approach them
 
@@ -528,6 +543,9 @@ These are traps NFSU2 hit; the design takes them as requirements.
 - NFSU2 found that a Windows reference saves weeks: many of its "bugs" were
   measurement artifacts, and real ones went unseen without one. **There is no
   Windows reference for BW2 now** (decided by the user: nothing available).
+  A Windows 11 VM without a GPU is available (user, 2026-11-13); the game cannot
+  create its 3D device there, so it is a reference for Win32 behaviour through
+  probe programs only (`docs/research/saves.md`).
   So correctness rests on CPU-level checks (ISA suite, differential testing
   against Unicorn with pcrecomp's `difftest.py`), D3D9 semantics checked
   against the documentation, and the user's play-testing. The runtime should
@@ -711,7 +729,8 @@ Decided by the user:
 - No NFSU2Recomp code; NFSU2 is a reference for ideas and mistakes. The
   user's own NFSU2 Builder code is the exception and may be reused.
 - If the SafeDisc leftovers are live protection: stop and ask.
-- No Windows reference is available.
+- A Windows 11 VM without a GPU is available for Win32 probes (user,
+  2026-11-13); the game cannot be a reference there.
 - Build on pcrecomp's MIT pieces where they fit.
 - Done = campaign playable start to finish, settings, save, load.
 - Mouse and trackpad both supported. Windowed and full screen both supported.
@@ -737,4 +756,6 @@ Left to the builder:
   hybrid, based on threading and performance.
 - Sharding, caching and build orchestration details.
 - Bink decoder (plan 10, Ruling 2: FFmpeg's, as separate LGPL dynamic libraries).
+- Nothing new from plan 11: its mingw-w64 (Ruling 6, Homebrew) builds the Windows
+  probe on this Mac and is a development tool only, not part of the Builder.
 - Exact phasing after phase 0.

@@ -209,6 +209,11 @@ past that with no stop for at least 600 s. In the land it reads the mouse once p
 input ends at the click, so whatever the scene waits for from the player (the plan's guess: the creature
 choice) is the next plan's to drive.
 
+Plan 11 drove it on: Escape skips the intro and both of the land's scenes, the choice is live after 12 or
+13 held presses (the first skips the intro), and it waits there for the player to pick one of four creatures with the game's hand. A
+save is taken over the live choice from the pause bar and loaded back into it, and the settings, the save,
+the load and where each boot test now ends are in `saves.md` (its "For the next plan").
+
 Imports first seen after the intro (the traced run), all answered: `ID3DXEffect::SetFloat`,
 `ID3DXEffect::SetBool`, `ID3DXEffect::SetVectorArray`, `D3DXVec4Transform`, `D3DXVec3Transform`,
 `D3DXVec4Normalize`, `D3DXMatrixTranslation`, `D3DXMatrixRotationZ`, `D3DXMatrixScaling`,

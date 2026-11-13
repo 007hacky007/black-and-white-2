@@ -7,7 +7,12 @@ input the front end waits, so that run ends at a fixed read count (BW2_QUIT_AFTE
 draws its front end until its idle timer opens the attract video, which plan 10 plays (Bink through FFmpeg).
 A click on New Game instead loads the first land, plays the intro movie to its last frame and draws the
 land's opening scene in 3D. Those runs end at a movie frame (BW2_QUIT_AFTER_MOVIE), a moment the movie's clock
-sets whatever the frame rate (docs/research/input.md, docs/research/hlsl.md, docs/research/campaign.md)."""
+sets whatever the frame rate (docs/research/input.md, docs/research/hlsl.md, docs/research/campaign.md).
+Plan 11's scripts follow the game, not the frame rate: blocks anchored on the movie events and on wall time, held
+keys and a quit verb. With them the front end's options change the resolution and a restart keeps it; Escape
+skips the intro and the land's scenes to the creature choice, where a save is made from the pause bar; the
+game's own quit (which writes the profile) ends those runs; and the front end's load dialog loads the save back
+into the land, at the creature choice, where a New Game still waits for the player (docs/research/saves.md)."""
 import math
 import os
 import re
