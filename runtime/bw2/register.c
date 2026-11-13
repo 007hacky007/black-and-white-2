@@ -15,6 +15,7 @@ void bw2_d3d_register(void);                    /* d3d9/d3d_register.c (plan 4) 
 void bw2_input_register(void);                  /* input/input.c (plan 6) */
 void bw2_in_drain_hook(void);                   /* input/input.c: the host input queue's full drain */
 void bw2_audio_register(void);                  /* audio/dsound.c (plan 8) */
+void bw2_video_register(void);                  /* video/binkw32.c (plan 10) */
 
 static const win32hle_shim *const g_hle_tables[] = {
     win32hle_kernel32, win32hle_kernel32_ext, win32hle_kernel32_crt, win32hle_module, win32hle_gdi32,
@@ -44,6 +45,7 @@ void bw2_register_shims(void) {
     bw2_d3d_register();
     bw2_input_register();
     bw2_audio_register();
+    bw2_video_register();
     win32hle_register(win32hle_kernel32);
     win32hle_register(win32hle_kernel32_ext);
     win32hle_register(win32hle_kernel32_crt);

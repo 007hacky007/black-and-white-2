@@ -263,10 +263,12 @@ static void frame_log(struct d3d_device *d, struct d3d_surface *bb) {
             (unsigned long long)(sum[2] / total), (unsigned long long)nonblack, (unsigned long long)total);
 }
 
+void bw2_movie_present(void);           /* video/binkw32.c: BW2_QUIT_AFTER_MOVIE counts Presents */
 static void present_bb(struct d3d_device *d, uint32_t bbobj) {
     struct d3d_surface *bb = d3d_surf(bbobj);
     mtl_present(d->mtl, bb->tex);
     if (frame_log_on()) frame_log(d, bb);
+    bw2_movie_present();
     d3d_bind(&d->last_presented, bbobj);
 }
 static void present(struct d3d_device *d) { present_bb(d, d->backbuffer); }

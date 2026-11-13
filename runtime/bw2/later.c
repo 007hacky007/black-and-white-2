@@ -1,8 +1,9 @@
 /*
  * later.c - where plan 3's boot ends: the first call into a layer a later
- * plan owns (DirectInput before version 8, OpenAL, Bink). Each such import,
+ * plan owns (DirectInput before version 8, OpenAL). Each such import,
  * and each LoadLibraryA of such a DLL, prints "[bw2] reached <name>: owned by
- * a later plan" and exits 4. DirectSound is plan 8's (audio/dsound.c).
+ * a later plan" and exits 4. DirectSound is plan 8's (audio/dsound.c), Bink
+ * plan 10's (video/binkw32.c).
  *
  * The imports come from the images' own import tables (every name the game
  * imports from those DLLs), plus the entry points a game finds with
@@ -18,7 +19,7 @@
 /* Plan 4 answers d3d9, ddraw and D3DX's math and textures, plan 7 its sprite and font, plan 9 its HLSL
  * compiler, fragment linker and mesh through the lifted D3DX. */
 static const char *const g_later_dlls[] = {
-    "dinput.dll", "binkw32.dll", "openal32.dll", "wrap_oal.dll", NULL,
+    "dinput.dll", "openal32.dll", "wrap_oal.dll", NULL,
 };
 static const char *const g_later_names[] = {
     "DirectDrawCreate", "DirectDrawEnumerateExA",

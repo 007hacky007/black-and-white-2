@@ -114,6 +114,8 @@ D3DX_LOADED = "[bw2] d3dx9_25.dll: lifted DLL at 0x08000000, 52 imports unanswer
 
 
 @pytest.mark.gamefiles
+@pytest.mark.xfail(run=False, reason="plan 10 Task 6 answers _BinkOpen@8, so the boot no longer stops there; "
+                   "Task 8 rewrites this test as test_boot_profile_to_attract")
 def test_boot_profile_to_bink(tmp_path):
     # Plan 6: scripted input names a new profile "ab" in the front end's first dialog and confirms it. The
     # game writes the profile and applies its display settings (a Reset); plan 9 compiles its first effect given
