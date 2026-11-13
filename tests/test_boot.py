@@ -11,6 +11,7 @@ sets whatever the frame rate (docs/research/input.md, docs/research/hlsl.md, doc
 import math
 import os
 import re
+import shutil
 import subprocess
 import threading
 
@@ -538,6 +539,78 @@ def test_boot_save_game(saved_game):
     more = sorted(set(final) - set(at_quit))
     assert len(more) == 1 and set(at_quit) <= set(final), (at_quit, final)
     assert save_files(folder / more[0]) == SAVE_FILES, save_files(folder / more[0])
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
+    assert not game_files_made(support), game_files_made(support)
+    modules = {ln for ln in lines if ln.startswith("[module] ")}
+    assert modules <= MODULE_LINES_BEFORE, sorted(modules - MODULE_LINES_BEFORE)
+
+
+# Plan 11 Task 5: the load. A boot on a copy of the save's support folder starts in the front end with the
+# profile (no profile dialog); there the game's cursor is still the running point, which starts at (0, 0). The
+# script waits LOAD_FIRST s, clicks the front end's load button, the save's row in the load dialog and the dialog's
+# OK, each 2 s after the one before, then quits LOAD_WAIT s later, with the land drawn. The dialog lists the
+# quit's save first and the test's save (the one Task 4's script named) second. Places are 1024x768 client
+# pixels (docs/research/saves.md).
+LOAD_FIRST = 3
+LOAD_BUTTON = (425, 711)
+LOAD_ROW = (390, 280)
+LOAD_OK = (409, 547)
+LOAD_WAIT = 60
+LOAD_STEPS = [(LOAD_FIRST, LOAD_BUTTON), (2, LOAD_ROW), (2, LOAD_OK)]
+_load, _ = step_blocks((0, 0), LOAD_STEPS)
+LOAD_SCRIPT = "\n".join(_load + [f"after seconds {LOAD_WAIT}", "0 quit"]) + "\n"
+LOAD_ANCHORS = [ln for ln in LOAD_SCRIPT.splitlines() if ln.startswith("after ")]
+# the anchor of the dialog's OK, counted from 1
+LOAD_OK_ANCHOR = anchors_in(_load)
+# the save's files the load opens after the OK (measured): all but SaveGame.inf, which the dialog's listing reads
+LOAD_READS = [f for f in SAVE_FILES if f != "SaveGame.inf"]
+
+
+@pytest.mark.gamefiles
+def test_boot_load_game(saved_game, tmp_path):
+    # Plan 11 Task 5: the front end's load dialog loads the save Task 4's script made back into the first land
+    # (docs/research/saves.md).
+    _, _, saved, before, at_quit = saved_game
+    assert before is not None and at_quit is not None, (before, at_quit)
+    new = sorted(set(at_quit) - set(before))
+    assert len(new) == 1, (before, at_quit)
+    support = tmp_path / "support"
+    shutil.copytree(saved, support)
+    save = saved_games(support) / new[0]
+    stamps = {f: ((save / f).stat().st_size, (save / f).stat().st_mtime_ns) for f in save_files(save)}
+    r, lines, _ = run_boot(tmp_path, LOAD_SCRIPT, 600, support=support, HLE_FILETRACE="1", BW2_FRAME_LOG="1",
+                           BW2_BINK_LOG="1")
+    tail = r.stderr[-4000:]
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    quits = [i for i, ln in enumerate(lines) if re.fullmatch(r"\[bw2\] script: quit at read \d+", ln)]
+    assert len(quits) == 1, tail
+    quit_at = quits[0]
+    anchor_at = [i for i, ln in enumerate(lines) if SCRIPT_ANCHOR.match(ln)]
+    anchors = [SCRIPT_ANCHOR.match(lines[i]).group(1) for i in anchor_at]
+    assert anchors == LOAD_ANCHORS, (anchors, tail)
+    # after the dialog's OK, the game opens the save's files, and no file of another save
+    ok_at = anchor_at[LOAD_OK_ANCHOR - 1]
+    opened = [ln for ln in lines[ok_at:quit_at] if ln.startswith("[file] CreateFileA ") and ln.endswith(" ok")]
+    for f in LOAD_READS:
+        assert any(ln.endswith(f" -> {save / f} ok") for ln in opened), (f, [ln for ln in opened if ".sav" in ln])
+    others = [ln for ln in opened if f" -> {saved_games(support)}/" in ln and f" -> {save}/" not in ln]
+    assert not others, others
+    # ... for reading: every file of the save keeps its size and time
+    after = {f: ((save / f).stat().st_size, (save / f).stat().st_mtime_ns) for f in save_files(save)}
+    assert after == stamps, sorted(set(after.items()) ^ set(stamps.items()))
+    # no New Game: no movie opens (the intro plays only on New Game)
+    opens = [ln for ln in lines if ln.startswith(BINK_OPEN)]
+    assert opens == [], opens
+    # the land is drawn: the last 100 frames before the quit are each at least half not black
+    window = lines[ok_at:quit_at]
+    aborted = aborted_frames(window)
+    land = frames_of(window)
+    assert len(land) >= 100, len(land)
+    last = [f for f in land[-100:] if f[0] not in aborted]
+    assert len(last) * 2 > 100, len(last)
+    dark = [f for f in last if 2 * f[6] < f[7]]
+    assert not dark, dark
     assert not loud_lines(lines), loud_lines(lines)
     assert "owned by a later plan" not in r.stderr, tail
     assert not game_files_made(support), game_files_made(support)
