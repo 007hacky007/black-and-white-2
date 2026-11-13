@@ -384,10 +384,15 @@ static void k_RemoveDirectoryA(void) {
     hle_set_last_error(errno_to_win(errno));
     RET(0, 1);
 }
+/* A folder or a read-only file (no owner write bit) is ERROR_ACCESS_DENIED and
+ * stays, as on Windows. */
 static void k_DeleteFileA(void) {
     char path[1024];
-    if (hle_host_path(ASTR(0), path, sizeof path) && unlink(path) == 0) { hle_path_changed(); RET(1, 1); }
-    hle_set_last_error(ERROR_FILE_NOT_FOUND);
+    struct stat st;
+    if (!hle_host_path(ASTR(0), path, sizeof path) || lstat(path, &st) != 0) { hle_set_last_error(ERROR_FILE_NOT_FOUND); RET(0, 1); }
+    if (S_ISDIR(st.st_mode) || (S_ISREG(st.st_mode) && !(st.st_mode & S_IWUSR))) { hle_set_last_error(ERROR_ACCESS_DENIED); RET(0, 1); }
+    if (unlink(path) == 0) { hle_path_changed(); RET(1, 1); }
+    hle_set_last_error(errno_to_win(errno));
     RET(0, 1);
 }
 static void k_MoveFileA(void) {
