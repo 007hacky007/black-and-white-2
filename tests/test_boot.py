@@ -3,7 +3,9 @@ mouse setup, its shaders and effects (plan 5), its sprite and fonts and its load
 DirectSound audio (plan 8) to the front end, where it first reads input (docs/research/frontend.md). With no
 input the front end waits, so that run ends at a fixed read count (BW2_QUIT_AFTER_READS). With scripted input
 (plan 6, BW2_INPUT_SCRIPT) the game takes a new profile in its first dialog, compiles its first HLSL effect
-through the lifted D3DX (plan 9) and runs on to its first Bink call, plan 10's layer (docs/research/input.md)."""
+(its tone-mapping filter) through Microsoft's own compiler, lifted from disc 1's d3dx9_25.dll (plan 9), and
+draws its front end until its idle timer opens the attract video, its first Bink call, plan 10's layer
+(docs/research/input.md, docs/research/hlsl.md)."""
 import os
 import re
 import subprocess
@@ -98,6 +100,17 @@ PROFILE_SCRIPT = "\n".join(
     + ["40 key 0x41 0x1E down", "41 key 0x41 0x1E up", "42 key 0x42 0x30 down", "43 key 0x42 0x30 up",
        "50 move -88 45", "80 down 0", "84 up 0"]) + "\n"
 BINK_STOP = "[bw2] reached _BinkOpen@8: owned by a later plan"
+# The [module] lines the boot printed before plan 9 (measured with the engine built at 41a8e9f, which stopped at
+# the HLSL effect): the game's and the script plugin's CRT asking kernel32 for the fiber-local storage calls,
+# the game's PSApi.dll and its two ntdll lookups. Any other [module] line is new and fails the boot test, except
+# the lifted D3DX asking for the debug runtime d3d9d.dll, which is absent as on a retail machine (plan 9 Ruling 12).
+MODULE_LINES_BEFORE = {f"[module] GetProcAddress(kernel32.dll, {n}): not answered"
+                       for n in ("FlsAlloc", "FlsGetValue", "FlsSetValue", "FlsFree")} | {
+    '[module] LoadLibraryA("PSApi.dll"): not found',
+    "[module] GetProcAddress(ntdll.dll, ZwLockVirtualMemory): not answered",
+    "[module] GetProcAddress(ntdll.dll, ZwUnlockVirtualMemory): not answered",
+    '[module] LoadLibraryA("d3d9d.dll"): not found'}
+D3DX_LOADED = "[bw2] d3dx9_25.dll: lifted DLL at 0x08000000, 52 imports unanswered"
 
 
 @pytest.mark.gamefiles
@@ -134,13 +147,29 @@ def test_boot_profile_to_bink(tmp_path):
     assert not (docs / "Profiles" / "~Player").exists()
     made = sorted(p for p in (support / "Game").rglob("*") if p.is_file()) if (support / "Game").exists() else []
     assert not made, made
-    # the front end read the mouse, and drew its picture after the first read up to its first HLSL effect;
-    # the effect compiled, and the game drew on to the stop (what those frames hold is plan 9 Task 7's to pin)
-    assert lines.count(FIRST_READ) == 1, tail
+    # no lookup that nobody answered beyond those the boot already made before plan 9
+    modules = {ln for ln in lines if ln.startswith("[module] ")}
+    assert modules <= MODULE_LINES_BEFORE, sorted(modules - MODULE_LINES_BEFORE)
+    # the lifted D3DX loads once, at the first HLSL call, with the import count plan 9 Task 4 pinned
+    assert lines.count(D3DX_LOADED) == 1, [ln for ln in lines if "d3dx9_25" in ln]
+    # one effect, the game's 11199 bytes of HLSL text: S_OK and 2 techniques (the generated one and the filter
+    # source's own; docs/research/hlsl.md)
     effects = [i for i, ln in enumerate(lines) if ln.startswith("[bw2] hlsl effect: ")]
-    assert len(effects) == 1 and " -> 0x00000000, " in lines[effects[0]], effects
+    assert len(effects) == 1, effects
     effect = effects[0]
-    window = lines[lines.index(FIRST_READ):effect]
+    assert lines[effect].startswith("[bw2] hlsl effect: 11199 bytes -> 0x00000000, "), lines[effect]
+    assert ", 2 techniques, " in lines[effect], lines[effect]
+    assert lines.index(D3DX_LOADED) < effect
+    # the order: the first read, the effect, frames, the stop, and no frame after it. The stop comes about 30 s
+    # after the effect whatever the frame rate (980 to 1099 frames when idle, 265 under full CPU load): the front
+    # end opens its attract video on a timer, not after a number of frames, so no frame count beyond one is pinned
+    assert lines.count(FIRST_READ) == 1, tail
+    first_read = lines.index(FIRST_READ)
+    assert first_read < effect < stop, (first_read, effect, stop)
+    assert any(FRAME.match(ln) for ln in lines[effect:stop]), tail
+    assert not any(FRAME.match(ln) for ln in lines[stop:]), tail
+    # the front end's picture, from the first read to the stop, is mostly not black in every frame
+    window = lines[first_read:stop]
     after = [tuple(map(int, m.groups())) for m in map(FRAME.match, window) if m]
     assert after, tail
     # a frame whose GPU work macOS aborted (the engine's "metal: command buffer failed" line for Metal's
@@ -151,7 +180,6 @@ def test_boot_profile_to_bink(tmp_path):
     assert len(aborted) * 2 < len(after), (len(aborted), len(after))
     dark = [f for f in after if 2 * f[6] < f[7] and f[0] not in aborted]
     assert not dark, dark
-    assert any(FRAME.match(ln) for ln in lines[effect:stop]), tail
 
 
 @pytest.mark.gamefiles

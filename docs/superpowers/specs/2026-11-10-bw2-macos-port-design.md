@@ -172,7 +172,8 @@ What we expect to take from it (each to be confirmed by trying it):
 What pcrecomp does not have, so we write it:
 
 - Direct3D 9 on Metal (pcrecomp has only DirectX 6 Direct3D, in software).
-- D3DX 9 (`d3dx9_25`), including an HLSL compiler for `D3DXCompileShader`.
+- D3DX 9 (`d3dx9_25`) natively, with Microsoft's own HLSL compiler, fragment linker and mesh code
+  lifted from the user's disc 1 (plan 9).
 - DirectSound on CoreAudio (the game mixes in software; OpenAL + EAX only if a later
   boot loads `wrap_oal.dll`).
 - DirectInput 8 on macOS (keyboard, mouse; gamepad not needed).
@@ -266,6 +267,15 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   The boot reaches the first HLSL effect after the front end's profile dialog:
   `D3DXCreateEffect` from `sub_00B5237E` with an 11,199-byte source, right after
   the profile's display settings `Reset` (`docs/research/input.md`).
+  **Plan 9:** HLSL text (`D3DXCreateEffect` given text), `D3DXCompileShader`,
+  `D3DXCompileShaderFromFileA`, the fragment linker and `D3DXCreateSphere` go to the
+  lifted `d3dx9_25.dll` from disc 1's April 2005 DirectX CAB (`DIRECTX9/APR200~2.CAB`),
+  the DLL the game imports, rebased to `0x08000000` and loaded beside the engine at
+  the first call that needs it. Effects stay plan 5's: the lifted effect compiler
+  turns HLSL text into fx_2_0 bytes, which take plan 5's path. The boot compiles one
+  effect after the profile dialog (11,199 bytes of text, `S_OK`, 2 techniques) and
+  runs on to its first Bink call, the front end's attract video about 30 s later
+  (`docs/research/hlsl.md`). With this, all 60 D3DX imports are answered.
 - **Audio:** the game's audio library mixes every voice in software and streams
   the result into one looping DirectSound buffer (16-bit stereo PCM at 44,100 Hz,
   21,504 bytes). We answer `IDirectSound` and that buffer on plan 4's COM
@@ -298,7 +308,7 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   never open). `IsDBCSLeadByte` is FALSE (code page 1252) and `PathGetCharTypeW`
   follows shlwapi's classes. `BW2_INPUT_SCRIPT` (a test and measurement switch)
   pushes scripted events into the same queue at given read counts; it drives a
-  headless boot through the profile dialog to the HLSL stop
+  headless boot through the profile dialog (plan 9: on to the first Bink call)
   (`docs/research/input.md`).
 - **Video:** Bink through pcrecomp's ffmpeg-backed `bink.c`, adapted to D3D9
   surfaces (`_BinkDX9SurfaceType@4`, `_BinkCopyToBuffer@28`).
@@ -388,6 +398,8 @@ with a 1.60 GB peak, 181 MB of objects and a 92 MB link-check binary. The one
 
 New work NFSU2 never needed (it linked D3DX statically and lifted it).
 See 5.2.
+Plan 9 (Ruling 2): Microsoft's own compiler, lifted from disc 1's `d3dx9_25.dll`;
+see `docs/research/hlsl.md`.
 
 ### 6.5 C++ exceptions / SEH
 
@@ -592,9 +604,11 @@ Rows:
    fingerprint checked.
 4. Free disk space enough for extraction + build (number to be measured).
 5. Build: extract installer data from the discs (no Windows installer run),
+   and `d3dx9_25.dll` from disc 1's DirectX CAB (`/usr/bin/tar`);
    lay out the install tree as the Windows installer would, apply 1.1, 1.2,
-   then take `white.exe` from the fan patch; lift; compile; assemble and sign
-   the app; show Play.
+   then take `white.exe` from the fan patch; lift the four modules (`white.exe`,
+   its `stxt774` and `.name0` code, `ScriptLibraryR.dll`, the rebased `d3dx9_25.dll`); compile;
+   assemble and sign the app; show Play.
 
 **Phase 0** (`docs/research/official-patches.md`): both are InstallShield 11
 setup launchers whose appended files are an ordinary InstallShield cabinet
@@ -630,8 +644,12 @@ checked against `bw2/manifests/game-usa-1.2-fan1.42.tsv`; see
   not: anything copied out of the game or patches (bytes, strings, shaders,
   textures, sounds) and C generated from the exe. So the Builder applies a
   checked-in, hash-pinned catalog to the user's exe and lifts and compiles on
-  their Mac, as NFSU2 does; it does not rerun discovery. The HLSL
-  capture-and-precompile fallback (5.2) would therefore have to run on the
+  their Mac, as NFSU2 does; it does not rerun discovery. The same holds for
+  disc 1's `d3dx9_25.dll` (plan 9): its catalog
+  (`bw2/catalog/d3dx9_25-apr2005.functions.json`, addresses only) is committed
+  with the others, and the DLL itself, original or rebased, is never committed or
+  shipped. The HLSL
+  capture-and-precompile fallback (5.2; not taken, plan 9) would therefore have to run on the
   user's Mac too, never ship captured shaders.
 
 ## 10. Investigations to do first (phase 0)
@@ -691,7 +709,8 @@ My calls (the user may override):
 
 Left to the builder:
 
-- Choice of HLSL compiler library, OpenAL implementation (plan 8, Ruling 2: not
+- Choice of HLSL compiler library (plan 9, Ruling 2: Microsoft's own, lifted from
+  disc 1), OpenAL implementation (plan 8, Ruling 2: not
   needed, the game's default path is DirectSound), and whether SDL2 stays for
   anything.
 - `lift32.py` (global registers) vs `lift32_cpu.py` (CPU struct), or a

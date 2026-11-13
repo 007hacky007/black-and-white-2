@@ -1,5 +1,8 @@
 # D3DX and HLSL use (phase 0 item 7)
 
+**Status (plan 9, 2026-11-13):** all 60 imports are answered; HLSL goes to Microsoft's own
+compiler, lifted from disc 1's `d3dx9_25.dll`. See `hlsl.md`.
+
 Date: 2026-11-10. Sources: `bw2.pe_survey.iat_callsites`, direct-call
 counts to each import thunk, and the install tree. No shader text here.
 

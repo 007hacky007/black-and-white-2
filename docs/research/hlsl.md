@@ -4,6 +4,71 @@ Facts about the disc's `d3dx9_25.dll` (rebased to `0x08000000`, lifted as the mo
 engine loads and calls it. Addresses are at the rebased base. Nothing here quotes the DLL's or the
 game's strings, shader text or output.
 
+## The decision (plan 9 Rulings 2 and 3)
+
+`white.exe` imports `D3DXCreateEffect`, `D3DXCompileShader` and `D3DXCompileShaderFromFileA` from
+`d3dx9_25.dll`, and the boot hands the first of them HLSL text (11,199 bytes, after the front end's
+profile dialog). BW2 compiles it with **Microsoft's own compiler**: the `d3dx9_25.dll` of the April 2005
+DirectX redistributable on disc 1, the exact DLL the game imports, extracted, rebased, lifted and compiled
+on the user's Mac like `white.exe`. It is never committed or shipped; only its catalog of addresses is
+committed (`bw2/catalog/d3dx9_25-apr2005.functions.json`). Effects stay plan 5's: the lifted effect
+compiler turns HLSL text into fx_2_0 bytes, and plan 5's code builds the `ID3DXEffect` from them.
+`D3DXCompileShader`, the fragment linker and `D3DXCreateSphere` hand the game the lifted DLL's own
+objects, which reach our device through its vtable.
+
+Rejected:
+
+- **vkd3d-shader 2.1** (LGPL-2.1+, usable as a separate library): no Homebrew formula, so a from-source
+  autotools build on the user's Mac, and its fx_2_0 writer stops on every `sampler_state` initializer,
+  which the boot's first effect and 25 of the 59 `.sdv` sources use.
+- **Our own HLSL compiler and fx_2_0 writer:** a large compiler with no Windows reference to check it
+  against.
+- **Capture and precompile:** needs a Windows `fxc`, and there is no Windows reference (spec 11).
+
+The CAB is read with `/usr/bin/tar` (macOS's bsdtar, libarchive, BSD licence), which ships with macOS
+and reads Microsoft CAB compression: no new dependency and no GPL tool in the Builder.
+
+## The disc's DLL, its rebase and its lift (Tasks 1 and 2)
+
+| Item | Value |
+| --- | --- |
+| Disc 1 folder | `DIRECTX9/`: `APR200~1.CAB` (x64, 1,348,242 bytes), `APR200~2.CAB` (x86), `APR200~3.CAB` (managed DirectX) |
+| `APR200~2.CAB` | 1,079,850 bytes, SHA-256 `1fc43223b767ec0121989e2c07b56b48ccdd2895c3f638068d24d7869049214d` |
+| `d3dx9_25.dll` in it | 2,337,488 bytes, dated Mar 18 2005, file version 9.6.168.0, SHA-256 `4c54df27ce84d21b2924e64ff79b13e7876ce85d8e0c9c1d0abd8da73888187a` |
+| Layout | PE32, ImageBase `0x400000`, SizeOfImage `0x253000`; `.text` RVA `0x1000`, virtual size `0x20FEC3` (read-only data merged into it); `.data` `0x211000` (`0x304AC`); `.rsrc` (`0x388`); `.reloc` directory `0x243000` (`0xF070` bytes); no TLS, no delay imports, no RTTI; an Authenticode signature (directory 4), which the rebase invalidates and nothing checks |
+| Imports | KERNEL32 71, msvcrt 68, GDI32 26, ADVAPI32 3 |
+| Exports | 323 |
+| Rebase | to `0x08000000` (between `white.exe`'s end `0x2451210` and win32hle's allocations from `0x10000000`); 28,488 HIGHLOW sites, the only relocation type; ImageBase and those sites are the only bytes changed |
+| Rebased image | SHA-256 `505a12cf1fa5a7cf1162a27085f7e30036d7bae4f1b666b999777b60a55c2428`, beside the engine as `out/d3dx9_25.dll` |
+
+The catalog (discovery on the rebased image, two `disasm32` rounds, about 61 minutes): seeds from 323
+exports, 254 relocation targets in `.data`, 149 vtable-scan methods, 1,076 code-section relocation
+targets (Ruling 14), 0 RTTI, 0 gap seeds, and 35 `EXTRA_SEEDS` (Task 4). It holds 14,430 entries
+(141 thunks, 3,895 leaves) and covers 1,992,159 of the 2,162,688 code bytes (92.11%). Starts that only
+the control flow of a trusted body reaches are folded into aliases (`catclean.alias_cfg_labels`). The
+lift is 5,711 functions in 11 shards and one cold shard (`0x0808E0C4`), 101.3 MB of C, 13,294 trap
+sites, about 30 s; `out/bw2` grew from 114.8 MB to 143.6 MB (`build-pipeline.md`, plan 9).
+
+## The imports answered (Task 3)
+
+- **msvcrt** (`runtime/bw2/shims_crt.c`, cdecl): 45 of the 68 names. Heap: `malloc`, `calloc`,
+  `realloc`, `free`, `operator new`/`delete`, `_strdup`. Strings and ctype: `strchr`, `_stricmp`,
+  `memmove`, `wcslen`, `tolower`, `toupper`, `isalnum`, `isalpha`, `isdigit`, `isxdigit`, `isspace`.
+  Numbers: `atoi`, `atol`, `atof`, `floor`, `ceil`, `ldexp`, `frexp`, `modf`, `_finite`, `_isnan`,
+  `_fpclass`, `_controlfp`, and the x87 helpers `_CIacos`, `_CIasin`, `_CIexp`, `_CIsqrt`, `_CIcosh`,
+  `_CIsinh`, `_CItanh`, `_CIpow`, `_CIfmod`. Others: `_initterm`, `setlocale` ("C" only), `_vsnprintf`
+  (msvcrt's three-digit exponents), `qsort`, and `_purecall` and `?terminate@@YAXXZ`, which stop with
+  `[bw2] FATAL: msvcrt: <name>`. 22 stay unanswered (below); the 68th is the data import `_adjust_fdiv`.
+- **Data imports** (`dll.c`, `bw2_bind_resolve`): `_adjust_fdiv` gets one guest dword holding 0. Every
+  other documented msvcrt data export stops the load by name if imported.
+- **kernel32** (`runtime/bw2/shims_k32.c`): `DisableThreadLibraryCalls` (TRUE) and
+  `IsProcessorFeaturePresent` (from `cpu.c`'s `cpuid` bits: features 2, 3, 6, 8, 9 and 10; 3DNow! absent).
+  The other 64 answered names were answered before plan 9 (win32hle or BW2); 5 stay unanswered.
+- **GDI32:** `CreateDIBSection` only (win32hle's); 25 stay unanswered. **ADVAPI32:** the 3 registry
+  calls, win32hle's.
+- **d3d9.dll lookups:** `d3d9` is a win32hle system module, `Direct3DShaderValidatorCreate9` gives an
+  accept-all validator and `DebugSetMute` is a no-op (below).
+
 ## Loading (Task 4)
 
 - `d3dx_lifted_proc` (`runtime/bw2/d3dx/d3dx_lifted.c`) finds `d3dx9_25.dll` beside the engine binary
@@ -130,8 +195,7 @@ Measured with the checks' own texts (`tests/test_hlsl.py`), no trap, no unanswer
 The boot's own effect (the profile run, `BW2_HLSL_LOG=1`): 11,199 bytes of text give `S_OK`, 5,220
 bytes of fx_2_0 and **2 techniques** (the `ToneMapping.sdv` source the text carries holds one
 `technique` of its own, line 423 of that source, besides the generated one), in 8-25 ms. The boot
-then draws on and stops at `_BinkOpen@8` (`sub_0093C7B0`), plan 10's layer; Task 7 measures that
-stretch.
+then draws on and stops at `_BinkOpen@8` (`sub_0093C7B0`), plan 10's layer (below).
 
 ## The game's own compile inputs (Task 6)
 
@@ -253,3 +317,63 @@ difference is in the bytes of the binaries, so none is a parser bug:
   constant registers differ, and with them the `PRSI` ranges (the 5.04 compiler sometimes splits the
   outputs into two ranges) and the constant table's register indices. No FPU cause: no literal or
   `def` value differs anywhere, so the x87 folding and `atof` give the 5.04 compiler's values.
+
+The shipped binaries were made by an older compiler: every CTAB creator stamp in the 59 `.sdv` files
+(435 stamps) names compiler 5.04.00.3900, while the lifted `d3dx9_25.dll` stamps 9.06.168.0000. The
+`fxsrc_compile` items (call addresses in the call-site table above) all give `S_OK` and a version token
+equal to their profile (`0xFFFE0101`, `0xFFFE0200`, `0xFFFF0101`, `0xFFFF0200`).
+
+## The boot from the effect to Bink (Task 7)
+
+**The runtime effect.** After the profile dialog the game calls `D3DXCreateEffect` (thunk
+`sub_00B5237E`) with our device, 11,199 bytes of HLSL text built in memory (the `ToneMapping.sdv` source
+plus a generated vertex entry, a generated pixel entry and one technique), no defines, no include,
+flags 0, no pool, and both out pointers. The lifted compiler gives `S_OK`, 5,220 bytes of fx_2_0 and
+2 techniques, in 7 to 23 ms (168 ms with `BW2_TRACE_IMPORTS=1`). For the record (the plan's spike,
+"Measured" item 3): when the compile fails the game asks once more with the same text (2 calls), then
+goes on to the same `_BinkOpen@8` stop.
+
+**Measured** (headless, `BW2_HLSL_LOG=1 BW2_FRAME_LOG=1`, the boot test's profile script, 2026-11-13,
+times from the engine's start as seen on its stderr):
+
+| Run | Support folder | First read | Effect | Stop | Effect to stop | Frames before the effect | Frames from the effect to the stop |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | fresh | - | - | - | - | 354 | 980 |
+| 2 | run 1's (profile exists) | 2.47 s | 1.18 s | 33.86 s | 32.67 s | 8 | 1,728 |
+| 3 | fresh | 2.31 s | 4.59 s | 34.64 s | 30.05 s | 1,019 | 1,099 |
+| 4 | fresh | 2.31 s | 4.57 s | 34.63 s | 30.06 s | 1,053 | 991 |
+| 5 | fresh, `yes` on all 10 cores | 13.86 s | 21.71 s | 52.01 s | 30.31 s | 204 | 265 |
+
+Run 1 took 37.6 s of wall time to exit 4 (not stamped per line). **The Bink call is driven by time, not
+frames:** from the effect to the stop takes 30.05 to 30.31 s on a fresh profile while the frame count
+ranges from 265 to 1,099. It is the front end's attract video (below), opened on a timer, so the boot
+test asserts only that at least one frame lies between the effect and the stop. With an existing
+profile the dialog is not shown and the effect is compiled before the first input read (frame 8).
+
+In every run: exit 4 with `[bw2] reached _BinkOpen@8: owned by a later plan (from guest 0xDEAD0000,
+sub_0093C7B0)` as the only later-plan line, no loud line, no frame after the stop, and every frame
+from the first read to the stop at least half non-black, except in run 5 two frames (one before the
+effect, one after it) that each follow a `[bw2] metal: command buffer failed: ... Impacting
+Interactivity` line (11 such lines in that run). The `[module]` lines are the same 11 in every run,
+and the same 11 the engine built at `41a8e9f` (before plan 9; it stops at the effect) prints: the
+fiber-local storage lookups (`FlsAlloc`, `FlsGetValue`, `FlsSetValue`, `FlsFree`) by the game's CRT and
+again by `ScriptLibraryR.dll`'s, `LoadLibraryA("PSApi.dll")`, and the two ntdll lookups
+`ZwLockVirtualMemory` and `ZwUnlockVirtualMemory`. The lifted D3DX prints none; it never asks for
+`d3d9d.dll` in the boot.
+
+**Imports first seen after the effect** (a `BW2_TRACE_IMPORTS=1` run; 327 distinct names before it,
+134 after it): `ID3DXEffect::Release` (30 calls), `IDirect3DDevice9::SetGammaRamp` (2) and
+`_BinkOpen@8` (1). After the effect the game opens more of its own `.sdv` effects (the grass, flower
+and post-processing filters), asks for three vegetation and flower textures the tree does not hold,
+and lists the new profile's saved games (none).
+
+**No disc, volume or driver question** in the whole traced boot: no `GetVolumeInformation*`,
+`GetDriveType*`, `GetLogicalDrive*`, `QueryDosDevice*`, `DeviceIoControl`, service-manager or SetupAPI
+call, no device path opened, and no tripwire.
+
+**For plan 10.** The stop's caller is `sub_0093C7B0` (through the `_BinkOpen@8` import). Just before
+it the game's CRT file open (`sub_00AEF0C8`, a `CreateFileA`) asks for the front end's attract video
+in the `Data/Splash` folder; the installed tree does not hold that file (the folder has only the EA
+logo video and two splash images), so the open fails with "file not found", and the game then maps a
+view (`MapViewOfFile` from `sub_009240C0`) and calls `_BinkOpen@8` all the same. Whether the discs hold
+the video, and what `_BinkOpen@8` must answer for a missing file, is plan 10's to find out.
