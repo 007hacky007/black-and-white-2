@@ -382,4 +382,5 @@ it the game's CRT file open (`sub_00AEF0C8`, a `CreateFileA`) asks for the front
 in the `Data/Splash` folder; the installed tree does not hold that file (the folder has only the EA
 logo video and two splash images), so the open fails with "file not found", and the game then maps a
 view (`MapViewOfFile` from `sub_009240C0`) and calls `_BinkOpen@8` all the same. Whether the discs hold
-the video, and what `_BinkOpen@8` must answer for a missing file, is plan 10's to find out.
+the video, and what `_BinkOpen@8` must answer for a missing file, is plan 10's to find out. Plan 10's answer
+is in `campaign.md`: the movie lives in `Data/Everything.stuff`, and the game opens it from its view.

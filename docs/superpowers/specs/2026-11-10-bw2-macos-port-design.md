@@ -276,6 +276,10 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   effect after the profile dialog (11,199 bytes of text, `S_OK`, 2 techniques) and
   runs on to its first Bink call, the front end's attract video about 30 s later
   (`docs/research/hlsl.md`). With this, all 60 D3DX imports are answered.
+  **Plan 10:** D3DX compresses into DXT1, DXT3 and DXT5 for loads, fills and mip
+  chains with our own encoder (DXT2 and DXT4 stop loudly), and the effect framework
+  has parameter blocks, which defer their sets to `ApplyParameterBlock` as native
+  D3DX does.
 - **Audio:** the game's audio library mixes every voice in software and streams
   the result into one looping DirectSound buffer (16-bit stereo PCM at 44,100 Hz,
   21,504 bytes). We answer `IDirectSound` and that buffer on plan 4's COM
@@ -312,6 +316,18 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   (`docs/research/input.md`).
 - **Video:** Bink through pcrecomp's ffmpeg-backed `bink.c`, adapted to D3D9
   surfaces (`_BinkDX9SurfaceType@4`, `_BinkCopyToBuffer@28`).
+  **Plan 10:** the six `binkw32.dll` imports the game calls are answered from
+  `runtime/bw2/video/`, whose decoder core is adapted from pcrecomp's MIT `bink.c`.
+  The game opens every movie from memory (`BINKFROMMEMORY`, a pointer into its view
+  of `Data/Everything.stuff`), and the movie is read in place. FFmpeg's `libavformat`,
+  `libavcodec` and `libavutil` decode it, linked as separate dynamic libraries
+  (section 9). `_BinkGoto@12` follows binkw32 1.8's own rules: frame 0 becomes 1, a
+  frame past the end becomes the last, forward decodes and drops the frames between,
+  and backward rewinds. `_BinkDX9SurfaceType@4` returns binkw32 1.8's mapping. A movie
+  with an audio track is a later plan's stop; neither the attract nor the intro has
+  one. The boot plays the front end's attract video, and a click on New Game loads the
+  first land, plays the intro and draws the land's opening scene
+  (`docs/research/campaign.md`).
 - **Files and saves:** the game sees a Windows tree; writes are redirected to
   `~/Library/Application Support/Black & White 2/` because writing inside the
   signed bundle breaks the signature. The registry is persisted there too.
@@ -516,6 +532,7 @@ These are traps NFSU2 hit; the design takes them as requirements.
   against Unicorn with pcrecomp's `difftest.py`), D3D9 semantics checked
   against the documentation, and the user's play-testing. The runtime should
   make frame capture easy so a reference can be added later if one appears.
+  `BW2_FRAME_DUMP` writes PNG frames to a folder outside any git tree (plan 10).
 
 ### 7.4 Input and display (decided with the user; mapping is my call)
 
@@ -636,7 +653,10 @@ checked against `bw2/manifests/game-usa-1.2-fan1.42.tsv`; see
   output, and before any future publish.
 - Licenses: our code MIT (my call, matches pcrecomp). Every third-party piece
   must allow redistribution in a public repo (MIT/BSD/zlib, or LGPL used as a
-  separate library). No NFSU2Recomp code.
+  separate library). No NFSU2Recomp code. FFmpeg (LGPL-2.1+) is used only as
+  separate dynamic libraries (`libavformat`, `libavcodec`, `libavutil`). Development
+  links Homebrew's GPL-enabled build, which never leaves the Mac; the shipped app
+  bundles a minimal LGPL-only build from the pinned 9.0.2 release (plan 10, Ruling 2).
 - Commit messages: short, imperative, no AI attribution.
 - What may be committed (my call): facts *about* the exe that contain none of
   its content: addresses, function catalogs and seed lists, import argument
@@ -716,4 +736,5 @@ Left to the builder:
 - `lift32.py` (global registers) vs `lift32_cpu.py` (CPU struct), or a
   hybrid, based on threading and performance.
 - Sharding, caching and build orchestration details.
+- Bink decoder (plan 10, Ruling 2: FFmpeg's, as separate LGPL dynamic libraries).
 - Exact phasing after phase 0.

@@ -4,8 +4,10 @@ DirectSound audio (plan 8) to the front end, where it first reads input (docs/re
 input the front end waits, so that run ends at a fixed read count (BW2_QUIT_AFTER_READS). With scripted input
 (plan 6, BW2_INPUT_SCRIPT) the game takes a new profile in its first dialog, compiles its first HLSL effect
 (its tone-mapping filter) through Microsoft's own compiler, lifted from disc 1's d3dx9_25.dll (plan 9), and
-draws its front end until its idle timer opens the attract video, its first Bink call, plan 10's layer
-(docs/research/input.md, docs/research/hlsl.md)."""
+draws its front end until its idle timer opens the attract video, which plan 10 plays (Bink through FFmpeg).
+A click on New Game instead loads the first land, plays the intro movie to its last frame and draws the
+land's opening scene in 3D. Those runs end at a movie frame (BW2_QUIT_AFTER_MOVIE), a moment the movie's clock
+sets whatever the frame rate (docs/research/input.md, docs/research/hlsl.md, docs/research/campaign.md)."""
 import os
 import re
 import subprocess
@@ -99,7 +101,6 @@ PROFILE_SCRIPT = "\n".join(
     + [f"{22 + 2 * i + j} key 8 0x0E {'up' if j else 'down'}" for i in range(6) for j in (0, 1)]
     + ["40 key 0x41 0x1E down", "41 key 0x41 0x1E up", "42 key 0x42 0x30 down", "43 key 0x42 0x30 up",
        "50 move -88 45", "80 down 0", "84 up 0"]) + "\n"
-BINK_STOP = "[bw2] reached _BinkOpen@8: owned by a later plan"
 # The [module] lines the boot printed before plan 9 (measured with the engine built at 41a8e9f, which stopped at
 # the HLSL effect): the game's and the script plugin's CRT asking kernel32 for the fiber-local storage calls,
 # the game's PSApi.dll and its two ntdll lookups. Any other [module] line is new and fails the boot test, except
@@ -113,35 +114,73 @@ MODULE_LINES_BEFORE = {f"[module] GetProcAddress(kernel32.dll, {n}): not answere
 D3DX_LOADED = "[bw2] d3dx9_25.dll: lifted DLL at 0x08000000, 52 imports unanswered"
 
 
-@pytest.mark.gamefiles
-@pytest.mark.xfail(run=False, reason="plan 10 Task 6 answers _BinkOpen@8, so the boot no longer stops there; "
-                   "Task 8 rewrites this test as test_boot_profile_to_attract")
-def test_boot_profile_to_bink(tmp_path):
-    # Plan 6: scripted input names a new profile "ab" in the front end's first dialog and confirms it. The
-    # game writes the profile and applies its display settings (a Reset); plan 9 compiles its first effect given
-    # as HLSL text, and the game draws on to its first Bink call, plan 10's layer (exit 4).
+# Plan 10: New Game. After the profile, the running point moves from (422, 427) to (252, 711), the front end's
+# New Game button at 1024x768, and clicks it, well before the attract's timer (docs/research/campaign.md).
+NEW_GAME_SCRIPT = PROFILE_SCRIPT + "300 move -170 284\n310 down 0\n314 up 0\n"
+BINK_OPEN = "[bw2] bink open: "
+ATTRACT_OPEN = "[bw2] bink open: 720x576, 2033 frames at 25/1 fps, 0 audio tracks, 32540316 bytes from memory"
+INTRO_OPEN = "[bw2] bink open: 640x360, 1798 frames at 5000000/208333 fps, 0 audio tracks, 51782036 bytes from memory"
+ATTRACT_QUIT = "[bw2] quit at movie frame 2033:100 + 0 presents (BW2_QUIT_AFTER_MOVIE)"
+# Bounds from docs/research/campaign.md, each at most half the smallest value measured over three runs: the
+# non-black share of the brightest attract frame, and of the brightest intro frame
+ATTRACT_NONBLACK = 0.5
+MOVIE_NONBLACK = 0.375
+# the last intro frame the game shows (Goto clamps at 1798; every run reached it), and 600 Presents after it:
+# the first land's opening scene
+INTRO_LAST = 1798
+CAMPAIGN_QUIT = f"[bw2] quit at movie frame 1798:{INTRO_LAST} + 600 presents (BW2_QUIT_AFTER_MOVIE)"
+INTRO_LAST_SHOWN = "[bw2] bink last frame: 1798"
+
+
+def run_boot(tmp_path, script, timeout, **env_vars):
     assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
     support = tmp_path / "support"
-    script = tmp_path / "profile.script"
-    script.write_text(PROFILE_SCRIPT)
-    env = dict(os.environ, BW2_SUPPORT=str(support), BW2_HEADLESS="1", BW2_FRAME_LOG="1", BW2_HLSL_LOG="1",
-               BW2_INPUT_SCRIPT=str(script))
+    path = tmp_path / "input.script"
+    path.write_text(script)
+    env = dict(os.environ, BW2_SUPPORT=str(support), BW2_HEADLESS="1", BW2_INPUT_SCRIPT=str(path), **env_vars)
     env.pop("BW2_QUIT_AFTER_READS", None)
     r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
-                       timeout=180, env=env)
+                       timeout=timeout, env=env)
     (tmp_path / "stderr.txt").write_text(r.stderr)
+    return r, engine_lines(r.stderr), support
+
+
+def frames_of(lines):
+    return [tuple(map(int, m.groups())) for m in map(FRAME.match, lines) if m]
+
+
+def aborted_frames(lines):
+    """Frames whose GPU work macOS aborted (the engine's "metal: command buffer failed" line for Metal's
+    "Impacting Interactivity" error, which another program's GPU load brings): they show only what was drawn
+    before the abort, so the picture checks leave them out (one run under another program's load lost 9 of 79)."""
+    return {int(FRAME.match(ln).group(1)) for prev, ln in zip(lines, lines[1:])
+            if FRAME.match(ln) and prev.startswith(GPU_ABORT) and "Impacting Interactivity" in prev}
+
+
+def loud_lines(lines):
+    # the loader's own counts ("bound 412 imports, 0 unresolved", "0 unresolved imports") are not stops
+    return [ln for ln in lines if any(w in ln for w in LOUD)
+            and not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln)]
+
+
+@pytest.mark.gamefiles
+def test_boot_profile_to_attract(tmp_path):
+    # Plan 6: scripted input names a new profile "ab" in the front end's first dialog and confirms it. The
+    # game writes the profile and applies its display settings (a Reset); plan 9 compiles its first effect given
+    # as HLSL text; the front end's idle timer then opens its attract video, which plan 10 plays from the game's
+    # view of Data/Everything.stuff. BW2_QUIT_AFTER_MOVIE ends the run at the movie's frame 100, a moment its
+    # clock sets, whatever the frame rate.
+    r, lines, support = run_boot(tmp_path, PROFILE_SCRIPT, 300, BW2_FRAME_LOG="1", BW2_HLSL_LOG="1",
+                                 BW2_BINK_LOG="1", BW2_QUIT_AFTER_MOVIE="2033:100")
     tail = r.stderr[-4000:]
-    lines = engine_lines(r.stderr)
-    assert r.returncode == 4, f"exit {r.returncode}\n{tail}"
-    # the stop line names the guest address it came from after the plan text
-    stops = [i for i, ln in enumerate(lines) if ln.startswith(BINK_STOP)]
-    assert len(stops) == 1, tail
-    stop = stops[0]
-    err = "\n".join(ln for ln in lines[:stop] if not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln))
-    for word in LOUD:
-        assert word not in err, f"{word!r} in stderr\n{tail}"
-    later = [ln for ln in lines if "owned by a later plan" in ln]
-    assert later == [lines[stop]], later
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    assert lines.count(ATTRACT_QUIT) == 1, tail
+    quit_at = lines.index(ATTRACT_QUIT)
+    opens = [i for i, ln in enumerate(lines) if ln.startswith(BINK_OPEN)]
+    assert [lines[i] for i in opens] == [ATTRACT_OPEN], [lines[i] for i in opens]
+    opened = opens[0]
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
     # the profile and the settings are written in My Documents, the profile under the typed name
     docs = support / "C" / "Documents and Settings" / "Player" / "My Documents" / "Black & White 2"
     for f in (docs / "Profiles" / "~ab" / "Profile.ini", docs / "Settings.ini"):
@@ -162,25 +201,67 @@ def test_boot_profile_to_bink(tmp_path):
     assert lines[effect].startswith("[bw2] hlsl effect: 11199 bytes -> 0x00000000, "), lines[effect]
     assert ", 2 techniques, " in lines[effect], lines[effect]
     assert lines.index(D3DX_LOADED) < effect
-    # the order: the first read, the effect, frames, the stop, and no frame after it. The stop comes about 30 s
-    # after the effect whatever the frame rate (980 to 1099 frames when idle, 265 under full CPU load): the front
-    # end opens its attract video on a timer, not after a number of frames, so no frame count beyond one is pinned
+    # the order: the first read, the effect, frames, the movie's open (about 30 s after the effect, on the
+    # front end's timer), frames, the quit
     assert lines.count(FIRST_READ) == 1, tail
     first_read = lines.index(FIRST_READ)
-    assert first_read < effect < stop, (first_read, effect, stop)
-    assert any(FRAME.match(ln) for ln in lines[effect:stop]), tail
-    assert not any(FRAME.match(ln) for ln in lines[stop:]), tail
-    # the front end's picture, from the first read to the stop, is mostly not black in every frame
-    window = lines[first_read:stop]
-    after = [tuple(map(int, m.groups())) for m in map(FRAME.match, window) if m]
-    assert after, tail
-    # a frame whose GPU work macOS aborted (the engine's "metal: command buffer failed" line for Metal's
-    # "Impacting Interactivity" error, which another program's GPU load brings) shows only what was drawn before
-    # the abort; such frames are left out (one run under another program's load lost 9 of 79), but never most
-    aborted = {int(FRAME.match(ln).group(1)) for prev, ln in zip(window, window[1:])
-               if FRAME.match(ln) and prev.startswith(GPU_ABORT) and "Impacting Interactivity" in prev}
-    assert len(aborted) * 2 < len(after), (len(aborted), len(after))
-    dark = [f for f in after if 2 * f[6] < f[7] and f[0] not in aborted]
+    assert first_read < effect < opened < quit_at, (first_read, effect, opened, quit_at)
+    assert any(FRAME.match(ln) for ln in lines[effect:opened]), tail
+    # the front end's picture, from the first read to the open, is mostly not black in every frame
+    window = lines[first_read:opened]
+    front = frames_of(window)
+    aborted = aborted_frames(window)
+    assert front and len(aborted) * 2 < len(front), (len(aborted), len(front))
+    dark = [f for f in front if 2 * f[6] < f[7] and f[0] not in aborted]
+    assert not dark, dark
+    # the movie shows: some frame after the open is lit at least as much as the bound
+    movie = [f for f in frames_of(lines[opened:quit_at]) if f[0] not in aborted_frames(lines[opened:quit_at])]
+    assert any(f[6] >= ATTRACT_NONBLACK * f[7] for f in movie), max((f[6] / f[7], f[0]) for f in movie)
+
+
+@pytest.mark.gamefiles
+def test_boot_new_campaign(tmp_path):
+    # Plan 10: after the profile, a click on New Game loads the first land (about 23 s of the game's own
+    # loading, with no Present), plays the intro movie from the game's view of Data/Everything.stuff, and then
+    # draws the land's opening scene in 3D. BW2_QUIT_AFTER_MOVIE ends the run 600 Presents after the intro's
+    # last frame the game shows (docs/research/campaign.md).
+    r, lines, support = run_boot(tmp_path, NEW_GAME_SCRIPT, 900, BW2_FRAME_LOG="1", BW2_BINK_LOG="1",
+                                 BW2_QUIT_AFTER_MOVIE=f"1798:{INTRO_LAST}+600")
+    tail = r.stderr[-4000:]
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    assert lines.count(CAMPAIGN_QUIT) == 1, tail
+    quit_at = lines.index(CAMPAIGN_QUIT)
+    opens = [i for i, ln in enumerate(lines) if ln.startswith(BINK_OPEN)]
+    assert [lines[i] for i in opens] == [INTRO_OPEN], [lines[i] for i in opens]
+    opened = opens[0]
+    # the game plays the intro to its last frame (Goto clamps every later frame there) and never closes it
+    assert lines.count(INTRO_LAST_SHOWN) == 1, tail
+    shown = lines.index(INTRO_LAST_SHOWN)
+    assert opened < shown < quit_at, (opened, shown, quit_at)
+    assert not any(ln.startswith("[bw2] bink close: ") for ln in lines), tail
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
+    # the land load's uploads never run the GPU out of memory (plan 10 Task 7); macOS's "Impacting
+    # Interactivity" aborts are allowed, as in the profile test, and their frames left out below
+    oom = [ln for ln in lines if ln.startswith(GPU_ABORT) and "Insufficient Memory" in ln]
+    assert not oom, oom
+    made = sorted(p for p in (support / "Game").rglob("*") if p.is_file()) if (support / "Game").exists() else []
+    assert not made, made
+    modules = {ln for ln in lines if ln.startswith("[module] ")}
+    # the New Game path makes no lookup that nobody answered beyond those the boot made before plan 9
+    assert modules <= MODULE_LINES_BEFORE, sorted(modules - MODULE_LINES_BEFORE)
+    # the movie shows: some frame while it plays is lit at least as much as the bound
+    window = lines[opened:shown]
+    movie = [f for f in frames_of(window) if f[0] not in aborted_frames(window)]
+    assert any(f[6] >= MOVIE_NONBLACK * f[7] for f in movie), max(((f[6] / f[7], f[0]) for f in movie), default=None)
+    # the land's opening scene: the last 100 frames before the quit are each at least half not black
+    window = lines[shown:quit_at]
+    aborted = aborted_frames(window)
+    land = frames_of(window)
+    assert len(land) >= 600, len(land)
+    last = [f for f in land[-100:] if f[0] not in aborted]
+    assert len(last) * 2 > 100, len(last)
+    dark = [f for f in last if 2 * f[6] < f[7]]
     assert not dark, dark
 
 
