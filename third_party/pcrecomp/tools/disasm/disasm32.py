@@ -250,6 +250,41 @@ def table_entries(read, table, is_code, limit=256):
 
 # `jmp dword ptr [idx*4 + table]`; with a base register the disp is not the table
 _TABLE_JMP = re.compile(r"dword ptr \[\w+\*4 \+ (0x[0-9a-f]+)\]$")
+_TABLE_JMP_INDEX = re.compile(r"^dword ptr \[(\w+)\*4 \+ 0x[0-9a-f]+\]$")
+
+
+def table_entries_before(read, table, is_code, limit=7):
+    """The code addresses in the slots at table - 4, table - 8, ... (up to `limit`),
+    stopping at the first slot that is not a code address.
+
+    MSVC's memcpy/memmove copies a backward tail through `neg ecx; jmp [ecx*4 + T]`
+    (CopyUnwindDown): the index runs 0, -1, ... -7, so the arms sit in the eight
+    slots ending at T and nothing else names them. The limit is that vector's size:
+    BW2's white.exe has alignment bytes right before it that read as a .text address
+    (0x00498D00), so reading an eighth slot would invent an arm.
+    """
+    out = []
+    for k in range(1, limit + 1):
+        raw = read(table - 4 * k, 4)
+        if not raw or len(raw) < 4:
+            break
+        tgt = int.from_bytes(raw, 'little')
+        if not is_code(tgt):
+            break
+        out.append(tgt)
+    return out
+
+
+def negated_index(prev, jmp) -> bool:
+    """True when `jmp` is `jmp [r*4 + disp32]` and `prev`, the instruction right
+    before it on the same path, is `neg r` of that register: the table is indexed
+    backwards from disp32 (table_entries_before). Every reader of jump tables asks
+    this one helper, so the function walk, the interior walk and the dispatch
+    closure reach the same arms."""
+    if prev is None or jmp is None or jmp.mnemonic != "jmp" or prev.mnemonic != "neg":
+        return False
+    m = _TABLE_JMP_INDEX.match(jmp.op_str.strip())
+    return bool(m) and prev.op_str.strip() == m.group(1)
 
 
 # Bytes decoded per linear scan inside a function. Straight-line code longer
@@ -483,21 +518,29 @@ class Disassembler:
                 operands=list(insn.operands) if insn.operands else [],
             )
 
-    def jump_table_targets(self, insn, limit: int = 256) -> list:
+    def jump_table_targets(self, insn, limit: int = 256, negated: bool = False) -> list:
         """Entries of the jump table an indirect `jmp` dispatches through.
 
         MSVC puts the table in .text beside the function. Nothing names the arms
         but this one instruction, so recursive descent cannot reach them and they
         surface at runtime as unresolved dispatches. Stop at the first entry that
         is not a code address -- that is where the table ends.
+
+        `negated` (negated_index: the index register was just negated) reads the
+        table backwards instead: slot 0, if it is code, and the slots before it.
         """
         if not insn.operands:
             return []
         op = insn.operands[0]
         if op.type != X86_OP_MEM or op.mem.scale != 4 or not op.mem.index:
             return []
-        return table_entries(self.read_bytes, op.mem.disp & 0xFFFFFFFF,
-                             self.is_code_address, limit)
+        table = op.mem.disp & 0xFFFFFFFF
+        if negated:
+            raw = self.read_bytes(table, 4)
+            slot0 = int.from_bytes(raw, 'little') if raw and len(raw) == 4 else None
+            head = [slot0] if slot0 is not None and self.is_code_address(slot0) else []
+            return head + table_entries_before(self.read_bytes, table, self.is_code_address)
+        return table_entries(self.read_bytes, table, self.is_code_address, limit)
 
     def disassemble_function(self, start_va: int, iat_map: dict = None) -> Optional[Function]:
         """
@@ -522,7 +565,7 @@ class Disassembler:
             insns = self.disassemble_at(addr, max_bytes=SCAN_WINDOW)
             last = None
             for insn in insns:
-                last = insn
+                prev, last = last, insn
                 if insn.is_call:
                     target = insn.get_branch_target()
                     if target and self.is_code_address(target):
@@ -554,7 +597,8 @@ class Disassembler:
                             if target not in visited:
                                 work.append(target)
                     elif target is None:
-                        func.jump_targets.update(self.jump_table_targets(insn))
+                        func.jump_targets.update(self.jump_table_targets(
+                            insn, negated=negated_index(prev, insn)))
                         # `jmp dword ptr [table + idx*4]` -- a switch. The arms
                         # belong to THIS function: they are its loop body, not
                         # tail calls, so they have to become blocks here. Lift
@@ -1257,6 +1301,7 @@ def drop_mid_instruction_entries(read_va, functions, code_start, code_end,
         n = 0
         while pending and n < 8192:
             va = pending.pop()
+            prev = None
             while va is not None and n < 8192:
                 if va in seen:
                     break
@@ -1273,6 +1318,7 @@ def drop_mid_instruction_entries(read_va, functions, code_start, code_end,
                     n += 1
                     va = ins.address + ins.size
                     yield ins
+                    before, prev = prev, ins
                     m = ins.mnemonic.split()[-1]
                     if m in ENDS:
                         va = None
@@ -1284,8 +1330,12 @@ def drop_mid_instruction_entries(read_va, functions, code_start, code_end,
                         t = int(op, 16) if op.startswith("0x") else None
                         sw = _TABLE_JMP.search(op) if m == "jmp" and t is None else None
                         if sw:
-                            for arm in table_entries(read_va, int(sw.group(1), 16),
-                                                     lambda v: code_start <= v < code_end):
+                            table = int(sw.group(1), 16)
+                            is_code = lambda v: code_start <= v < code_end
+                            arms = table_entries(read_va, table, is_code)
+                            if negated_index(before, ins):
+                                arms = arms + table_entries_before(read_va, table, is_code)
+                            for arm in arms:
                                 if addr <= arm < code_end and arm - addr < REACH \
                                    and arm not in seen:
                                     pending.append(arm)
@@ -1407,15 +1457,21 @@ def close_dispatch_targets(read_va, functions, code_start, code_end,
             except Exception:
                 continue
             end = addr + size
+            prev = None
             for ins in md.disasm(code, addr):
+                before, prev = prev, ins
                 if ins.mnemonic.split()[-1] not in BRANCH:
                     continue
                 sw = _TABLE_JMP.search(ins.op_str) if ins.mnemonic == "jmp" else None
                 if sw:
                     # A switch arm past a clamp is a dispatch too (MFC's
                     # 0x004A4B70, cut by chunks it calls, lost 0x004A5025).
-                    for t in table_entries(read_va, int(sw.group(1), 16),
-                                           lambda v: code_start <= v < code_end):
+                    table = int(sw.group(1), 16)
+                    is_code = lambda v: code_start <= v < code_end
+                    arms = table_entries(read_va, table, is_code)
+                    if negated_index(before, ins):
+                        arms = arms + table_entries_before(read_va, table, is_code)
+                    for t in arms:
                         if not (addr <= t < end or t in functions or (inside and inside(t))):
                             wanted.add(t)
                 for op in ins.operands:
