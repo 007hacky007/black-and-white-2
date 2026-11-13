@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-from bw2.build import (BW2RT, FLAGS, RECOMP32, WIN32HLE, bw2_includes, check_tools, engine_libs,
+from bw2.build import (BW2RT, FLAGS, RECOMP32, WIN32HLE, bw2_includes, check_tools, ffmpeg_cflags, engine_libs,
                        engine_sources, sdk_path)
 
 NOTICE = "[bw2] audio: no output device (OSStatus "
@@ -24,7 +24,7 @@ def selftest(tmp_path_factory):
     assert src.exists(), f"{src} is missing"
     srcs = [s for s in engine_sources() if s.name != "main.c"] + [src]
     r = subprocess.run([str(check_tools()), "-O1", "-g", *FLAGS, "-fobjc-arc", "-isysroot", str(sdk_path()),
-                        "-I", str(RECOMP32), "-I", str(WIN32HLE), *bw2_includes(), *map(str, srcs),
+                        "-I", str(RECOMP32), "-I", str(WIN32HLE), *bw2_includes(), *ffmpeg_cflags(), *map(str, srcs),
                         *engine_libs(), "-o", str(exe)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-4000:]
     return exe

@@ -1074,11 +1074,11 @@ root: .asciz "C:\\\\"
 
 def test_shims_selftest(tmp_path):
     import subprocess
-    from bw2.build import BW2RT, FLAGS, RECOMP32, WIN32HLE, bw2_includes, check_tools, engine_libs, engine_sources, sdk_path
+    from bw2.build import BW2RT, FLAGS, RECOMP32, WIN32HLE, bw2_includes, check_tools, ffmpeg_cflags, engine_libs, engine_sources, sdk_path
     srcs = [s for s in engine_sources() if s.name != "main.c"] + [BW2RT / "shims_selftest.c"]
     exe = tmp_path / "shims_selftest"
     subprocess.run([str(check_tools()), "-O1", *FLAGS, "-fobjc-arc", "-isysroot", str(sdk_path()), "-I", str(RECOMP32),
-                    "-I", str(WIN32HLE), *bw2_includes(), *map(str, srcs), *engine_libs(), "-o", str(exe)],
+                    "-I", str(WIN32HLE), *bw2_includes(), *ffmpeg_cflags(), *map(str, srcs), *engine_libs(), "-o", str(exe)],
                    check=True, capture_output=True, text=True)
     r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60, cwd=tmp_path)
     assert r.returncode == 0 and "shims selftest: 0 failed" in r.stdout, r.stdout + r.stderr[-2000:]

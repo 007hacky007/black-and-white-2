@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from bw2 import paths
-from bw2.build import (BW2RT, FLAGS, RECOMP32, WIN32HLE, bw2_includes, check_tools, engine_libs,
+from bw2.build import (BW2RT, FLAGS, RECOMP32, WIN32HLE, bw2_includes, check_tools, ffmpeg_cflags, engine_libs,
                        engine_sources, sdk_path)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -25,7 +25,7 @@ def selftest(tmp_path_factory):
     exe = tmp_path_factory.mktemp("effects") / "fx_selftest"
     srcs = [s for s in engine_sources() if s.name != "main.c"] + [BW2RT / "d3dx" / "fx_selftest.c"]
     r = subprocess.run([str(check_tools()), "-O1", "-g", *FLAGS, "-fobjc-arc", "-isysroot", str(sdk_path()),
-                        "-I", str(RECOMP32), "-I", str(WIN32HLE), *bw2_includes(), *map(str, srcs),
+                        "-I", str(RECOMP32), "-I", str(WIN32HLE), *bw2_includes(), *ffmpeg_cflags(), *map(str, srcs),
                         *engine_libs(), "-o", str(exe)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-4000:]
     return exe

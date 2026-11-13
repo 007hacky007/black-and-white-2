@@ -26,8 +26,11 @@ WIN32HLE_CORE = ("host.c", "host_lite.c", "guest_mem.c", "pe_loader.c", "module.
 
 
 # Plan 4: the graphics layers, C and Objective-C (ARC); plan 5: the DirectInput mouse;
-# plan 8: DirectSound and its mixer, played through CoreAudio.
-BW2_SUBDIRS = ("d3d9", "d3dx", "input", "audio")
+# plan 8: DirectSound and its mixer, played through CoreAudio; plan 10: Bink video on FFmpeg.
+BW2_SUBDIRS = ("d3d9", "d3dx", "input", "audio", "video")
+VIDEO = BW2RT / "video"           # the only sources that see FFmpeg's headers
+FFMPEG_DEFAULT = Path("/opt/homebrew/opt/ffmpeg")
+FFMPEG_LIBS = ("avformat", "avcodec", "avutil")
 FRAMEWORKS = ("Metal", "QuartzCore", "AppKit", "Foundation", "ImageIO", "CoreGraphics", "CoreText",
               "AudioToolbox", "CoreAudio")
 
@@ -47,15 +50,34 @@ def bw2_includes() -> list[str]:
     return out
 
 
+def ffmpeg_prefix() -> Path:
+    """FFmpeg's install (headers and dynamic libraries): $BW2_FFMPEG_PREFIX, else Homebrew's.
+    Read on every call; only the engine host needs it."""
+    prefix = Path(os.environ.get("BW2_FFMPEG_PREFIX") or FFMPEG_DEFAULT)
+    need = [f"include/lib{n}/{n}.h" for n in ("avformat", "avcodec", "avutil")]
+    need += [f"lib/lib{n}.dylib" for n in FFMPEG_LIBS]
+    missing = [n for n in need if not (prefix / n).exists()]
+    if missing:
+        raise ToolsMissing(f"FFmpeg not found under {prefix}: brew install ffmpeg, or set BW2_FFMPEG_PREFIX"
+                           f" (missing {', '.join(missing)})")
+    return prefix
+
+
+def ffmpeg_cflags() -> list[str]:
+    """Compile flags for the sources under runtime/bw2/video/ (and selftests built with them)."""
+    return ["-isystem", str(ffmpeg_prefix() / "include")]
+
+
 def engine_libs() -> list[str]:
     libs = ["-lpthread", "-lm"]
     for f in FRAMEWORKS:
         libs += ["-framework", f]
-    return libs
+    return libs + [f"-L{ffmpeg_prefix()}/lib", *(f"-l{n}" for n in FFMPEG_LIBS)]
 
 
 HOSTS = {"linkcheck": lambda: [BW2RT / "linkcheck.c"], "engine": engine_sources}
-HOST_LIBS = {"linkcheck": [], "engine": engine_libs()}
+# Called inside build(): an import of this module never needs FFmpeg.
+HOST_LIBS = {"linkcheck": lambda: [], "engine": engine_libs}
 OPT_LEVELS = ("-O0", "-O1", "-O2", "-O3", "-Os")
 
 
@@ -149,6 +171,7 @@ def build(gen_dir: Path, out: Path, opt: str = "-O3", jobs: int | None = None,
         raise ValueError(f"host must be one of {sorted(HOSTS)}, got {host!r}")
     t0 = time.time()
     clang = check_tools()
+    libs = HOST_LIBS[host]()
     gen_dir, out = Path(gen_dir), Path(out)
     obj_dir = gen_dir / "obj"
     sdk = sdk_path()
@@ -164,10 +187,13 @@ def build(gen_dir: Path, out: Path, opt: str = "-O3", jobs: int | None = None,
     hsrc = HOSTS[host]()
     hdir = Path(host_obj_dir) if host_obj_dir else obj_dir / f"host-{host}"
     host_pairs = [(s, hdir / (s.stem + ".o")) for s in hsrc]
-    host_stamp = " ".join([str(clang), opt, *cflags[:-2], _digest(headers if host == "linkcheck" else
-                                                                   [h for h in headers if h.parent != gen_dir])]) + "\n"
+    video = ffmpeg_cflags() if any(s.parent == VIDEO for s in hsrc) else []
+    host_stamp = " ".join([str(clang), opt, *cflags[:-2], *video,
+                           _digest(headers if host == "linkcheck" else
+                                   [h for h in headers if h.parent != gen_dir])]) + "\n"
     todo = [(s, o, [level(s), *cflags]) for s, o in _stale(obj_dir, stamp_text, shard_pairs)]
-    todo += [(s, o, [opt, *cflags]) for s, o in _stale(hdir, host_stamp, host_pairs)]
+    todo += [(s, o, [opt, *cflags, *(video if s.parent == VIDEO else [])])
+             for s, o in _stale(hdir, host_stamp, host_pairs)]
     errors = _compile_all(clang, jobs, todo)
     if errors:
         raise BuildError(f"{len(errors)} of {len(todo)} files failed to compile:\n" + "\n".join(errors[:5]))
@@ -177,7 +203,7 @@ def build(gen_dir: Path, out: Path, opt: str = "-O3", jobs: int | None = None,
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_name(out.name + ".part")
     r = subprocess.run([str(clang), "-mmacosx-version-min=13.0", "-isysroot", str(sdk),
-                        *map(str, objects), *HOST_LIBS[host], "-o", str(part)],
+                        *map(str, objects), *libs, "-o", str(part)],
                        capture_output=True, text=True)
     if r.returncode != 0 or not part.exists():
         part.unlink(missing_ok=True)
