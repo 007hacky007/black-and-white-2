@@ -148,11 +148,15 @@ static void o_CoUninitialize(void)  { if (t_com_inits) t_com_inits--; RETV(0); }
 
 /* CoFileTimeToDosDateTime(&ft, &date, &time): MS-DOS's packed date and time
  * (two-second steps, years 1980 to 2107), with no time-zone conversion, as
- * FileTimeToDosDateTime does none. */
+ * FileTimeToDosDateTime does none. A time past an even second rounds up to the
+ * next step, carrying into the next day and year, as Windows 11 answers
+ * (12:34:56.0000001 is 12:34:58; 23:59:59 on 31 December is 00:00:00). */
 static void o_CoFileTimeToDosDateTime(void) {
     const uint32_t *ft = (const uint32_t *)APTR(0);
     if (!ft) RET(0, 3);
-    uint64_t t = ((uint64_t)ft[1] << 32 | ft[0]) / 10000000ull;            /* seconds since 1601 */
+    uint64_t ticks = (uint64_t)ft[1] << 32 | ft[0];
+    if (ticks > UINT64_MAX - 19999999ull) RET(0, 3);
+    uint64_t t = (ticks + 19999999ull) / 20000000ull * 2u;                   /* seconds since 1601, up to a step */
     time_t unix_s = (time_t)((int64_t)t - 11644473600ll);
     struct tm tm;
     if (!gmtime_r(&unix_s, &tm) || tm.tm_year + 1900 < 1980 || tm.tm_year + 1900 > 2107) RET(0, 3);

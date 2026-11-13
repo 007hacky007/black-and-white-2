@@ -36,3 +36,4 @@ runtime/win32hle/kernel32_ext.c - FindFirstFileA sorts names upper-cased (upper_
 runtime/win32hle/kernel32_ext.c - FindFirstFileA gives a folder size 0, and a wildcard search in a missing folder answers ERROR_PATH_NOT_FOUND (3) - plan 11's Windows probe, cases find_dir_data and find_missing_dir
 runtime/win32hle/kernel32_ext.c - DeleteFileA of a folder or of a read-only file (no owner write bit) answers ERROR_ACCESS_DENIED (5) and leaves it; an unlink failure maps its errno - plan 11's Windows probe, cases delete_dir and delete_readonly
 runtime/win32hle/kernel32_ext.c - RemoveDirectoryA of a folder that holds anything answers ERROR_DIR_NOT_EMPTY (145), not ERROR_INVALID_FUNCTION - plan 11's Windows probe, case rmdir_nonempty
+runtime/win32hle/ole32.c - CoFileTimeToDosDateTime rounds a time past an even second up to the next two-second step, carrying into the next day and year - plan 11's Windows probe, cases dosdate, dosdate_tick, dosdate_odd and dosdate_carry
