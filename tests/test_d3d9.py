@@ -144,6 +144,13 @@ def test_mtl_upload_bound(selftest, tmp_path):
     assert "[bw2] metal: command buffer failed" not in r.stderr, r.stderr[-4000:]
 
 
+def test_movie_frames_footprint(selftest, tmp_path):
+    # Plan 10 Task 8: a frame of the movie path (GetSurfaceLevel, LockRect, UnlockRect, Release, Present) 1,500
+    # times; the process's footprint stays flat (each Present's command buffer and its staging are freed)
+    r = run_group(selftest, "movie_frames", tmp_path)
+    assert r.returncode == 0 and "movie_frames: 0 failed" in r.stdout, r.stdout[-4000:] + r.stderr[-4000:]
+
+
 def read_png(path):
     """(width, height, rows of RGB bytes) of an 8-bit RGB PNG, not interlaced (what the frame dump writes)."""
     data = path.read_bytes()

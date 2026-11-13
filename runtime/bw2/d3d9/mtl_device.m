@@ -6,7 +6,8 @@
  * asked; a readback commits and waits. Copies into textures go through staging
  * buffers that hold only the box copied, and a command buffer is sent once its
  * staging passes STAGE_BOUND, so a long load with no Present stays bounded
- * (plan 10 Task 7).
+ * (plan 10 Task 7). Each commit drains the calling thread's autorelease pool
+ * (plan 10 Task 8).
  */
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
@@ -19,6 +20,9 @@
 
 #define VIS_SLOTS 16384u                 /* occlusion counting slots */
 #define STAGE_BOUND (64ull << 20)        /* staging per command buffer (plan 10 Ruling 13) */
+
+void *objc_autoreleasePoolPush(void);    /* libobjc: what @autoreleasepool compiles to */
+void objc_autoreleasePoolPop(void *pool);
 
 static NSString *const kUtilSource = @
     "#include <metal_stdlib>\n"
@@ -137,6 +141,18 @@ id<MTLBlitCommandEncoder> mtl_blit(MtlCtx *c) {
     if (!c.blit) c.blit = [cmdbuf(c) blitCommandEncoder];
     return c.blit;
 }
+/* Metal hands out command buffers, encoders, descriptors and drawables autoreleased, and a command buffer holds
+ * everything its commands use (the frame's staging buffers) until it is freed. The guest thread has no run loop
+ * and never leaves a pool, so they were never freed: the campaign boot grew by about 1.1 GB a second while the
+ * intro played, nearly all of it GPU memory, until macOS killed it (plan 10 Task 8). Each commit (every Present,
+ * readback and STAGE_BOUND send goes through one) pops the pool the previous commit on this thread pushed and
+ * pushes a new one. Metal and D3D9 calls come only from guest threads (none inside an @autoreleasepool block),
+ * and every object kept past a commit is held strongly (a property or a __bridge_retained handle). */
+static _Thread_local void *tl_pool;
+static void drain_pool(void) {
+    if (tl_pool) objc_autoreleasePoolPop(tl_pool);
+    tl_pool = objc_autoreleasePoolPush();
+}
 void mtl_commit(MtlCtx *c, int wait) {
     mtl_end_encoders(c);
     id<MTLCommandBuffer> cb = c.cb;
@@ -151,7 +167,9 @@ void mtl_commit(MtlCtx *c, int wait) {
     [cb commit];
     if (wait) [cb waitUntilCompleted];
     c.cb = nil;
+    cb = nil;
     mtl_heap_collect();
+    drain_pool();
 }
 static void commit_wait(MtlCtx *c) { mtl_commit(c, 1); }
 /* After a copy from a staging buffer of len bytes is recorded: once the open command buffer holds more than

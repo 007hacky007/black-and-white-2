@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <mach/mach.h>
 #include "win32hle.h"
 #include "bw2.h"
 #include "d3d_com.h"
@@ -2201,6 +2202,41 @@ static void group_mtl_upload_bound(void) {
     free(px);
 }
 
+/* The process's physical footprint, GPU allocations included (what macOS's memory limit counts). */
+static uint64_t footprint(void) {
+    task_vm_info_data_t vi;
+    mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) != KERN_SUCCESS) return 0;
+    return vi.phys_footprint;
+}
+
+/* Plan 10 Task 8: the movie path, once per frame, as sub_0093C460 drives it: GetSurfaceLevel of a managed
+ * 1024x512 A8R8G8B8 texture, LockRect of the whole level, a fill, UnlockRect, Release, Present. Measured in the
+ * campaign boot before the fix: the footprint grew by about 1.1 GB a second while the intro played (to 80 GB,
+ * nearly all of it IOAccelerator memory) until macOS killed the process. Each Present's command buffer and
+ * everything it held (the frame's staging buffers) were autoreleased on a thread whose autorelease pool is
+ * never drained. Here: after 50 frames to warm up, 1,500 more must not grow the footprint by 256 MB (each frame
+ * stages 2 MB, so a leak of it grows by 3 GB). */
+static void group_movie_frames(void) {
+    uint32_t n = g_arg ? (uint32_t)strtoul(g_arg, NULL, 0) : 1500;
+    uint32_t dev = new_device(1024, 768), tex = texture(dev, 1024, 512, 1, FMT_A8R8G8B8), lr = gmem(8);
+    uint64_t f0 = 0;
+    for (uint32_t i = 0; i < 50 + n; i++) {
+        if (i == 50) f0 = footprint();
+        uint32_t s = level_surface(tex, 0);
+        CHECKEQ(vcall(s, SF_LockRect, 3, lr, 0u, 0u), D3D_OK);
+        uint8_t *bits = hle_ptr(MEM32(lr + 4));
+        for (uint32_t y = 0; y < 512; y++) memset(bits + y * MEM32(lr), (int)(i & 0xFF), 1024 * 4);
+        CHECKEQ(vcall(s, SF_UnlockRect, 0), D3D_OK);
+        CHECKEQ(vcall(s, 2, 0), 0);
+        CHECKEQ(vcall(dev, DV_Present, 4, 0u, 0u, 0u, 0u), D3D_OK);
+    }
+    int64_t grew = (int64_t)(footprint() - f0);             /* it may shrink */
+    printf("movie_frames: footprint grew %lld MB over %u frames\n", (long long)(grew / (1 << 20)), n);
+    if (!f0 || grew > (int64_t)(256ull << 20)) printf("FAIL footprint grew by %lld bytes\n", (long long)grew), fails++;
+    CHECKEQ(vcall(tex, 2, 0), 0);
+}
+
 /* BW2_FRAME_DUMP=<dir>:2 (tests/test_d3d9.py sets it and reads the files): four Presents of a cleared 64x48 back
  * buffer, red, green (an 8x8 red corner), blue, white (an 8x8 blue corner); the 2nd and 4th are written. Each
  * Present is announced on stdout first, so a stop shows which Present made it. */
@@ -2221,7 +2257,7 @@ static void group_frame_dump(void) {
 
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
     { "mtl_upload_flood", group_mtl_upload_flood }, { "mtl_upload_bound", group_mtl_upload_bound },
-    { "frame_dump", group_frame_dump },
+    { "frame_dump", group_frame_dump }, { "movie_frames", group_movie_frames },
     { "draw_count", group_draw_count },
     { "display_mode", group_display_mode },
     { "frame_log", group_frame_log },
