@@ -238,6 +238,34 @@ uint32_t hle_vm_reserve(uint32_t va, uint32_t size) {
     return r;
 }
 
+/* The largest range hle_vm_reserve(0, n) could hand out now: find_gap's walk. */
+uint32_t hle_vm_largest_free(void) {
+    hle_mem_init();
+    pthread_mutex_lock(&g_mem_lock);
+    uint64_t at = ANY_LO, best = 0;
+    for (int i = 0; i <= g_nrng; i++) {
+        uint64_t next = i < g_nrng ? g_rng[i].lo : ANY_HI;
+        if (next > ANY_HI) next = ANY_HI;
+        if (at < SHIM_HI && at >= SHIM_LO) at = SHIM_HI;
+        if (next > at && next - at > best) best = next - at;
+        if (i < g_nrng && g_rng[i].hi > at) at = g_rng[i].hi;
+    }
+    pthread_mutex_unlock(&g_mem_lock);
+    return (uint32_t)best;
+}
+
+/* 1 when every byte of [va, va+size) lies in reservations, else 0 (size 0 or a wrap: 0). */
+int hle_vm_is_reserved(uint32_t va, uint32_t size) {
+    uint64_t at = va, end = (uint64_t)va + size;
+    if (!size || end > SPAN) return 0;
+    hle_mem_init();
+    pthread_mutex_lock(&g_mem_lock);
+    for (int i = 0; i < g_nrng && at < end; i++)
+        if (g_rng[i].lo <= at && at < g_rng[i].hi) at = g_rng[i].hi;
+    pthread_mutex_unlock(&g_mem_lock);
+    return at >= end;
+}
+
 /* Release the reservation that starts at va (size is the caller's note of
  * it; the table knows). Its pages go back to inaccessible and zero. */
 static void vm_release_locked(uint32_t va) {
