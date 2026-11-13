@@ -400,7 +400,22 @@ def write_images(d):
     key = [[0xFFFF00FF, 0xFF00FF00]]
     (d / "key.tga").write_bytes(tga(key, top_left=True))
     (d / "expected.txt").write_text(" ".join(f"{c:08X}" for row in IMG for c in row) + "\n")
+    (d / "vol_dxt1.dds").write_bytes(dds(128, 128, b"DXT1", depth=4, data=vol_blocks()))
     return d
+
+
+def vol_blocks():
+    """128x128x4 DXT1, one level: each block one 5:6:5 colour (equal endpoints, indices 0) that
+    varies smoothly across the blocks and the slices, near one line of colours (as dxt5_chain in
+    d3dx_selftest.c says why)."""
+    out = bytearray()
+    for z in range(4):
+        for by in range(32):
+            for bx in range(32):
+                lum = 0.1 * math.sin(bx / 4) + 0.06 * math.cos(by / 6) + 0.02 * z
+                c = round((0.4 + 0.8 * lum) * 31) << 11 | round((0.5 + lum) * 63) << 5 | round((0.3 + 0.6 * lum) * 31)
+                out += struct.pack("<HHI", c, c, 0)
+    return bytes(out)
 
 
 def write_malformed(d):
@@ -427,6 +442,16 @@ def test_malformed_images_are_refused(selftest, tmp_path):
 
 @pytest.mark.parametrize("group", ["dds", "tga_bmp_png", "convert", "filter", "fill", "save", "colorkey"])
 def test_textures(selftest, tmp_path, group):
+    write_images(tmp_path / "img")
+    (tmp_path / "game").mkdir()
+    check(selftest, group, tmp_path, tmp_path / "img")
+
+
+# ---- plan 10 Task 3: DXT1, DXT3 and DXT5 compression (Ruling 9) ----
+
+@pytest.mark.parametrize("group", ["dxt_exact", "dxt_punch", "dxt_quality", "dxt_load_surface", "dxt_filter",
+                                   "dxt_small_levels", "dxt_unsupported"])
+def test_dxt(selftest, tmp_path, group):
     write_images(tmp_path / "img")
     (tmp_path / "game").mkdir()
     check(selftest, group, tmp_path, tmp_path / "img")

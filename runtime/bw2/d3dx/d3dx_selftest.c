@@ -499,6 +499,366 @@ static void group_malformed(void) {
     }
 }
 
+/* ---- plan 10 Task 3: DXT compression ---- */
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include "d3dx.h"
+
+#define FMT_DXT2 0x32545844u
+#define FMT_DXT3 0x33545844u
+#define FMT_DXT4 0x34545844u
+#define FMT_DXT5 0x35545844u
+enum { VT_GetLevelDesc = 17 };
+
+static float x5(uint32_t v) { return (float)((v << 3) | (v >> 2)) / 255.0f; }
+static float x6(uint32_t v) { return (float)((v << 2) | (v >> 4)) / 255.0f; }
+static void rgb(float *o, uint32_t r5, uint32_t g6, uint32_t b5, float a) { o[0] = x5(r5), o[1] = x6(g6), o[2] = x5(b5), o[3] = a; }
+
+/* bytes that end where an inaccessible page starts: a read or write past them stops the run */
+static void *guarded(size_t bytes) {
+    size_t pg = (size_t)getpagesize(), span = (bytes + pg - 1) / pg * pg;
+    uint8_t *m = mmap(NULL, span + pg, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    mprotect(m + span, pg, PROT_NONE);
+    return m + span - bytes;
+}
+/* one block through the encoder and back through plan 4's decoder */
+static void dxt_round(uint32_t fmt, const float *in, uint8_t *blk, float *out) {
+    d3dx_dxt_encode(fmt, in, blk);
+    d3dx_read(fmt, blk, 16, 4, 4, out);
+}
+static double rms(const float *a, const float *b, size_t n, int c) {
+    double s = 0;
+    for (size_t i = 0; i < n; i++) { double d = a[4 * i + c] - b[4 * i + c]; s += d * d; }
+    return sqrt(s / (double)n);
+}
+#define CHECK_RMS(a, b, n, c, lim) do { double _r = rms(a, b, n, c); if (_r > (lim) / 255.0) { \
+    printf("FAIL %s:%d channel %d RMS %.2f/255 > %g/255\n", __FILE__, __LINE__, c, _r * 255, (double)(lim)); fails++; } } while (0)
+
+static void group_dxt_exact(void) {
+    static const uint32_t fmts[3] = { FMT_DXT1, FMT_DXT3, FMT_DXT5 };
+    float in[64], out[64];
+    uint8_t blk[16];
+    for (int f = 0; f < 3; f++) {
+        uint32_t fmt = fmts[f];
+        for (int i = 0; i < 16; i++) rgb(in + 4 * i, 20, 41, 9, 1);
+        dxt_round(fmt, in, blk, out);
+        CHECK(!memcmp(in, out, sizeof in));
+        uint32_t cb = fmt == FMT_DXT1 ? 0 : 8;                   /* equal endpoints: all-zero indices */
+        CHECKEQ((uint32_t)(blk[cb + 4] | blk[cb + 5] << 8 | blk[cb + 6] << 16 | (uint32_t)blk[cb + 7] << 24), 0);
+        for (int i = 0; i < 16; i++) rgb(in + 4 * i, i % 3 ? 20 : 3, i % 3 ? 41 : 60, i % 3 ? 9 : 28, 1);
+        dxt_round(fmt, in, blk, out);
+        if (memcmp(in, out, sizeof in)) printf("FAIL two colours, format 0x%08X\n", fmt), fails++;
+    }
+    for (int i = 0; i < 16; i++) rgb(in + 4 * i, 31, 0, 17, (float)(i & 1 || i == 6));
+    dxt_round(FMT_DXT5, in, blk, out);
+    CHECK(!memcmp(in, out, sizeof in));
+    for (int i = 0; i < 16; i++) rgb(in + 4 * i, 31, 0, 17, (float)((i * 7 % 16) * 17) / 255.0f);
+    dxt_round(FMT_DXT3, in, blk, out);
+    CHECK(!memcmp(in, out, sizeof in));
+}
+
+static void group_dxt_punch(void) {
+    float in[64], out[64];
+    uint8_t blk[8];
+    for (int i = 0; i < 16; i++) rgb(in + 4 * i, i & 2 ? 25 : 2, i & 2 ? 10 : 50, i & 2 ? 4 : 30, 1);
+    static const int clear[5] = { 0, 3, 5, 10, 15 };
+    for (int k = 0; k < 5; k++) in[4 * clear[k] + 3] = 0.2f;
+    dxt_round(FMT_DXT1, in, blk, out);
+    CHECK((blk[0] | blk[1] << 8) <= (blk[2] | blk[3] << 8));    /* the 3-colour mode */
+    for (int i = 0; i < 16; i++) {
+        int t = i == 0 || i == 3 || i == 5 || i == 10 || i == 15;
+        if (out[4 * i + 3] != (t ? 0.0f : 1.0f)) printf("FAIL texel %d alpha %g\n", i, out[4 * i + 3]), fails++;
+        if (!t && memcmp(in + 4 * i, out + 4 * i, 12)) printf("FAIL texel %d colour\n", i), fails++;
+    }
+    for (int i = 0; i < 16; i++) in[4 * i + 3] = 0;               /* all transparent */
+    dxt_round(FMT_DXT1, in, blk, out);
+    for (int i = 0; i < 16; i++) CHECK(out[4 * i + 3] == 0);
+}
+
+static void gradient(float *px, uint32_t w, uint32_t h, int alpha) {
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            float *o = px + 4 * (y * w + x);
+            o[0] = (float)x / (float)(w - 1), o[1] = (float)y / (float)(h - 1), o[2] = (float)(x + y) / (float)(w + h - 2);
+            o[3] = alpha ? (float)(w - 1 - x + y) / (float)(w + h - 2) : 1;
+        }
+}
+static void group_dxt_quality(void) {
+    uint32_t w = 64, h = 64;
+    float *in = malloc(16 * w * h), *out = malloc(16 * w * h);
+    uint8_t *blk = malloc(w * h);
+    gradient(in, w, h, 0);
+    d3dx_write(FMT_DXT1, in, w, h, blk, w / 4 * 8);
+    d3dx_read(FMT_DXT1, blk, w / 4 * 8, w, h, out);
+    for (int c = 0; c < 4; c++) CHECK_RMS(in, out, w * h, c, 6);
+    gradient(in, w, h, 1);
+    d3dx_write(FMT_DXT5, in, w, h, blk, w / 4 * 16);
+    d3dx_read(FMT_DXT5, blk, w / 4 * 16, w, h, out);
+    for (int c = 0; c < 3; c++) CHECK_RMS(in, out, w * h, c, 6);
+    CHECK_RMS(in, out, w * h, 3, 3);
+    free(in), free(out), free(blk);
+}
+
+/* A level of a texture (all its slices), decoded from its staging copy. */
+static float *level_px(uint32_t tex, uint32_t l, uint32_t *w, uint32_t *h, uint32_t *d) {
+    struct d3d_texture *t = d3d_tex(tex);
+    *w = t->w >> l ? t->w >> l : 1, *h = t->h >> l ? t->h >> l : 1, *d = t->d >> l ? t->d >> l : 1;
+    uint32_t p = d3d_format_pitch(t->f, *w), rows = d3d_format_rows(t->f, *h);
+    const uint8_t *m = hle_ptr(d3d_tex_mem(t, l));
+    float *o = malloc(16 * (size_t)*w * *h * *d);
+    for (uint32_t z = 0; z < *d; z++) d3dx_read(t->fmt, m + (size_t)z * p * rows, p, *w, *h, o + 4 * (size_t)z * *w * *h);
+    return o;
+}
+/* The box filter's next level of a w x h x d image, as the definition gives it. */
+static float *box_down(const float *s, uint32_t w, uint32_t h, uint32_t d) {
+    uint32_t dw = w > 1 ? w / 2 : 1, dh = h > 1 ? h / 2 : 1, dd = d > 1 ? d / 2 : 1;
+    float *o = calloc(4 * (size_t)dw * dh * dd, sizeof(float));
+    for (uint32_t z = 0; z < dd; z++)
+        for (uint32_t y = 0; y < dh; y++)
+            for (uint32_t x = 0; x < dw; x++) {
+                float *q = o + 4 * ((z * dh + y) * dw + x);
+                int n = 0;
+                for (uint32_t k = z * d / dd; k < (z + 1) * d / dd; k++)
+                    for (uint32_t j = y * h / dh; j < (y + 1) * h / dh; j++)
+                        for (uint32_t i = x * w / dw; i < (x + 1) * w / dw; i++, n++)
+                            for (int c = 0; c < 4; c++) q[c] += s[4 * ((k * h + j) * w + i) + c];
+                for (int c = 0; c < 4; c++) q[c] /= (float)n;
+            }
+    return o;
+}
+static void fill_surface(uint32_t surf, uint32_t w, uint32_t h, const float *px) {
+    uint32_t lr = gmem(8);
+    CHECKEQ(vcall(surf, SF_LockRect, 3, lr, 0u, 0u), 0);
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            const float *c = px + 4 * (y * w + x);
+            uint32_t v = 0;
+            for (int k = 0; k < 4; k++) v |= (uint32_t)lrintf(c[k] * 255) << (k == 3 ? 24 : 16 - 8 * k);
+            MEM32(MEM32(lr + 4) + y * MEM32(lr) + 4 * x) = v;
+        }
+    vcall(surf, SF_UnlockRect, 0);
+}
+/* What an A8R8G8B8 surface holds, as floats (the source as D3DX sees it). */
+static void quantize8(float *px, size_t n) { for (size_t i = 0; i < 4 * n; i++) px[i] = (float)lrintf(px[i] * 255) / 255.0f; }
+static uint32_t level_surface(uint32_t tex, uint32_t l) {
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(tex, TX_GetSurfaceLevel, 2, l, out), 0);
+    return MEM32(out);
+}
+/* A 512x512 DXT5 texture with 10 levels whose level 0 is loaded from a smooth A8R8G8B8 picture. Its
+ * colours lie near one line (a brightness picture with a little colour of its own), as a real
+ * texture's small levels do: a block of the 4x4 level holds the whole picture, and no DXT block comes
+ * within 67/255 RMS of a full-range two-colour gradient (measured by an exhaustive endpoint search). */
+static uint32_t dxt5_chain(float **src) {
+    uint32_t w = 512, out = gmem(4);
+    float *px = malloc(16 * w * w);
+    for (uint32_t y = 0; y < w; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            float *o = px + 4 * (y * w + x);
+            float l = 0.12f * sinf(x / 37.0f + y / 53.0f) + 0.08f * cosf(x / 61.0f);
+            o[0] = 0.45f + 0.8f * l + 0.03f * sinf(y / 29.0f), o[1] = 0.5f + l, o[2] = 0.35f + 0.6f * l + 0.03f * cosf(x / 43.0f);
+            o[3] = 0.3f + 0.5f * (float)(x + y) / 1022;
+        }
+    quantize8(px, (size_t)w * w);
+    uint32_t s = sys_surface(w, w, FMT_A8R8G8B8);
+    fill_surface(s, w, w, px);
+    CHECKEQ(call("D3DXCreateTexture", 8, device(), w, w, 10u, 0u, FMT_DXT5, POOL_MANAGED, out), 0);
+    uint32_t t = MEM32(out), desc = gmem(32);
+    vcall(t, TX_GetLevelDesc, 2, 0u, desc);
+    CHECKEQ(MEM32(desc), FMT_DXT5);
+    CHECKEQ(vcall(t, TX_GetLevelCount, 0), 10);
+    uint32_t d0 = level_surface(t, 0);
+    CHECKEQ(call("D3DXLoadSurfaceFromSurface", 8, d0, 0u, 0u, s, 0u, 0u, D3DX_FILTER_NONE, 0u), 0);
+    vcall(d0, 2, 0), vcall(s, 2, 0);
+    *src = px;
+    return t;
+}
+
+static void group_dxt_load_surface(void) {
+    float *px;
+    uint32_t t = dxt5_chain(&px), w, h, d;
+    float *got = level_px(t, 0, &w, &h, &d);
+    for (int c = 0; c < 3; c++) CHECK_RMS(px, got, (size_t)w * h, c, 6);
+    CHECK_RMS(px, got, (size_t)w * h, 3, 3);
+    free(got), free(px), vcall(t, 2, 0);
+    /* a 6x6 source into rects of a 16x16 DXT5 level that holds a smooth picture already */
+    float big[16 * 16 * 4], small[6 * 6 * 4];
+    for (int i = 0; i < 256; i++) {
+        float *o = big + 4 * i, x = (float)(i % 16), y = (float)(i / 16);
+        o[0] = 0.3f + 0.2f * x / 15, o[1] = 0.4f + 0.1f * y / 15, o[2] = 0.5f, o[3] = 0.6f + 0.2f * (x + y) / 30;
+    }
+    quantize8(big, 256);
+    for (int i = 0; i < 36; i++) {
+        float *o = small + 4 * i;
+        o[0] = 0.9f - 0.02f * (float)(i % 6), o[1] = 0.2f + 0.01f * (float)(i / 6), o[2] = 0.6f, o[3] = 0.8f;
+    }
+    quantize8(small, 36);
+    uint32_t sb = sys_surface(16, 16, FMT_A8R8G8B8), ss = sys_surface(6, 6, FMT_A8R8G8B8), out = gmem(4), r = gmem(16);
+    fill_surface(sb, 16, 16, big), fill_surface(ss, 6, 6, small);
+    static const uint32_t at[2][2] = { { 8, 8 }, { 2, 2 } };
+    for (int k = 0; k < 2; k++) {
+        CHECKEQ(call("D3DXCreateTexture", 8, device(), 16u, 16u, 1u, 0u, FMT_DXT5, POOL_MANAGED, out), 0);
+        uint32_t tx = MEM32(out), dl = level_surface(tx, 0);
+        CHECKEQ(call("D3DXLoadSurfaceFromSurface", 8, dl, 0u, 0u, sb, 0u, 0u, D3DX_FILTER_NONE, 0u), 0);
+        uint8_t before[256];
+        memcpy(before, hle_ptr(d3d_tex_mem(d3d_tex(tx), 0)), 256);
+        float *was = level_px(tx, 0, &w, &h, &d);
+        uint32_t x0 = at[k][0], y0 = at[k][1];
+        MEM32(r) = x0, MEM32(r + 4) = y0, MEM32(r + 8) = x0 + 6, MEM32(r + 12) = y0 + 6;
+        CHECKEQ(call("D3DXLoadSurfaceFromSurface", 8, dl, 0u, r, ss, 0u, 0u, D3DX_FILTER_NONE, 0u), 0);
+        const uint8_t *now = hle_ptr(d3d_tex_mem(d3d_tex(tx), 0));
+        float *is = level_px(tx, 0, &w, &h, &d), inr[36 * 4], gotr[36 * 4], outw[256 * 4], outg[256 * 4];
+        int nr = 0, no = 0;
+        for (uint32_t by = 0; by < 4; by++)
+            for (uint32_t bx = 0; bx < 4; bx++) {
+                int touched = bx * 4 < x0 + 6 && bx * 4 + 4 > x0 && by * 4 < y0 + 6 && by * 4 + 4 > y0;
+                int same = !memcmp(before + by * 64 + bx * 16, now + by * 64 + bx * 16, 16);
+                if (!touched && !same) printf("FAIL rect at (%u,%u): block (%u,%u) changed\n", x0, y0, bx, by), fails++;
+                for (uint32_t y = by * 4; touched && y < by * 4 + 4; y++)
+                    for (uint32_t x = bx * 4; x < bx * 4 + 4; x++) {
+                        int in = x >= x0 && x < x0 + 6 && y >= y0 && y < y0 + 6;
+                        if (in) memcpy(inr + 4 * nr, small + 4 * ((y - y0) * 6 + x - x0), 16), memcpy(gotr + 4 * nr++, is + 4 * (y * 16 + x), 16);
+                        else memcpy(outw + 4 * no, was + 4 * (y * 16 + x), 16), memcpy(outg + 4 * no++, is + 4 * (y * 16 + x), 16);
+                    }
+            }
+        CHECKEQ(nr, 36);
+        for (int c = 0; c < 4; c++) CHECK_RMS(inr, gotr, (size_t)nr, c, 6);
+        for (int c = 0; c < 4; c++) CHECK_RMS(outw, outg, (size_t)no, c, 6);
+        free(was), free(is), vcall(dl, 2, 0), vcall(tx, 2, 0);
+    }
+    vcall(sb, 2, 0), vcall(ss, 2, 0);
+}
+
+/* Each level from l0 on against the box filter of the decoded level above. */
+static void check_levels(uint32_t t, uint32_t l0, uint32_t l1, double lim) {
+    for (uint32_t l = l0; l <= l1; l++) {
+        uint32_t w, h, d, w1, h1, d1;
+        float *up = level_px(t, l - 1, &w, &h, &d), *got = level_px(t, l, &w1, &h1, &d1), *want = box_down(up, w, h, d);
+        for (int c = 0; c < 4; c++) {
+            double r = rms(want, got, (size_t)w1 * h1 * d1, c);
+            if (r > lim / 255.0) printf("FAIL level %u (%ux%ux%u) channel %d: RMS %.2f/255 > %g/255\n", l, w1, h1, d1, c, r * 255, lim), fails++;
+        }
+        free(up), free(got), free(want);
+    }
+}
+static void group_dxt_filter(void) {
+    float *px;
+    uint32_t t = dxt5_chain(&px);
+    free(px);
+    CHECKEQ(call("D3DXFilterTexture", 4, t, 0u, 0u, D3DX_FILTER_BOX), 0);
+    check_levels(t, 1, 9, 8);
+    vcall(t, 2, 0);
+}
+
+static void group_dxt_small_levels(void) {
+    /* the encoder pads a partial block from the level's own pixels and reads nothing past it */
+    static const uint32_t sizes[4][2] = { { 2, 2 }, { 1, 1 }, { 6, 5 }, { 1, 3 } };
+    for (int k = 0; k < 4; k++) {
+        uint32_t w = sizes[k][0], h = sizes[k][1], bw = (w + 3) / 4, bh = (h + 3) / 4;
+        float *in = guarded(16 * w * h), out[6 * 5 * 4];
+        for (uint32_t y = 0; y < h; y++)
+            for (uint32_t x = 0; x < w; x++) {
+                float *o = in + 4 * (y * w + x);
+                float s = (float)(x + 2 * y) / (float)(w + 2 * h);   /* a level this small varies little */
+                o[0] = 0.4f + 0.1f * s, o[1] = 0.3f + 0.05f * s, o[2] = 0.6f - 0.08f * s, o[3] = 0.5f + 0.1f * s;
+            }
+        uint8_t *blk = guarded(16 * bw * bh);
+        d3dx_write(FMT_DXT5, in, w, h, blk, 16 * bw);
+        d3dx_read(FMT_DXT5, blk, 16 * bw, w, h, out);
+        for (int c = 0; c < 4; c++) CHECK_RMS(in, out, (size_t)w * h, c, 8);
+        /* the padding: every texel of the blocks decodes near the level's last column and row */
+        float full[8 * 8 * 4], want[8 * 8 * 4];
+        d3dx_read(FMT_DXT5, blk, 16 * bw, 4 * bw, 4 * bh, full);
+        for (uint32_t y = 0; y < 4 * bh; y++)
+            for (uint32_t x = 0; x < 4 * bw; x++)
+                memcpy(want + 4 * (y * 4 * bw + x), in + 4 * ((y < h ? y : h - 1) * w + (x < w ? x : w - 1)), 16);
+        for (int c = 0; c < 4; c++) CHECK_RMS(want, full, (size_t)16 * bw * bh, c, 8);
+        /* DXT1: an opaque level stays opaque, padding and all (no 3-colour block) */
+        for (uint32_t i = 0; i < w * h; i++) in[4 * i + 3] = 1;
+        d3dx_write(FMT_DXT1, in, w, h, blk, 8 * bw);
+        d3dx_read(FMT_DXT1, blk, 8 * bw, 4 * bw, 4 * bh, full);
+        for (uint32_t i = 0; i < 16 * bw * bh; i++)
+            if (full[4 * i + 3] != 1) { printf("FAIL %ux%u DXT1: texel %u of the blocks is not opaque\n", w, h, i); fails++; break; }
+    }
+    float *px;
+    uint32_t t = dxt5_chain(&px);
+    free(px);
+    CHECKEQ(call("D3DXFilterTexture", 4, t, 0u, 0u, D3DX_FILTER_BOX), 0);
+    check_levels(t, 8, 9, 8);
+    vcall(t, 2, 0);
+    /* the volume: 128x128x4 DXT1, one level in the file, the whole chain made */
+    uint32_t n, p = file("vol_dxt1.dds", &n), out = gmem(4), desc = gmem(32);
+    CHECKEQ(call("D3DXCreateVolumeTextureFromFileInMemoryEx", 16, device(), p, n, D3DX_DEFAULT, D3DX_DEFAULT,
+                 D3DX_DEFAULT, 0u, 0u, D3DX_DEFAULT, POOL_MANAGED, D3DX_DEFAULT, D3DX_DEFAULT, 0u, 0u, 0u, out), 0);
+    uint32_t v = MEM32(out);
+    if (!v) return;
+    CHECKEQ(vcall(v, TX_GetLevelCount, 0), 8);
+    vcall(v, VT_GetLevelDesc, 2, 0u, desc);
+    CHECKEQ(MEM32(desc), FMT_DXT1);
+    uint32_t w, h, d;
+    float *top = level_px(v, 0, &w, &h, &d), avg[4] = { 0 };
+    CHECK(w == 128 && h == 128 && d == 4);
+    for (size_t i = 0; i < (size_t)w * h * d; i++) for (int c = 0; c < 4; c++) avg[c] += top[4 * i + c] / (float)(w * h * d);
+    float *last = level_px(v, 7, &w, &h, &d);
+    CHECK(w == 1 && h == 1 && d == 1);
+    for (int c = 0; c < 4; c++)
+        if (fabsf(last[c] - avg[c]) > 8 / 255.0f) printf("FAIL the 1x1x1 level, channel %d: %g, want %g\n", c, last[c], avg[c]), fails++;
+    check_levels(v, 1, 7, 8);
+    free(top), free(last), vcall(v, 2, 0);
+}
+
+/* The test in a child: 0 if it returned, else its exit status (134 for abort); stderr in out. */
+static int in_child(void (*fn)(void), char *out, size_t n) {
+    fflush(stdout), fflush(stderr);
+    int p[2];
+    if (pipe(p) != 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(p[0]);
+        dup2(p[1], 2);
+        close(p[1]);
+        struct sigaction sa = { 0 };
+        sa.sa_handler = _exit;
+        sigaction(SIGABRT, &sa, NULL);
+        fn();
+        fflush(stderr);
+        _exit(0);
+    }
+    close(p[1]);
+    size_t k = 0;
+    for (ssize_t r; k + 1 < n && (r = read(p[0], out + k, n - 1 - k)) > 0; ) k += (size_t)r;
+    out[k] = 0;
+    close(p[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    return WIFEXITED(st) ? (WEXITSTATUS(st) == SIGABRT ? 134 : WEXITSTATUS(st)) : -1;
+}
+static void into_dxt2(void) {
+    uint32_t out = gmem(4), src = sys_surface(4, 4, FMT_A8R8G8B8);
+    if (call("D3DXCreateTexture", 8, device(), 4u, 4u, 1u, 0u, FMT_DXT2, POOL_MANAGED, out)) return;
+    uint32_t t = MEM32(out), desc = gmem(32);
+    vcall(t, TX_GetLevelDesc, 2, 0u, desc);
+    if (MEM32(desc) != FMT_DXT2) { fprintf(stderr, "the texture is 0x%08X, not DXT2\n", MEM32(desc)); return; }
+    call("D3DXLoadSurfaceFromSurface", 8, level_surface(t, 0), 0u, 0u, src, 0u, 0u, D3DX_FILTER_NONE, 0u);
+}
+static void encode_dxt4(void) {
+    float in[64] = { 0 };
+    uint8_t blk[16];
+    d3dx_dxt_encode(FMT_DXT4, in, blk);
+}
+static void group_dxt_unsupported(void) {
+    static const struct { void (*fn)(void); const char *want; } cases[] = {
+        { into_dxt2, "DXT2" }, { encode_dxt4, "DXT4" } };
+    for (int i = 0; i < 2; i++) {
+        char out[4096];
+        int st = in_child(cases[i].fn, out, sizeof out);
+        if (st == 0 || !strstr(out, "[bw2] FATAL") || !strstr(out, cases[i].want))
+            printf("FAIL %s: status %d, want a stop naming it; stderr:\n%s\n", cases[i].want, st, out), fails++;
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: d3dx_selftest <group> [args]\n"); return 2; }
     hle_mem_init();
@@ -508,7 +868,10 @@ int main(int argc, char **argv) {
     static const struct { const char *name; void (*fn)(void); } groups[] = {
         { "dds", group_dds }, { "tga_bmp_png", group_tga_bmp_png }, { "convert", group_convert },
         { "filter", group_filter }, { "fill", group_fill }, { "save", group_save }, { "colorkey", group_colorkey },
-        { "malformed", group_malformed } };
+        { "malformed", group_malformed }, { "dxt_exact", group_dxt_exact }, { "dxt_punch", group_dxt_punch },
+        { "dxt_quality", group_dxt_quality }, { "dxt_load_surface", group_dxt_load_surface },
+        { "dxt_filter", group_dxt_filter }, { "dxt_small_levels", group_dxt_small_levels },
+        { "dxt_unsupported", group_dxt_unsupported } };
     if (!strcmp(argv[1], "math") && argc > 2) group_math(argv[2]);
     else {
         unsigned i = 0;

@@ -26,7 +26,12 @@ enum { IFF_BMP, IFF_JPG, IFF_TGA, IFF_PNG, IFF_DDS, IFF_PPM, IFF_DIB, IFF_HDR, I
 uint32_t d3dx_buffer_new(uint32_t size);              /* an ID3DXBuffer of size zeroed bytes */
 uint32_t d3dx_buffer_ptr(uint32_t buf);
 
-/* d3dx_pixel.c: pixels as float RGBA. Formats are D3DFORMATs (including R8G8B8 and DXT1-5 to read). */
+/* d3dx_dxt.c (plan 10 Task 3): one 4x4 block, 16 texels of RGBA in [0, 1] in row order, into 8 bytes
+ * (DXT1) or 16 (DXT3, DXT5). DXT2 and DXT4 (premultiplied) stop loudly. */
+void d3dx_dxt_encode(uint32_t fmt, const float rgba[64], uint8_t *block);
+
+/* d3dx_pixel.c: pixels as float RGBA. Formats are D3DFORMATs (including R8G8B8; DXT1-5 are read,
+ * and DXT1, DXT3 and DXT5 written through d3dx_dxt.c with pitch the block-row pitch). */
 int d3dx_can_read(uint32_t fmt);
 int d3dx_can_write(uint32_t fmt);
 uint32_t d3dx_bytes(uint32_t fmt);                     /* per pixel, or per 4x4 block */

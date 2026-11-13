@@ -1,7 +1,8 @@
 /*
  * d3dx_pixel.c - pixels in D3D formats as float RGBA (plan 4 Task 9). Every
  * format of the device's table is read and written, plus R8G8B8 (files);
- * DXT1-5 are read (decoded) but not written: D3DX's compressor is not here.
+ * DXT1-5 are read (decoded), and DXT1, DXT3 and DXT5 written through
+ * d3dx_dxt.c (plan 10 Task 3; DXT2 and DXT4 stop loudly there).
  * Channels a format lacks read as D3D gives them (0 for colour, 1 for alpha
  * and the missing ones of L, R and RG formats).
  */
@@ -22,7 +23,7 @@ int d3dx_can_read(uint32_t fmt) {
     const struct d3d_format *f = d3d_format(fmt);
     return fmt == FMT_R8G8B8 || (f && !(f->use & FU_DS));
 }
-int d3dx_can_write(uint32_t fmt) { return d3dx_can_read(fmt) && d3dx_block(fmt) == 1; }
+int d3dx_can_write(uint32_t fmt) { return d3dx_can_read(fmt); }   /* DXT2 and DXT4 reach the encoder's stop */
 uint32_t d3dx_pitch(uint32_t fmt, uint32_t w) {
     return d3dx_block(fmt) == 4 ? (w + 3) / 4 * d3dx_bytes(fmt) : w * d3dx_bytes(fmt);
 }
@@ -211,6 +212,19 @@ void d3dx_read(uint32_t fmt, const uint8_t *src, uint32_t pitch, uint32_t w, uin
 }
 void d3dx_write(uint32_t fmt, const float *in, uint32_t w, uint32_t h, uint8_t *dst, uint32_t pitch) {
     uint32_t bpp = d3dx_bytes(fmt);
+    if (d3dx_block(fmt) == 4) {                            /* a partial edge block repeats the last column and row */
+        float blk[64];
+        for (uint32_t by = 0; by < (h + 3) / 4; by++)
+            for (uint32_t bx = 0; bx < (w + 3) / 4; bx++) {
+                for (uint32_t y = 0; y < 4; y++)
+                    for (uint32_t x = 0; x < 4; x++) {
+                        uint32_t sx = bx * 4 + x < w ? bx * 4 + x : w - 1, sy = by * 4 + y < h ? by * 4 + y : h - 1;
+                        memcpy(blk + 4 * (y * 4 + x), in + 4 * ((size_t)sy * w + sx), 16);
+                    }
+                d3dx_dxt_encode(fmt, blk, dst + by * pitch + bx * bpp);
+            }
+        return;
+    }
     for (uint32_t y = 0; y < h; y++)
         for (uint32_t x = 0; x < w; x++) write_px(fmt, in + 4 * (y * w + x), dst + y * pitch + x * bpp);
 }

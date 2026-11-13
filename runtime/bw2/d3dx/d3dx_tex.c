@@ -126,21 +126,30 @@ static void colorkey(float *px, uint32_t n, uint32_t key) {
         if (argb8(px + 4 * i) == key) memset(px + 4 * i, 0, 16);
 }
 
-/* Convert src (fmt, D3D layout, its rect) into the dst rect of a surface-shaped buffer of fmt dfmt. */
+/* The block-aligned box of a dst rect in a dw_all x dh_all level, clipped to the level. */
+static struct box2 block_box(const struct box2 *dr, uint32_t dw_all, uint32_t dh_all) {
+    struct box2 b = { dr->l & ~3u, dr->t & ~3u, (dr->r + 3) & ~3u, (dr->b + 3) & ~3u };
+    if (b.r > dw_all) b.r = dw_all;
+    if (b.b > dh_all) b.b = dh_all;
+    return b;
+}
+/* Convert src (fmt, D3D layout, its rect) into the dst rect of a surface-shaped buffer of fmt dfmt,
+ * dw_all x dh_all. Into DXT: the same blocks unscaled are copied; anything else is decoded, scaled and
+ * encoded, and a rect that does not cover whole blocks merges into the blocks it touches. */
 static uint32_t convert(uint32_t sfmt, const uint8_t *src, uint32_t spitch, uint32_t sw, uint32_t sh, const struct box2 *sr,
-                        uint32_t dfmt, uint8_t *dst, uint32_t dpitch, const struct box2 *dr, uint32_t filter, uint32_t key) {
+                        uint32_t dfmt, uint8_t *dst, uint32_t dpitch, uint32_t dw_all, uint32_t dh_all,
+                        const struct box2 *dr, uint32_t filter, uint32_t key) {
     uint32_t dw = dr->r - dr->l, dh = dr->b - dr->t, bs = (uint32_t)d3dx_block(dfmt);
-    if (!d3dx_can_read(sfmt)) return D3DERR_INVALIDCALL;
-    if (bs == 4) {                                         /* into DXT: only the same blocks, unscaled */
-        if (sfmt != dfmt || sr->r - sr->l != dw || sr->b - sr->t != dh || (sr->l | sr->t | dr->l | dr->t) & 3)
-            dx_fail("compressing into DXT is not supported");
+    if (!d3dx_can_read(sfmt) || !d3dx_can_write(dfmt)) return D3DERR_INVALIDCALL;
+    struct box2 bb = bs == 4 ? block_box(dr, dw_all, dh_all) : *dr;
+    int whole = bb.l == dr->l && bb.t == dr->t && bb.r == dr->r && bb.b == dr->b;
+    if (bs == 4 && sfmt == dfmt && whole && !key && sr->r - sr->l == dw && sr->b - sr->t == dh && !((sr->l | sr->t) & 3)) {
         uint32_t rows = (dh + 3) / 4, bytes = (dw + 3) / 4 * d3dx_bytes(dfmt);
         for (uint32_t y = 0; y < rows; y++)
             memcpy(dst + (dr->t / 4 + y) * dpitch + dr->l / 4 * d3dx_bytes(dfmt),
                    src + (sr->t / 4 + y) * spitch + sr->l / 4 * d3dx_bytes(sfmt), bytes);
         return D3D_OK;
     }
-    if (!d3dx_can_write(dfmt)) return D3DERR_INVALIDCALL;
     float *s = malloc(sizeof(float) * 4 * sw * sh), *d = malloc(sizeof(float) * 4 * dw * dh);
     d3dx_read(sfmt, src, spitch, sw, sh, s);
     colorkey(s, sw * sh, key);
@@ -149,7 +158,17 @@ static uint32_t convert(uint32_t sfmt, const uint8_t *src, uint32_t spitch, uint
     resample(s, sw, sh, sr, d, dw, dh, filter);
     if (filter != D3DX_DEFAULT && (filter & D3DX_FILTER_SRGB_OUT))
         for (uint32_t i = 0; i < dw * dh; i++) for (int c = 0; c < 3; c++) d[4 * i + c] = lin_to_srgb(d[4 * i + c]);
-    d3dx_write(dfmt, d, dw, dh, dst + dr->t * dpitch + dr->l * d3dx_bytes(dfmt), dpitch);
+    if (bs == 1 || whole) d3dx_write(dfmt, d, dw, dh, dst + dr->t / bs * dpitch + dr->l / bs * d3dx_bytes(dfmt), dpitch);
+    else {                                                 /* decode the touched blocks, merge, encode them again */
+        uint32_t mw = bb.r - bb.l, mh = bb.b - bb.t;
+        uint8_t *at = dst + bb.t / 4 * dpitch + bb.l / 4 * d3dx_bytes(dfmt);
+        float *m = malloc(sizeof(float) * 4 * mw * mh);
+        d3dx_read(dfmt, at, dpitch, mw, mh, m);
+        for (uint32_t y = 0; y < dh; y++)
+            memcpy(m + 4 * ((size_t)(dr->t - bb.t + y) * mw + dr->l - bb.l), d + 4 * (size_t)y * dw, 16 * (size_t)dw);
+        d3dx_write(dfmt, m, mw, mh, at, dpitch);
+        free(m);
+    }
     free(s), free(d);
     return D3D_OK;
 }
@@ -181,19 +200,18 @@ static void sub_upload(struct d3d_texture *t, uint32_t sub) {
 static void make_mip(struct d3d_texture *t, uint32_t face, uint32_t l, uint32_t filter) {
     uint32_t sw = dim(t->w, l - 1), sh = dim(t->h, l - 1), sd = dim(t->d, l - 1);
     uint32_t dw = dim(t->w, l), dh = dim(t->h, l), dd = dim(t->d, l), fmt = t->fmt;
-    if (d3dx_block(fmt) == 4) dx_fail("making DXT mip levels needs a compressor (not supported)");
     const uint8_t *src = sub_bytes(t, face * t->levels + l - 1);
     uint8_t *dst = hle_ptr(d3d_tex_mem(t, face * t->levels + l));
-    uint32_t sp = d3dx_pitch(fmt, sw), dp = d3dx_pitch(fmt, dw);
+    uint32_t sp = d3dx_pitch(fmt, sw), dp = d3dx_pitch(fmt, dw), ss = sp * d3dx_rows(fmt, sh), ds = dp * d3dx_rows(fmt, dh);
     float *s = malloc(sizeof(float) * 4 * sw * sh * sd), *d = malloc(sizeof(float) * 4 * dw * dh);
-    for (uint32_t z = 0; z < sd; z++) d3dx_read(fmt, src + z * sp * sh, sp, sw, sh, s + 4 * (size_t)z * sw * sh);
+    for (uint32_t z = 0; z < sd; z++) d3dx_read(fmt, src + z * ss, sp, sw, sh, s + 4 * (size_t)z * sw * sh);
     struct box2 r = { 0, 0, sw, sh };
     for (uint32_t z = 0; z < dd; z++) {
         float *slice = s + 4 * (size_t)(sd > 1 ? 2 * z : 0) * sw * sh;
         if (sd > 1 && 2 * z + 1 < sd)                      /* a volume: average the two slices first */
             for (uint32_t i = 0; i < 4 * sw * sh; i++) slice[i] = (slice[i] + slice[i + 4 * sw * sh]) / 2;
         resample(slice, sw, sh, &r, d, dw, dh, filter == D3DX_DEFAULT ? D3DX_FILTER_BOX : filter);
-        d3dx_write(fmt, d, dw, dh, dst + z * dp * dh, dp);
+        d3dx_write(fmt, d, dw, dh, dst + z * ds, dp);
     }
     free(s), free(d);
     sub_upload(t, face * t->levels + l);
@@ -261,7 +279,8 @@ static uint32_t from_image(uint32_t dev, const struct d3dx_image *im, uint32_t r
                 for (uint32_t z = 0; z < slices; z++) {
                     struct box2 sr = { 0, 0, iw, ih }, dr = { 0, 0, lw, lh };
                     hr = convert(im->fmt, src + z * sp * d3dx_rows(im->fmt, ih), sp, iw, ih, &sr, fmt,
-                                 dst + z * dp * d3d_format_rows(t->f, lh), dp, &dr, have && iw == lw ? D3DX_FILTER_NONE : filter, key);
+                                 dst + z * dp * d3d_format_rows(t->f, lh), dp, lw, lh, &dr,
+                                 have && iw == lw ? D3DX_FILTER_NONE : filter, key);
                     if (hr) { d3d_release(tex); return hr; }
                 }
                 sub_upload(t, sub);
@@ -363,8 +382,10 @@ static uint32_t load_surface(uint32_t dsurf, uint32_t drect, uint32_t sfmt, cons
     if (!rect_of(drect, s->w, s->h, &dr)) return D3DERR_INVALIDCALL;
     int partial = dr.l || dr.t || dr.r != s->w || dr.b != s->h;
     if (partial && s->tex && !s->parent && (s->type_usage & D3DUSAGE_RENDERTARGET)) d3d_surface_download(s);
-    uint32_t hr = convert(sfmt, src, spitch, sw, sh, sr, s->fmt, hle_ptr(d3d_surface_mem(s)), s->pitch, &dr, filter, key);
+    uint32_t hr = convert(sfmt, src, spitch, sw, sh, sr, s->fmt, hle_ptr(d3d_surface_mem(s)), s->pitch, s->w, s->h, &dr,
+                          filter, key);
     if (hr) return hr;
+    if (s->f->block == 4) dr = block_box(&dr, s->w, s->h);  /* the blocks written, whole (a GPU copy of BC is per block) */
     struct d3d_rect r = { (int32_t)dr.l, (int32_t)dr.t, (int32_t)dr.r, (int32_t)dr.b };
     d3d_surface_upload(s, &r);
     return D3D_OK;
@@ -440,7 +461,6 @@ static void fill(struct d3d_texture *t, uint32_t face, uint32_t fn, uint32_t dat
                 gcall(fn, 4, a);
                 memcpy(px + 4 * (y * w + x), hle_ptr(out), 16);
             }
-        if (d3dx_block(t->fmt) == 4) dx_fail("filling a DXT texture needs a compressor (not supported)");
         d3dx_write(t->fmt, px, w, h, hle_ptr(d3d_tex_mem(t, sub)), d3d_format_pitch(t->f, w));
         free(px);
         sub_upload(t, sub);
