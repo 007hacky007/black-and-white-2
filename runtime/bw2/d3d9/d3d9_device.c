@@ -264,10 +264,12 @@ static void frame_log(struct d3d_device *d, struct d3d_surface *bb) {
 }
 
 void bw2_movie_present(void);           /* video/binkw32.c: BW2_QUIT_AFTER_MOVIE counts Presents */
+void bw2_frame_dump(struct d3d_device *d, struct d3d_surface *bb);   /* frame_dump.m: BW2_FRAME_DUMP */
 static void present_bb(struct d3d_device *d, uint32_t bbobj) {
     struct d3d_surface *bb = d3d_surf(bbobj);
     mtl_present(d->mtl, bb->tex);
     if (frame_log_on()) frame_log(d, bb);
+    bw2_frame_dump(d, bb);
     bw2_movie_present();
     d3d_bind(&d->last_presented, bbobj);
 }

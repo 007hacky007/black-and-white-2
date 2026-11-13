@@ -2115,7 +2115,7 @@ static void group_draw_count(void) {
     vcall(vb, 2, 0), vcall(ib, 2, 0);
 }
 
-/* ---- Plan 10 Task 7: uploads during a long load ---- */
+/* ---- Plan 10 Task 7: uploads during a long load, and the frame dump ---- */
 
 static const char *g_arg;                                    /* the group's argument (argv[2]), or NULL */
 
@@ -2201,8 +2201,27 @@ static void group_mtl_upload_bound(void) {
     free(px);
 }
 
+/* BW2_FRAME_DUMP=<dir>:2 (tests/test_d3d9.py sets it and reads the files): four Presents of a cleared 64x48 back
+ * buffer, red, green (an 8x8 red corner), blue, white (an 8x8 blue corner); the 2nd and 4th are written. Each
+ * Present is announced on stdout first, so a stop shows which Present made it. */
+static void group_frame_dump(void) {
+    uint32_t dev = new_device(64, 48);
+    uint32_t n = g_arg ? (uint32_t)strtoul(g_arg, NULL, 0) : 4;
+    static const uint32_t col[4] = { 0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFFFFu };
+    static const uint32_t corner[4] = { 0, 0xFFFF0000u, 0, 0xFF0000FFu };
+    for (uint32_t i = 0; i < n; i++) {
+        CHECKEQ(vcall(dev, DV_Clear, 6, 0u, 0u, CLEAR_TARGET, col[i % 4], f32(1.0f), 0u), D3D_OK);
+        if (corner[i % 4])
+            CHECKEQ(vcall(dev, DV_Clear, 6, 1u, rect(0, 0, 8, 8), CLEAR_TARGET, corner[i % 4], f32(1.0f), 0u), D3D_OK);
+        printf("frame_dump: present %u\n", i + 1);
+        fflush(stdout);
+        CHECKEQ(vcall(dev, DV_Present, 4, 0u, 0u, 0u, 0u), D3D_OK);
+    }
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
     { "mtl_upload_flood", group_mtl_upload_flood }, { "mtl_upload_bound", group_mtl_upload_bound },
+    { "frame_dump", group_frame_dump },
     { "draw_count", group_draw_count },
     { "display_mode", group_display_mode },
     { "frame_log", group_frame_log },
