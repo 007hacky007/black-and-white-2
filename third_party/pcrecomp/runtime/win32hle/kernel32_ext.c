@@ -343,11 +343,28 @@ static void k_GetFileInformationByHandle(void) {         /* (h, &BY_HANDLE_FILE_
     RET(1, 2);
 }
 
+/* The error for a guest name that is not there: ERROR_PATH_NOT_FOUND when the
+ * folder holding it is missing too, ERROR_FILE_NOT_FOUND when only the name is,
+ * as Windows answers GetFileAttributesA and FindFirstFileA (measured on
+ * Windows 11, NTFS). */
+static uint32_t not_found(const char *guest) {
+    char dir[1024], host[1024];
+    struct stat st;
+    const char *e = guest ? guest + strlen(guest) : NULL;
+    if (!e) return ERROR_FILE_NOT_FOUND;
+    while (e > guest && (e[-1] == '\\' || e[-1] == '/')) e--;
+    while (e > guest && e[-1] != '\\' && e[-1] != '/' && e[-1] != ':') e--;
+    if (e == guest) return ERROR_FILE_NOT_FOUND;            /* a name in the current folder */
+    snprintf(dir, sizeof dir, "%.*s", (int)(e - guest), guest);
+    if (hle_host_path(dir, host, sizeof host) && stat(host, &st) == 0 && S_ISDIR(st.st_mode)) return ERROR_FILE_NOT_FOUND;
+    return ERROR_PATH_NOT_FOUND;
+}
+
 static void k_GetFileAttributesA(void) {
     char path[1024];
     struct stat st;
     if (!hle_host_path(ASTR(0), path, sizeof path) || stat(path, &st) != 0) {
-        hle_set_last_error(ERROR_FILE_NOT_FOUND);
+        hle_set_last_error(not_found(ASTR(0)));
         RET(0xFFFFFFFFu, 1);
     }
     RET(attrs_of(&st), 1);
