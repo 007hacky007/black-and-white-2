@@ -1399,6 +1399,274 @@ static void group_fx_game_render(const char *dir) {
     printf("render totals: techniques %u valid %u passes %u drawn %u\n", techs, valid, passes, drawn);
 }
 
+/* ---- plan 10 Task 4: parameter blocks (Ruling 10), on test_effects.py's params_effect ---- */
+
+static uint64_t serial_of(uint32_t e, uint32_t h) { return *fx_param_of(fx_effect_of(e), h)->serial; }
+static uint32_t new_texture(uint32_t dev) {
+    uint32_t to = gmem(4);
+    CHECKEQ(vcall(dev, 23, 8, 4u, 4u, 1u, 0u, 21u, 1u, to, 0u), D3D_OK);        /* CreateTexture, managed */
+    return MEM32(to);
+}
+static float get_f(uint32_t e, uint32_t h) {
+    uint32_t out = gmem(4);
+    CHECKEQ(vcall(e, FX_GetFloat, 2, h, out), D3D_OK);
+    return gf(out);
+}
+static uint32_t get_tex(uint32_t e, uint32_t h) {     /* GetTexture, without keeping its reference */
+    uint32_t out = gmem(4);
+    MEM32(out) = 0xCDCDCDCDu;
+    CHECKEQ(vcall(e, FX_GetTexture, 2, h, out), D3D_OK);
+    if (MEM32(out)) vcall(MEM32(out), 2, 0);
+    return MEM32(out);
+}
+
+/* while a block records, the setters write only into it; Apply writes the records in order and marks them */
+static void group_fx_block_record(const char *path) {
+    uint32_t dev = new_device(), live0 = d3d_live_count();
+    uint32_t e = create_file(dev, path, 0), tex = new_texture(dev);
+    if (!e) return;
+    uint32_t a = byname(e, "f"), t = byname(e, "t");
+    CHECKEQ(vcall(e, FX_SetFloat, 2, a, f2u(1)), D3D_OK);
+    uint64_t sa = serial_of(e, a), st = serial_of(e, t);
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetFloat, 2, a, f2u(2)), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetFloat, 2, a, f2u(3)), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetTexture, 2, t, tex), D3D_OK);
+    CHECKF(get_f(e, a), 1), CHECKEQ(get_tex(e, t), 0);                 /* still the values from before Begin */
+    uint32_t blk = vcall(e, FX_EndParameterBlock, 0);
+    CHECK(blk != 0);
+    CHECKF(get_f(e, a), 1), CHECKEQ(get_tex(e, t), 0);
+    CHECKEQ(serial_of(e, a), sa), CHECKEQ(serial_of(e, t), st);        /* no dirty mark while recording */
+    CHECKEQ(vcall(e, FX_SetFloat, 2, a, f2u(5)), D3D_OK);
+    uint64_t sa5 = serial_of(e, a);
+    CHECK(sa5 != sa);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, blk), D3D_OK);
+    CHECKF(get_f(e, a), 3), CHECKEQ(get_tex(e, t), tex);
+    CHECK(serial_of(e, a) != sa5), CHECK(serial_of(e, t) != st);       /* a new dirty serial for both */
+    CHECKEQ(vcall(e, FX_SetFloat, 2, a, f2u(5)), D3D_OK);
+    CHECKF(get_f(e, a), 5);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, blk), D3D_OK);         /* the block is kept */
+    CHECKF(get_f(e, a), 3), CHECKEQ(get_tex(e, t), tex);
+    /* an empty block has a handle, and applying it gives D3DERR_INVALIDCALL (as Wine's d3dx9 does) */
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    uint32_t empty = vcall(e, FX_EndParameterBlock, 0);
+    CHECK(empty != 0 && empty != blk);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, empty), D3DERR_INVALIDCALL);
+    CHECKF(get_f(e, a), 3);
+    CHECKEQ(vcall(e, FX_Release, 0), 0);
+    CHECKEQ(vcall(tex, 2, 0), 0);
+    CHECKEQ(d3d_live_count(), live0);
+    vcall(dev, 2, 0);
+}
+
+/* a set of fewer elements composes with the bytes the record started from */
+static void group_fx_block_partial(const char *path) {
+    uint32_t dev = new_device();
+    uint32_t e = create_file(dev, path, 0), out = gmem(16);
+    if (!e) return;
+    uint32_t v = byname(e, "v");
+    CHECKEQ(vcall(e, FX_SetFloatArray, 3, v, gbytes((float[4]){ 1, 2, 3, 4 }, 16), 4u), D3D_OK);
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetFloatArray, 3, v, gbytes((float[1]){ 9 }, 4), 1u), D3D_OK);
+    uint32_t blk = vcall(e, FX_EndParameterBlock, 0);
+    CHECKEQ(vcall(e, FX_GetFloatArray, 3, v, out, 4u), D3D_OK);
+    CHECKF(gf(out), 1), CHECKF(gf(out + 4), 2), CHECKF(gf(out + 8), 3), CHECKF(gf(out + 12), 4);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, blk), D3D_OK);
+    CHECKEQ(vcall(e, FX_GetFloatArray, 3, v, out, 4u), D3D_OK);
+    CHECKF(gf(out), 9), CHECKF(gf(out + 4), 2), CHECKF(gf(out + 8), 3), CHECKF(gf(out + 12), 4);
+    /* two partial sets in one block: the second starts from the first's record */
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetFloatArray, 3, v, gbytes((float[2]){ 7, 8 }, 8), 2u), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetFloatArray, 3, v, gbytes((float[1]){ 6 }, 4), 1u), D3D_OK);
+    uint32_t b2 = vcall(e, FX_EndParameterBlock, 0);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, b2), D3D_OK);
+    CHECKEQ(vcall(e, FX_GetFloatArray, 3, v, out, 4u), D3D_OK);
+    CHECKF(gf(out), 6), CHECKF(gf(out + 4), 8), CHECKF(gf(out + 8), 3), CHECKF(gf(out + 12), 4);
+    CHECKEQ(vcall(e, FX_Release, 0), 0);
+    vcall(dev, 2, 0);
+}
+
+/* a record holds its texture; the live slot takes its own reference at Apply; the effect's end releases both */
+static void group_fx_block_refs(const char *path) {
+    uint32_t dev = new_device(), live0 = d3d_live_count();
+    uint32_t e = create_file(dev, path, 0), tex = new_texture(dev), tex2 = new_texture(dev);
+    if (!e) return;
+    uint32_t t = byname(e, "t");
+    uint32_t r0 = refs(tex);
+    CHECKEQ(r0, 1);
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetTexture, 2, t, tex), D3D_OK);
+    CHECKEQ(refs(tex), r0 + 1);                                         /* the record's */
+    CHECKEQ(get_tex(e, t), 0);                                          /* the live slot is untouched */
+    uint32_t blk = vcall(e, FX_EndParameterBlock, 0);
+    CHECKEQ(refs(tex), r0 + 1);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, blk), D3D_OK);
+    CHECKEQ(refs(tex), r0 + 2);                                         /* and the live slot's */
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, blk), D3D_OK);         /* the same texture: no new one */
+    CHECKEQ(refs(tex), r0 + 2);
+    /* a live texture under a recording: the record's copy holds it, a set in the record swaps on the record */
+    CHECKEQ(vcall(e, FX_SetTexture, 2, t, tex2), D3D_OK);
+    CHECKEQ(refs(tex), r0 + 1), CHECKEQ(refs(tex2), 2);
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetTexture, 2, t, 0u), D3D_OK);                /* records NULL: tex2 keeps the live one */
+    CHECKEQ(refs(tex2), 2), CHECKEQ(get_tex(e, t), tex2);
+    CHECKEQ(vcall(e, FX_SetValue, 3, t, gbytes((uint32_t[1]){ tex }, 4), 4u), D3D_OK);
+    CHECKEQ(refs(tex), r0 + 2), CHECKEQ(refs(tex2), 2);                /* a second record, naming tex */
+    uint32_t b2 = vcall(e, FX_EndParameterBlock, 0);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, b2), D3D_OK);          /* NULL, then tex, into the live slot */
+    CHECKEQ(get_tex(e, t), tex);
+    CHECKEQ(refs(tex2), 1), CHECKEQ(refs(tex), r0 + 3);
+    CHECKEQ(vcall(e, FX_Release, 0), 0);
+    CHECKEQ(refs(tex), r0), CHECKEQ(refs(tex2), 1);
+    CHECKEQ(vcall(tex, 2, 0), 0), CHECKEQ(vcall(tex2, 2, 0), 0);
+    CHECKEQ(d3d_live_count(), live0);
+    vcall(dev, 2, 0);
+}
+
+/* two blocks on one effect each apply their own values; block handles are not parameter handles */
+static void group_fx_block_two(const char *path) {
+    uint32_t dev = new_device();
+    uint32_t e = create_file(dev, path, 0), out = gmem(16);
+    if (!e) return;
+    uint32_t a = byname(e, "f"), i = byname(e, "i");
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetFloat, 2, a, f2u(10)), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetInt, 2, i, 11u), D3D_OK);
+    uint32_t b1 = vcall(e, FX_EndParameterBlock, 0);
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetFloat, 2, a, f2u(20)), D3D_OK);
+    uint32_t b2 = vcall(e, FX_EndParameterBlock, 0);
+    CHECK(b1 != 0 && b2 != 0 && b1 != b2);
+    struct fx_effect *x = fx_effect_of(e);
+    for (uint32_t k = 0; k < x->nparams; k++) {
+        CHECK(x->params[k].handle != b1 && x->params[k].handle != b2);
+        for (uint32_t m = 0; m < (x->params[k].elements ? x->params[k].elements : x->params[k].nmembers); m++)
+            CHECK(x->params[k].members[m].handle != b1 && x->params[k].members[m].handle != b2);
+    }
+    CHECK(fx_param_of(x, b1) == NULL && fx_param_of(x, b2) == NULL);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, b2), D3D_OK);
+    CHECKF(get_f(e, a), 20);
+    CHECKEQ(vcall(e, FX_GetInt, 2, i, out), D3D_OK), CHECKEQ(MEM32(out), 7);   /* b2 left i alone */
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, b1), D3D_OK);
+    CHECKF(get_f(e, a), 10);
+    CHECKEQ(vcall(e, FX_GetInt, 2, i, out), D3D_OK), CHECKEQ(MEM32(out), 11);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, b2), D3D_OK);
+    CHECKF(get_f(e, a), 20);
+    CHECKEQ(vcall(e, FX_GetInt, 2, i, out), D3D_OK), CHECKEQ(MEM32(out), 11);
+    CHECKEQ(vcall(e, FX_Release, 0), 0);
+    vcall(dev, 2, 0);
+}
+
+/* every setter records: the live value and its serial stay until Apply, which gives what each set wrote */
+static void group_fx_block_setters(const char *path, const char *mpath) {
+    uint32_t dev = new_device(), live0 = d3d_live_count();
+    uint32_t e = create_file(dev, path, 0), out = gmem(256), v4 = gmem(16), m = gmem(128), mp = gmem(8);
+    if (!e) return;
+    static const char *const names[] = { "b", "i", "f", "v", "v3", "m", "s", "arr", "str", "fa" };
+    uint32_t h[10];
+    uint64_t ser[10];
+    uint8_t before[10][64];
+    for (int k = 0; k < 10; k++) {
+        h[k] = byname(e, names[k]);
+        ser[k] = serial_of(e, h[k]);
+        memcpy(before[k], fx_param_of(fx_effect_of(e), h[k])->data, fx_param_of(fx_effect_of(e), h[k])->bytes);
+    }
+    for (int k = 0; k < 4; k++) MEM32(v4 + 4 * k) = f2u(10.0f + (float)k);
+    for (int k = 0; k < 32; k++) MEM32(m + 4 * k) = f2u(100.0f + (float)k);
+    CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetBool, 2, h[0], 0u), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetInt, 2, h[1], 42u), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetFloat, 2, h[2], f2u(-6)), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetVector, 2, h[3], v4), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetInt, 2, h[4], 0x00FF0000u), D3D_OK);        /* a colour on a float3 */
+    CHECKEQ(vcall(e, FX_SetMatrixTranspose, 2, h[5], m), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetValue, 3, h[6], gbytes((float[5]){ 9, 1, 2, 3, 4 }, 20), 20u), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetVectorArray, 3, h[7], m, 2u), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetString, 2, h[8], gstr("rec")), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetBoolArray, 3, h[9], gbytes((int32_t[3]){ 0, 1, 0 }, 12), 3u), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetIntArray, 3, h[9], gbytes((int32_t[1]){ 5 }, 4), 1u), D3D_OK);
+    CHECKEQ(vcall(e, FX_SetFloat, 2, h[6], f2u(3)), D3DERR_INVALIDCALL);  /* a refused set records nothing */
+    for (int k = 0; k < 10; k++) {
+        struct fx_param *p = fx_param_of(fx_effect_of(e), h[k]);
+        if (memcmp(before[k], p->data, p->bytes)) printf("FAIL %s changed while recording\n", names[k]), fails++;
+        if (serial_of(e, h[k]) != ser[k]) printf("FAIL %s dirtied while recording\n", names[k]), fails++;
+    }
+    uint32_t blk = vcall(e, FX_EndParameterBlock, 0);
+    CHECKEQ(vcall(e, FX_ApplyParameterBlock, 1, blk), D3D_OK);
+    for (int k = 0; k < 10; k++)
+        if (serial_of(e, h[k]) == ser[k]) printf("FAIL %s not dirtied by Apply\n", names[k]), fails++;
+    CHECKEQ(vcall(e, FX_GetBool, 2, h[0], out), D3D_OK), CHECKEQ(MEM32(out), 0);
+    CHECKEQ(vcall(e, FX_GetInt, 2, h[1], out), D3D_OK), CHECKEQ(MEM32(out), 42);
+    CHECKF(get_f(e, h[2]), -6);
+    CHECKEQ(vcall(e, FX_GetVector, 2, h[3], out), D3D_OK);
+    for (int k = 0; k < 4; k++) CHECKF(gf(out + 4 * k), 10.0f + (float)k);
+    CHECKEQ(vcall(e, FX_GetVector, 2, h[4], out), D3D_OK);
+    CHECKF(gf(out), 1), CHECKF(gf(out + 4), 0), CHECKF(gf(out + 8), 0);
+    CHECKEQ(vcall(e, FX_GetMatrix, 2, h[5], out), D3D_OK);
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) CHECKF(gf(out + 4 * (uint32_t)(4 * r + c)), 100.0f + (float)(4 * c + r));
+    CHECKEQ(vcall(e, FX_GetValue, 3, h[6], out, 20u), D3D_OK);
+    CHECKF(gf(out), 9), CHECKF(gf(out + 16), 4);
+    CHECKEQ(vcall(e, FX_GetVectorArray, 3, h[7], out, 4u), D3D_OK);
+    for (int k = 0; k < 8; k++) CHECKF(gf(out + 4 * (uint32_t)k), 100.0f + (float)k);   /* the two set */
+    CHECKF(gf(out + 32), 2), CHECKF(gf(out + 60), -3);                                  /* the two kept */
+    CHECKEQ(vcall(e, FX_GetString, 2, h[8], out), D3D_OK);
+    CHECK(!strcmp(gs(MEM32(out)), "rec"));
+    CHECKEQ(vcall(e, FX_GetIntArray, 3, h[9], out, 3u), D3D_OK);
+    CHECKEQ(MEM32(out), 5), CHECKEQ(MEM32(out + 4), 1), CHECKEQ(MEM32(out + 8), 0);
+    CHECKEQ(vcall(e, FX_Release, 0), 0);
+
+    /* the matrix array forms, on test_effects.py's matrix_effect */
+    uint32_t me = create_file(dev, mpath, 0);
+    if (!me) return;
+    uint32_t ma = byname(me, "ma"), mca = byname(me, "mca"), mr = byname(me, "mr");
+    uint64_t s0 = serial_of(me, ma), s1 = serial_of(me, mca), s2 = serial_of(me, mr);
+    MEM32(mp) = m + 64, MEM32(mp + 4) = m;
+    CHECKEQ(vcall(me, FX_BeginParameterBlock, 0), D3D_OK);
+    CHECKEQ(vcall(me, FX_SetMatrix, 2, mr, m), D3D_OK);
+    CHECKEQ(vcall(me, FX_SetMatrixArray, 3, ma, m, 2u), D3D_OK);
+    CHECKEQ(vcall(me, FX_SetMatrixPointerArray, 3, ma, mp, 1u), D3D_OK);
+    CHECKEQ(vcall(me, FX_SetMatrixTransposeArray, 3, mca, m, 1u), D3D_OK);
+    CHECKEQ(vcall(me, FX_SetMatrixTransposePointerArray, 3, mca, mp + 4, 1u), D3D_OK);
+    CHECKEQ(serial_of(me, ma), s0), CHECKEQ(serial_of(me, mca), s1), CHECKEQ(serial_of(me, mr), s2);
+    CHECKEQ(vcall(me, FX_GetMatrixArray, 3, ma, out, 2u), D3D_OK);
+    for (int k = 0; k < 32; k++) CHECKF(gf(out + 4 * (uint32_t)k), 0);  /* ma's default: zeros */
+    uint32_t mb = vcall(me, FX_EndParameterBlock, 0);
+    CHECKEQ(vcall(me, FX_ApplyParameterBlock, 1, mb), D3D_OK);
+    CHECKEQ(vcall(me, FX_GetMatrixArray, 3, ma, out, 2u), D3D_OK);
+    for (int k = 0; k < 16; k++) CHECKF(gf(out + 4 * (uint32_t)k), 116.0f + (float)k);   /* by pointer: m + 64 */
+    for (int k = 16; k < 32; k++) CHECKF(gf(out + 4 * (uint32_t)k), 100.0f + (float)k);  /* the array's second */
+    CHECKEQ(vcall(me, FX_GetMatrixTransposeArray, 3, mca, out, 1u), D3D_OK);
+    for (int k = 0; k < 16; k++) CHECKF(gf(out + 4 * (uint32_t)k), 100.0f + (float)k);
+    CHECKEQ(vcall(me, FX_GetMatrix, 2, mr, out), D3D_OK);
+    for (int k = 0; k < 16; k++) CHECKF(gf(out + 4 * (uint32_t)k), 100.0f + (float)k);
+    CHECKEQ(vcall(me, FX_Release, 0), 0);
+    CHECKEQ(d3d_live_count(), live0);
+    vcall(dev, 2, 0);
+}
+
+/* misuse the game has not shown: each case stops naming the method (test_effects.py runs one per process) */
+static void group_fx_block_misuse(const char *path, const char *which) {
+    uint32_t dev = new_device();
+    uint32_t e = create_file(dev, path, 0), out = gmem(4);
+    if (!e) return;
+    if (!strcmp(which, "begin_twice")) {
+        CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+        vcall(e, FX_BeginParameterBlock, 0);
+    } else if (!strcmp(which, "end_without_begin")) {
+        vcall(e, FX_EndParameterBlock, 0);
+    } else if (!strcmp(which, "apply_foreign")) {
+        vcall(e, FX_ApplyParameterBlock, 1, 0x7000u);
+    } else if (!strcmp(which, "apply_other_effect")) {      /* a block of another effect, and of a clone's source */
+        CHECKEQ(vcall(e, FX_BeginParameterBlock, 0), D3D_OK);
+        uint32_t blk = vcall(e, FX_EndParameterBlock, 0);
+        CHECKEQ(vcall(e, FX_CloneEffect, 2, dev, out), D3D_OK);
+        vcall(MEM32(out), FX_ApplyParameterBlock, 1, blk);
+    } else { printf("FAIL no case %s\n", which); fails++; return; }
+    printf("FAIL %s: returned\n", which);
+    fails++;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: fx_selftest <group> [args]\n"); return 2; }
     hle_mem_init();
@@ -1424,6 +1692,12 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "fx_pool_commit") && a2) group_fx_pool_commit(a1, a2);
     else if (!strcmp(argv[1], "fx_validate") && a1) group_fx_validate(a1);
     else if (!strcmp(argv[1], "fx_game_render") && a1) group_fx_game_render(a1);
+    else if (!strcmp(argv[1], "fx_block_record") && a1) group_fx_block_record(a1);
+    else if (!strcmp(argv[1], "fx_block_partial") && a1) group_fx_block_partial(a1);
+    else if (!strcmp(argv[1], "fx_block_refs") && a1) group_fx_block_refs(a1);
+    else if (!strcmp(argv[1], "fx_block_two") && a1) group_fx_block_two(a1);
+    else if (!strcmp(argv[1], "fx_block_setters") && a2) group_fx_block_setters(a1, a2);
+    else if (!strcmp(argv[1], "fx_block_misuse") && a2) group_fx_block_misuse(a1, a2);
     else { fprintf(stderr, "fx_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

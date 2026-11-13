@@ -12,8 +12,12 @@
  *
  * Task 6: the technique and pass methods (SetTechnique, ValidateTechnique,
  * Begin/BeginPass/CommitChanges/EndPass/End ...), whose work is fx_states.c's.
- * SetStateManager and the parameter blocks stay unimplemented: they stop
- * loudly, naming themselves.
+ * SetStateManager stays unimplemented: it stops loudly, naming itself.
+ *
+ * Plan 10 Task 4 (Ruling 10): parameter blocks. While a block records, every
+ * setter writes through fx_dest into a new record of the block, and the
+ * parameter's live value, its dirty serial and its references stay as they
+ * were; ApplyParameterBlock writes the records in order as SetValue would.
  *
  * A pool holds one value per shared parameter name: effects created with the
  * pool bind their shared parameters to it, and a type that differs from the
@@ -90,6 +94,46 @@ static uint32_t f2u(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 static float gfl(uint32_t va) { return u2f(MEM32(va)); }
 static void dirty(struct fx_param *p) { *p->serial = ++g_fx_serial; }
 
+/* ---- parameter blocks: where a setter writes (plan 10 Task 4, Ruling 10) ---- */
+
+/* the references held by buf, a value laid out as p's: taken (add) or dropped */
+struct refs_ctx { const struct fx_param *p; const uint8_t *buf; int add; };
+static void refs_leaf(struct fx_param *leaf, void *ctx) {
+    const struct refs_ctx *c = ctx;
+    if (!holds_ref(leaf) || !leaf->data) return;
+    uint32_t v = rd32(c->buf + (leaf->data - c->p->data));
+    if (c->add) com_addref(v);
+    else com_release(v);
+}
+static void value_refs(struct fx_param *p, const uint8_t *buf, int add) {
+    struct refs_ctx c = { p, buf, add };
+    fx_leaves(p, refs_leaf, &c);
+}
+uint8_t *fx_dest(struct fx_effect *e, struct fx_param *p) {
+    struct fx_block *b = e->recording;
+    if (!b) return p->data;
+    const uint8_t *from = p->data;                   /* the newest record of p in this block, else its live value */
+    for (uint32_t i = b->n; i-- > 0;)
+        if (b->recs[i].p == p) { from = b->recs[i].data; break; }
+    if (b->n == b->cap) {
+        b->cap = b->cap ? 2 * b->cap : 16;
+        b->recs = realloc(b->recs, sizeof *b->recs * b->cap);
+    }
+    uint8_t *d = malloc(p->bytes ? p->bytes : 1);
+    memcpy(d, from, p->bytes);
+    value_refs(p, d, 1);                             /* the record's own references; the setter swaps on it */
+    b->recs[b->n++] = (struct fx_record){ p, d };
+    return d;
+}
+/* a set's dirty mark, which a recording skips (Apply marks it) */
+static void touch(struct fx_effect *e, struct fx_param *p) { if (!e->recording) dirty(p); }
+static void block_free(struct fx_block *b) {
+    for (uint32_t i = 0; i < b->n; i++) value_refs(b->recs[i].p, b->recs[i].data, 0), free(b->recs[i].data);
+    free(b->recs);
+    if (b->handle) hle_free(hle_ptr(b->handle));
+    free(b);
+}
+
 /* ---- numbers: a dword of type `from` as type `to` ---- */
 
 static int32_t f2i(float f) {                       /* truncation, as cvttss2si (out of range: 0x80000000) */
@@ -120,11 +164,11 @@ static float sat(float f) { return f < 0 ? 0 : f > 1 ? 1 : f; }
 static uint32_t midx(const struct fx_param *p, uint32_t r, uint32_t c) {
     return p->cls == FXC_MATRIX_ROWS ? r * p->cols + c : c * p->rows + r;
 }
-static void mat_set(struct fx_param *p, uint32_t m, int transpose) {
+static void mat_set(const struct fx_param *p, uint8_t *dst, uint32_t m, int transpose) {
     for (uint32_t r = 0; r < p->rows; r++)
         for (uint32_t c = 0; c < p->cols; c++) {
             uint32_t v = MEM32(m + 4 * (transpose ? 4 * c + r : 4 * r + c));
-            wr32(p->data + 4 * midx(p, r, c), conv(v, FXT_FLOAT, p->type));
+            wr32(dst + 4 * midx(p, r, c), conv(v, FXT_FLOAT, p->type));
         }
 }
 static void mat_get(const struct fx_param *p, uint32_t m, int transpose) {
@@ -270,24 +314,29 @@ static void x_GetAnnotationByName(void) {           /* (this, h, name) */
 
 /* ---- values ---- */
 
-static void swap_refs(struct fx_param *leaf, void *ctx) {     /* ctx: the new value's bytes, at leaf's offset */
-    const uint8_t *src = ctx;
-    if (!holds_ref(leaf)) return;
-    uint32_t nv = rd32(src + (leaf->data - leaf->top->data)), ov = rd32(leaf->data);
+/* src and dst laid out as p's value: each reference src names is taken, each one dst held is dropped */
+struct swap_ctx { const struct fx_param *p; const uint8_t *src, *dst; };
+static void swap_refs(struct fx_param *leaf, void *ctx) {
+    const struct swap_ctx *c = ctx;
+    if (!holds_ref(leaf) || !leaf->data) return;
+    size_t off = (size_t)(leaf->data - c->p->data);
+    uint32_t nv = rd32(c->src + off), ov = rd32(c->dst + off);
     if (nv != ov) com_addref(nv), com_release(ov);
 }
+/* SetValue's work: p's whole value from src, where fx_dest says (ApplyParameterBlock's too) */
+static void set_value(struct fx_effect *e, struct fx_param *p, const uint8_t *src) {
+    uint8_t *dst = fx_dest(e, p);
+    struct swap_ctx c = { p, src, dst };
+    fx_leaves(p, swap_refs, &c);
+    memcpy(dst, src, p->bytes);
+    touch(e, p);
+}
 static void x_SetValue(void) {                      /* (this, h, data, bytes) */
-    struct fx_param *p = fx_param_of(FX(0), A32(1));
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
     const uint8_t *src = APTR(2);
     if (!p || !src || !p->bytes || A32(3) < p->bytes) RET(D3DERR_INVALIDCALL, 4);
-    /* swap_refs finds each leaf's offset from its top; point a copy of the value as the top's would be */
-    uint8_t *img = malloc(p->top->bytes ? p->top->bytes : 1);
-    memcpy(img, p->top->data, p->top->bytes);
-    memcpy(img + (p->data - p->top->data), src, p->bytes);
-    fx_leaves(p, swap_refs, img);
-    free(img);
-    memcpy(p->data, src, p->bytes);
-    dirty(p);
+    set_value(e, p, src);
     RET(D3D_OK, 4);
 }
 static void x_GetValue(void) {                      /* (this, h, data, bytes) */
@@ -299,10 +348,11 @@ static void x_GetValue(void) {                      /* (this, h, data, bytes) */
 }
 
 static void x_SetBool(void) {                       /* (this, h, BOOL) */
-    struct fx_param *p = fx_param_of(FX(0), A32(1));
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
     if (!scalar1(p)) RET(D3DERR_INVALIDCALL, 3);
-    wr32(p->data, conv(A32(2), FXT_BOOL, p->type));
-    dirty(p);
+    wr32(fx_dest(e, p), conv(A32(2), FXT_BOOL, p->type));
+    touch(e, p);
     RET(D3D_OK, 3);
 }
 static void x_GetBool(void) {                       /* (this, h, BOOL*) */
@@ -312,16 +362,19 @@ static void x_GetBool(void) {                       /* (this, h, BOOL*) */
     RET(D3D_OK, 3);
 }
 static void x_SetInt(void) {                        /* (this, h, INT) */
-    struct fx_param *p = fx_param_of(FX(0), A32(1));
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
     uint32_t n = A32(2);
-    if (scalar1(p)) wr32(p->data, conv(n, FXT_INT, p->type));
-    else if (colour_vec(p)) {                       /* a D3DCOLOR: r, g, b (and a) */
-        wr32(p->data, f2u((float)(n >> 16 & 0xFF) / 255.0f));
-        wr32(p->data + 4, f2u((float)(n >> 8 & 0xFF) / 255.0f));
-        wr32(p->data + 8, f2u((float)(n & 0xFF) / 255.0f));
-        if (p->cols > 3) wr32(p->data + 12, f2u((float)(n >> 24) / 255.0f));
-    } else RET(D3DERR_INVALIDCALL, 3);
-    dirty(p);
+    if (!scalar1(p) && !colour_vec(p)) RET(D3DERR_INVALIDCALL, 3);
+    uint8_t *d = fx_dest(e, p);
+    if (scalar1(p)) wr32(d, conv(n, FXT_INT, p->type));
+    else {                                          /* a D3DCOLOR: r, g, b (and a) */
+        wr32(d, f2u((float)(n >> 16 & 0xFF) / 255.0f));
+        wr32(d + 4, f2u((float)(n >> 8 & 0xFF) / 255.0f));
+        wr32(d + 8, f2u((float)(n & 0xFF) / 255.0f));
+        if (p->cols > 3) wr32(d + 12, f2u((float)(n >> 24) / 255.0f));
+    }
+    touch(e, p);
     RET(D3D_OK, 3);
 }
 static void x_GetInt(void) {                        /* (this, h, INT*) */
@@ -339,10 +392,11 @@ static void x_GetInt(void) {                        /* (this, h, INT*) */
     RET(D3D_OK, 3);
 }
 static void x_SetFloat(void) {                      /* (this, h, FLOAT) */
-    struct fx_param *p = fx_param_of(FX(0), A32(1));
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
     if (!scalar1(p)) RET(D3DERR_INVALIDCALL, 3);
-    wr32(p->data, conv(A32(2), FXT_FLOAT, p->type));
-    dirty(p);
+    wr32(fx_dest(e, p), conv(A32(2), FXT_FLOAT, p->type));
+    touch(e, p);
     RET(D3D_OK, 3);
 }
 static void x_GetFloat(void) {                      /* (this, h, FLOAT*) */
@@ -354,12 +408,14 @@ static void x_GetFloat(void) {                      /* (this, h, FLOAT*) */
 /* Set/Get{Bool,Int,Float}Array: the first min(count, size) numbers of any scalar, vector or matrix
  * parameter (or array of them), converted one by one. SetBoolArray's values are taken as ints. */
 static void set_array(uint32_t from) {              /* (this, h, values*, count) */
-    struct fx_param *p = fx_param_of(FX(0), A32(1));
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
     uint32_t src = A32(2), n = A32(3);
     if (!numeric(p) || (!src && n)) RET(D3DERR_INVALIDCALL, 4);
     if (n > p->bytes / 4) n = p->bytes / 4;
-    for (uint32_t i = 0; i < n; i++) wr32(p->data + 4 * i, conv(MEM32(src + 4 * i), from, p->type));
-    dirty(p);
+    uint8_t *d = fx_dest(e, p);
+    for (uint32_t i = 0; i < n; i++) wr32(d + 4 * i, conv(MEM32(src + 4 * i), from, p->type));
+    touch(e, p);
     RET(D3D_OK, 4);
 }
 static void get_array(uint32_t to) {                /* (this, h, values*, count) */
@@ -378,14 +434,14 @@ static void x_SetFloatArray(void) { set_array(FXT_FLOAT); }
 static void x_GetFloatArray(void) { get_array(FXT_FLOAT); }
 
 static int vec_like(const struct fx_param *p) { return numeric(p) && (p->cls == FXC_SCALAR || p->cls == FXC_VECTOR); }
-static void vec_set(struct fx_param *p, uint32_t v) {
+static void vec_set(const struct fx_param *p, uint8_t *dst, uint32_t v) {
     if (p->type == FXT_INT && p->bytes == 4) {      /* an int vector of one: a D3DCOLOR */
         uint32_t n = (uint32_t)(sat(gfl(v + 8)) * 255.0f) + ((uint32_t)(sat(gfl(v + 4)) * 255.0f) << 8)
                    + ((uint32_t)(sat(gfl(v)) * 255.0f) << 16) + ((uint32_t)(sat(gfl(v + 12)) * 255.0f) << 24);
-        wr32(p->data, n);
+        wr32(dst, n);
         return;
     }
-    for (uint32_t i = 0; i < p->cols; i++) wr32(p->data + 4 * i, conv(MEM32(v + 4 * i), FXT_FLOAT, p->type));
+    for (uint32_t i = 0; i < p->cols; i++) wr32(dst + 4 * i, conv(MEM32(v + 4 * i), FXT_FLOAT, p->type));
 }
 static void vec_get(const struct fx_param *p, uint32_t v) {
     if (p->type == FXT_INT && p->bytes == 4) {
@@ -397,10 +453,11 @@ static void vec_get(const struct fx_param *p, uint32_t v) {
     for (uint32_t i = 0; i < 4; i++) MEM32(v + 4 * i) = i < p->cols ? conv(rd32(p->data + 4 * i), p->type, FXT_FLOAT) : 0;
 }
 static void x_SetVector(void) {                     /* (this, h, D3DXVECTOR4*) */
-    struct fx_param *p = fx_param_of(FX(0), A32(1));
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
     if (!vec_like(p) || p->elements || !A32(2)) RET(D3DERR_INVALIDCALL, 3);
-    vec_set(p, A32(2));
-    dirty(p);
+    vec_set(p, fx_dest(e, p), A32(2));
+    touch(e, p);
     RET(D3D_OK, 3);
 }
 static void x_GetVector(void) {                     /* (this, h, D3DXVECTOR4*) */
@@ -410,12 +467,14 @@ static void x_GetVector(void) {                     /* (this, h, D3DXVECTOR4*) *
     RET(D3D_OK, 3);
 }
 static void x_SetVectorArray(void) {                /* (this, h, D3DXVECTOR4*, count) */
-    struct fx_param *p = fx_param_of(FX(0), A32(1));
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
     uint32_t v = A32(2), n = A32(3);
     if (!p || p->cls != FXC_VECTOR || !numeric(p) || !p->elements || n > p->elements || (!v && n))
         RET(D3DERR_INVALIDCALL, 4);
-    for (uint32_t i = 0; i < n; i++) vec_set(&p->members[i], v + 16 * i);
-    dirty(p);
+    uint8_t *d = fx_dest(e, p);
+    for (uint32_t i = 0; i < n; i++) vec_set(&p->members[i], d + (p->members[i].data - p->data), v + 16 * i);
+    touch(e, p);
     RET(D3D_OK, 4);
 }
 static void x_GetVectorArray(void) {                /* (this, h, D3DXVECTOR4*, count) */
@@ -428,10 +487,11 @@ static void x_GetVectorArray(void) {                /* (this, h, D3DXVECTOR4*, c
 }
 
 static void set_matrix(int transpose) {             /* (this, h, D3DXMATRIX*) */
-    struct fx_param *p = fx_param_of(FX(0), A32(1));
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
     if (!matrix(p) || p->elements || !A32(2)) RET(D3DERR_INVALIDCALL, 3);
-    mat_set(p, A32(2), transpose);
-    dirty(p);
+    mat_set(p, fx_dest(e, p), A32(2), transpose);
+    touch(e, p);
     RET(D3D_OK, 3);
 }
 static void get_matrix(int transpose) {             /* (this, h, D3DXMATRIX*) */
@@ -442,11 +502,15 @@ static void get_matrix(int transpose) {             /* (this, h, D3DXMATRIX*) */
 }
 /* the arrays: by value (consecutive matrices) or by pointers */
 static void set_matrices(int transpose, int pointers) {   /* (this, h, matrices, count) */
-    struct fx_param *p = fx_param_of(FX(0), A32(1));
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
     uint32_t m = A32(2), n = A32(3);
     if (!matrix(p) || !p->elements || n > p->elements || (!m && n)) RET(D3DERR_INVALIDCALL, 4);
-    for (uint32_t i = 0; i < n; i++) mat_set(&p->members[i], pointers ? MEM32(m + 4 * i) : m + 64 * i, transpose);
-    dirty(p);
+    uint8_t *d = fx_dest(e, p);
+    for (uint32_t i = 0; i < n; i++)
+        mat_set(&p->members[i], d + (p->members[i].data - p->data), pointers ? MEM32(m + 4 * i) : m + 64 * i,
+                transpose);
+    touch(e, p);
     RET(D3D_OK, 4);
 }
 static void get_matrices(int transpose, int pointers) {   /* (this, h, matrices, count) */
@@ -477,8 +541,8 @@ static void x_SetString(void) {                     /* (this, h, LPCSTR) */
     uint32_t s = hle_guest_strdup(ASTR(2));
     e->strings = realloc(e->strings, sizeof *e->strings * (e->nstrings + 1));
     e->strings[e->nstrings++] = s;
-    wr32(p->data, s);
-    dirty(p);
+    wr32(fx_dest(e, p), s);
+    touch(e, p);
     RET(D3D_OK, 3);
 }
 static void x_GetString(void) {                     /* (this, h, LPCSTR*) */
@@ -488,15 +552,17 @@ static void x_GetString(void) {                     /* (this, h, LPCSTR*) */
     RET(D3D_OK, 3);
 }
 static void x_SetTexture(void) {                    /* (this, h, IDirect3DBaseTexture9*) */
-    struct fx_param *p = fx_param_of(FX(0), A32(1));
+    struct fx_effect *e = FX(0);
+    struct fx_param *p = fx_param_of(e, A32(1));
     uint32_t t = A32(2);
     if (!p || p->cls != FXC_OBJECT || !FX_IS_TEXTURE(p->type) || p->elements) RET(D3DERR_INVALIDCALL, 3);
-    uint32_t old = rd32(p->data);
+    uint8_t *d = fx_dest(e, p);                     /* the live slot, or a record (which holds its own reference) */
+    uint32_t old = rd32(d);
     if (old != t) {
         com_addref(t);
-        wr32(p->data, t);
+        wr32(d, t);
         com_release(old);
-        dirty(p);
+        touch(e, p);
     }
     RET(D3D_OK, 3);
 }
@@ -614,6 +680,35 @@ static void x_GetStateManager(void) {               /* (this, ID3DXEffectStateMa
     RET(D3D_OK, 2);
 }
 
+/* ---- parameter blocks (plan 10 Task 4, Ruling 10; misuse the game has not shown stops, naming the method) ---- */
+
+static void x_BeginParameterBlock(void) {           /* (this) */
+    struct fx_effect *e = FX(0);
+    if (e->recording) d3d_fail("ID3DXEffect::BeginParameterBlock while a block is recording (a nested block)");
+    e->recording = calloc(1, sizeof *e->recording);
+    RET(D3D_OK, 1);
+}
+static void x_EndParameterBlock(void) {             /* (this): the block's handle */
+    struct fx_effect *e = FX(0);
+    struct fx_block *b = e->recording;
+    if (!b) d3d_fail("ID3DXEffect::EndParameterBlock with no block recording");
+    uint8_t *slot = hle_alloc(4);                   /* a guest dword of its own: no parameter's handle */
+    memset(slot, 0, 4);
+    b->handle = hle_va(slot);
+    b->next = e->blocks, e->blocks = b, e->recording = NULL;
+    RET(b->handle, 1);
+}
+static void x_ApplyParameterBlock(void) {           /* (this, hParameterBlock) */
+    struct fx_effect *e = FX(0);
+    uint32_t h = A32(1);
+    struct fx_block *b = e->blocks;
+    while (b && b->handle != h) b = b->next;
+    if (!b) d3d_fail("ID3DXEffect::ApplyParameterBlock of 0x%08X, which is not a parameter block of this effect", h);
+    if (!b->n) RET(D3DERR_INVALIDCALL, 2);         /* an empty block, as Wine's d3dx9 answers */
+    for (uint32_t i = 0; i < b->n; i++) set_value(e, b->recs[i].p, b->recs[i].data);
+    RET(D3D_OK, 2);
+}
+
 static void x_GetDevice(void) {                     /* (this, IDirect3DDevice9**) */
     struct fx_com *c = d3d_host(A32(0), D3DK_EFFECT);
     if (!A32(1)) RET(D3DERR_INVALIDCALL, 2);
@@ -697,6 +792,8 @@ static void effect_destroy(struct d3d_obj *o) {
     struct fx_com *c = (struct fx_com *)o;
     struct fx_effect *e = &c->fx;
     if (e->saved) d3d_release(e->saved);
+    if (e->recording) block_free(e->recording);
+    for (struct fx_block *b = e->blocks, *n; b; b = n) n = b->next, block_free(b);
     for (uint32_t i = 0; i < e->nparams; i++)
         if (e->params[i].owned) fx_leaves(&e->params[i], release_leaf, NULL);
     for (uint32_t i = 0; i < e->nobjects; i++) com_release(e->objects[i].guest);
@@ -893,6 +990,9 @@ static const win32hle_shim g_impls[] = {
     { "ID3DXEffect::EndPass", x_EndPass }, { "ID3DXEffect::End", x_End },
     { "ID3DXEffect::OnLostDevice", x_OnLostDevice }, { "ID3DXEffect::OnResetDevice", x_OnResetDevice },
     { "ID3DXEffect::GetStateManager", x_GetStateManager },
+    { "ID3DXEffect::BeginParameterBlock", x_BeginParameterBlock },
+    { "ID3DXEffect::EndParameterBlock", x_EndParameterBlock },
+    { "ID3DXEffect::ApplyParameterBlock", x_ApplyParameterBlock },
     { 0, 0 } };
 static const win32hle_shim g_exports[] = {
     { "D3DXCreateEffect", x_D3DXCreateEffect }, { "D3DXCreateEffectPool", x_D3DXCreateEffectPool }, { 0, 0 } };

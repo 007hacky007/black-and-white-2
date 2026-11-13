@@ -86,6 +86,19 @@ struct fx_object {                           /* a string's text, a shader's toke
     struct fx_shinfo *sh;                    /* a shader's constant table and preshader, read at first use */
 };
 
+/* parameter blocks (plan 10 Task 4, Ruling 10): a set made while a block records is one record, the
+ * parameter and its whole value after the set, in call order */
+struct fx_record {
+    struct fx_param *p;
+    uint8_t *data;                           /* p->bytes; holds a reference to each texture or shader it names */
+};
+struct fx_block {
+    uint32_t handle;                         /* EndParameterBlock's D3DXHANDLE: a guest dword of its own */
+    uint32_t n, cap;
+    struct fx_record *recs;
+    struct fx_block *next;
+};
+
 struct fx_pool;
 struct fx_effect {
     uint32_t nparams, ntechs, nobjects;
@@ -107,6 +120,9 @@ struct fx_effect {
     uint32_t saved;                          /* the state block Begin recorded, or 0 */
     uint64_t applied;                        /* g_fx_serial when the pass's values were last applied */
     struct fx_object *vs_obj, *ps_obj;       /* the shaders the pass set (their constants are the effect's) */
+    /* parameter blocks (plan 10 Task 4) */
+    struct fx_block *blocks;                 /* the ended blocks, newest first; they live until the effect does */
+    struct fx_block *recording;              /* the block between BeginParameterBlock and End, or NULL */
 };
 enum { FXH_PARAM = 1, FXH_TECH, FXH_PASS };
 
@@ -132,6 +148,9 @@ extern uint64_t g_fx_serial;                 /* bumped by every parameter change
 
 /* fx_effect.c */
 struct fx_effect *fx_effect_of(uint32_t effect);   /* an ID3DXEffect's host structures */
+/* Where a setter writes p's value: p->data, or while a block records a new record's bytes (a copy of p's
+ * newest record in the block, else of its live value, with its own references). */
+uint8_t *fx_dest(struct fx_effect *e, struct fx_param *p);
 
 /* ---- fx_expr.c (Task 6): constant tables, and FXLC expressions (state values, array selectors and
  * shader preshaders) run on the CPU in float32 ---- */

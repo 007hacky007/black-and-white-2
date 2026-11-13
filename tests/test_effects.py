@@ -108,6 +108,30 @@ def test_fx_pool(selftest, tmp_path):
           write(tmp_path, "bad.fxo", bad))
 
 
+# ---- plan 10 Task 4: parameter blocks (Ruling 10) ----
+
+@pytest.mark.parametrize("group", ["fx_block_record", "fx_block_partial", "fx_block_refs", "fx_block_two"])
+def test_fx_block(selftest, tmp_path, group):
+    check(selftest, group, tmp_path, write(tmp_path, "params.fxo", params_effect()))
+
+
+def test_fx_block_setters(selftest, tmp_path):
+    check(selftest, "fx_block_setters", tmp_path, write(tmp_path, "params.fxo", params_effect()),
+          write(tmp_path, "matrix.fxo", matrix_effect()))
+
+
+@pytest.mark.parametrize("case, method", [("begin_twice", "BeginParameterBlock"),
+                                          ("end_without_begin", "EndParameterBlock"),
+                                          ("apply_foreign", "ApplyParameterBlock"),
+                                          ("apply_other_effect", "ApplyParameterBlock")])
+def test_fx_block_misuse(selftest, tmp_path, case, method):
+    # Misuse the game has not shown stops loudly, naming the method, in its own process
+    r = run_group(selftest, "fx_block_misuse", tmp_path, write(tmp_path, "params.fxo", params_effect()), case)
+    assert r.returncode != 0 and "returned" not in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
+    line = next((ln for ln in r.stderr.splitlines() if ln.startswith("[bw2] FATAL: d3d9: ")), "")
+    assert f"ID3DXEffect::{method}" in line and "not implemented" not in line, r.stderr[-2000:]
+
+
 def test_fx_parse_errors(selftest, tmp_path):
     r = check(selftest, "fx_parse_errors", tmp_path, write(tmp_path, "params.fxo", params_effect()))
     print(r.stdout[-1000:])
