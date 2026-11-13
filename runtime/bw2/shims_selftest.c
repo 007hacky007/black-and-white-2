@@ -105,8 +105,19 @@ static void t_coinit_thread(void) {
     call("CoUninitialize", 0);
     RET(0, 1);
 }
+/* A guest thread's start routine that finds and then overwrites the SSE state: it runs while the main thread
+ * waits with xmm0 and MXCSR of its own. */
+static xmm_t    g_sse_seen_xmm0;
+static uint32_t g_sse_seen_mxcsr;
+static void t_sse_thread(void) {
+    g_sse_seen_xmm0 = g_xmm[0], g_sse_seen_mxcsr = g_mxcsr;
+    for (int i = 0; i < 4; i++) g_xmm[0].u32[i] = 0xBBBB0000u + (uint32_t)i;
+    g_mxcsr = 0x1F80u | 0x0040u;                                    /* DAZ */
+    RET(0, 1);
+}
 static const win32hle_shim t_shims[] = {
-    { "selftest_completion", t_completion }, { "selftest_coinit_thread", t_coinit_thread }, { NULL, NULL } };
+    { "selftest_completion", t_completion }, { "selftest_coinit_thread", t_coinit_thread },
+    { "selftest_sse_thread", t_sse_thread }, { NULL, NULL } };
 
 /* A lifted-DLL hook that records what LoadLibraryA gave it. */
 static char g_hook_base[64], g_hook_host[1024];
@@ -449,6 +460,22 @@ int main(void) {
         call("CoUninitialize", 0);
         CHECK(call("CoInitializeEx", 2, 0u, 0u) == 0);              /* uninitialized again: any model */
         call("CoUninitialize", 0);
+    }
+
+    /* a machine hand-over carries each guest thread's SSE registers and MXCSR; a new thread starts with
+     * zeroed xmm and Windows's 0x1F80 */
+    {
+        for (int i = 0; i < 4; i++) g_xmm[0].u32[i] = 0xAAAA0000u + (uint32_t)i;
+        g_mxcsr = 0x7F80u;                                          /* round toward zero */
+        uint32_t tid = gmem(4);
+        uint32_t th = call("CreateThread", 6, 0u, 0u, hle_resolve("selftest_sse_thread"), 0u, 0u, tid);
+        CHECK(th != 0 && call("WaitForSingleObject", 2, th, 10000u) == 0);
+        CHECK(g_xmm[0].u32[0] == 0xAAAA0000u && g_xmm[0].u32[3] == 0xAAAA0003u);
+        CHECK(g_mxcsr == 0x7F80u);
+        CHECK(g_sse_seen_xmm0.u32[0] == 0 && g_sse_seen_xmm0.u32[3] == 0);
+        CHECK(g_sse_seen_mxcsr == 0x1F80u);
+        memset(g_xmm, 0, sizeof g_xmm);
+        g_mxcsr = 0x1F80u;
     }
 
     /* ole32: CoFileTimeToDosDateTime, no time-zone conversion */

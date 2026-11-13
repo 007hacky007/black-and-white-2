@@ -153,6 +153,12 @@ With `shims_k32.c`'s `IsProcessorFeaturePresent` (3DNow! absent) and `cpu.c`'s `
 the value after the load and one lifted `D3DXMatrixMultiply` is 2: **the SSE2 path**. The product of two
 4x4 matrices through it equals the single-precision product exactly.
 
+Lifted SSE code keeps its registers in the globals `g_xmm[8]` and `g_mxcsr`. A guest thread hands the
+machine over (`hle_yield`, a loop back-edge yield, a wait's `hle_block_begin`/`end`) with its registers
+saved, and since the plan 9 final review that includes `g_xmm` and `g_mxcsr` (vendored `host_lite.c`;
+before, a yield inside an SSE loop let another thread's SSE code overwrite a live xmm value or MXCSR).
+A new guest thread starts with zeroed xmm and MXCSR `0x1F80`. `test_shims_selftest` pins both.
+
 ## Lifter traps on the lifted D3DX's CPU paths
 
 No check of Task 4 hit a trap. The lifted DLL has 13,294 `RECOMP_TRAP` sites, almost all data in
