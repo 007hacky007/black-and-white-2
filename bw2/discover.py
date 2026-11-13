@@ -100,9 +100,21 @@ def _pcr_disassembler(exe: Path):
     return Disassembler(Path(exe).read_bytes(), info.image_base, info.sections), build_iat_map(info)
 
 
-def _table_span(dis, table: int, limit: int = 256) -> tuple[int, int]:
+def _d32(dis):
+    """The disasm32 module `dis` came from, for its shared jump-table helpers."""
+    import sys
+    return sys.modules[type(dis).__module__]
+
+
+def _table_span(dis, table: int, limit: int = 256, negated: bool = False) -> tuple[int, int]:
     """The slots of the jump table at `table` that disasm32's table_entries reads as
-    entries, with its own end rule (a couple of non-code slots end it)."""
+    entries, with its own end rule (a couple of non-code slots end it).
+
+    negated (disasm32's negated_index: `neg r; jmp [r*4 + table]`): the k code slots
+    before `table` that table_entries_before reads, and slot 0."""
+    if negated:
+        k = len(_d32(dis).table_entries_before(dis.read_bytes, table, dis.is_code_address))
+        return table - 4 * k, table + 4
     last, misses = -1, 0
     for k in range(limit):
         raw = dis.read_bytes(table + 4 * k, 4)
@@ -123,10 +135,11 @@ def _decoded_marks(dis, roots, lo: int, hi: int) -> tuple[bytearray, bytearray]:
 
     The union of what disasm32's disassemble_function decodes from each root (its first
     pass: straight-line scans from block leaders, following branches within 1 MB and
-    jump-table arms), walked once with a shared visited set: decoding an address gives
+    jump-table arms, read backwards after `neg` of the index as disasm32 does), walked once with a shared visited set: decoding an address gives
     the same instruction whichever function reaches it, and image bodies overlap a lot
     (d3dx9_25.dll's 5,855 starts decode 12.7M instructions between them)."""
     cov, ist = bytearray(hi - lo), bytearray(hi - lo)
+    negated_index = _d32(dis).negated_index
     seen, work = set(), [(r, r) for r in sorted(set(roots)) if lo <= r < hi]
 
     def mark(a: int, b: int) -> None:
@@ -148,7 +161,7 @@ def _decoded_marks(dis, roots, lo: int, hi: int) -> tuple[bytearray, bytearray]:
             if ins.address != addr and lo <= ins.address < hi and ist[ins.address - lo]:
                 last = None
                 break                            # joined code already walked
-            last = ins
+            prev, last = last, ins
             mark(ins.address, ins.end_address)
             if lo <= ins.address < hi:
                 ist[ins.address - lo] = 1
@@ -163,9 +176,10 @@ def _decoded_marks(dis, roots, lo: int, hi: int) -> tuple[bytearray, bytearray]:
                 if t is not None:
                     follow(t, root)
                 else:
-                    arms = dis.jump_table_targets(ins)
+                    neg = negated_index(prev, ins)
+                    arms = dis.jump_table_targets(ins, negated=neg)
                     if arms:
-                        mark(*_table_span(dis, ins.operands[0].mem.disp & 0xFFFFFFFF))
+                        mark(*_table_span(dis, ins.operands[0].mem.disp & 0xFFFFFFFF, negated=neg))
                     for arm in arms:
                         if arm not in seen:
                             work.append((arm, root))

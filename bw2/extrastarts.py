@@ -8,7 +8,9 @@ found one (white.exe 0x414A80, reached through an object's callback field).
 `immediate_starts` finds those: 16-byte aligned addresses right after int3
 padding, outside every catalogued function, that some 32-bit value in the code
 section names, and whose first instruction is not more padding. Boot runs add
-the starts they reach (reason "boot"). The list is committed as addresses only:
+the starts they reach (reason "boot"). `data_starts` finds the ones only an aligned
+.rdata/.data dword names, even inside a catalogued extent (reason "data"). The list
+is committed as addresses only:
     bw2/catalog/white-1.42.extra-starts.json   {"starts": [[va, reason], ...]}
 
     python -m bw2.extrastarts [--write]
@@ -49,6 +51,35 @@ def immediate_starts(exe: Path, catalog: Path, section: str = ".text") -> list[i
     for va in sorted(v for v in named if lo < v < hi and v % 16 == 0 and v not in known):
         o = va - base
         if img[o - 1] == 0xCC and img[o] != 0xCC and not covered(va):
+            out.append(va)
+    return out
+
+
+def data_starts(exe: Path, catalog: Path) -> list[int]:
+    """Starts only data names: a 4-byte-aligned dword in .rdata or .data (vtables, native
+    tables, callbacks; MSVC keeps function pointers aligned there) whose value is a
+    16-aligned .text address right after an int3 byte, not itself int3, and not a
+    catalogued start. A catalogued extent over it does not hide it, unlike
+    immediate_starts: discovery's sub_007466A7 runs across the padding before
+    0x746700, which only the script native table names (reason "data")."""
+    from array import array
+    from .discover import _sname
+    pe = pefile.PE(str(exe), fast_load=True)
+    base, img = pe.OPTIONAL_HEADER.ImageBase, bytes(pe.get_memory_mapped_image())
+    text = next(s for s in pe.sections if _sname(s.Name) == ".text")
+    lo, hi = base + text.VirtualAddress, base + text.VirtualAddress + text.Misc_VirtualSize
+    known = {f["address"] for f in load_functions(catalog)}
+    named = set()
+    for sec in pe.sections:
+        if _sname(sec.Name) not in (".rdata", ".data"):
+            continue
+        a = sec.VirtualAddress
+        raw = img[a:a + sec.Misc_VirtualSize]
+        named.update(array("I", raw[:len(raw) & ~3]))
+    out = []
+    for va in sorted(v for v in named if lo < v < hi and v % 16 == 0 and v not in known):
+        o = va - base
+        if img[o - 1] == 0xCC and img[o] != 0xCC:
             out.append(va)
     return out
 
@@ -107,6 +138,8 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     found = immediate_starts(GAMEFILES / "exe" / "white.exe", REPO / "bw2" / "catalog" / "white-1.42.functions.json")
     print(f"[extra] {len(found)} immediate-referenced starts")
+    named = data_starts(GAMEFILES / "exe" / "white.exe", REPO / "bw2" / "catalog" / "white-1.42.functions.json")
+    print(f"[extra] {len(named)} data-named starts")
     vm = vm_pattern_starts(GAMEFILES / "exe" / "white.exe")
     print(f"[extra] {len(vm)} VM entries and exits")
     if a.write:
@@ -116,8 +149,9 @@ def main(argv=None) -> int:
         VM_EXTRA.write_text(json.dumps({"starts": [[va, why] for va, why in rows]}, indent=0) + "\n")
         print(f"[extra] wrote {VM_EXTRA.name}: {len(rows)} starts")
         old = json.loads(EXTRA.read_text())["starts"] if EXTRA.exists() else []
-        keep = {va: why for va, why in old if why != "immediate"}
-        rows = sorted({**{va: "immediate" for va in found}, **keep}.items())
+        keep = {va: why for va, why in old if why not in ("immediate", "data")}
+        rows = sorted({**{va: "data" for va in named}, **{va: "immediate" for va in found},
+                       **keep}.items())
         EXTRA.write_text(json.dumps({"starts": [[va, why] for va, why in rows]}, indent=0) + "\n")
         print(f"[extra] wrote {EXTRA.name}: {len(rows)} starts")
     return 0
