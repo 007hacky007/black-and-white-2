@@ -184,6 +184,192 @@ static int in_child(void (*fn)(void), char *out, size_t n) {
 static uint32_t g_child_name;
 static void c_load(void) { call("LoadLibraryA", 1, g_child_name); }
 static void c_load_image(void) { call("LoadImageA", 6, 0u, g_child_name, 0u, 0u, 0u, 0x2010u); }
+
+/* ---- save files (plan 11 Task 2): each probe case of tools/winprobe/saveprobe.c, through our shims,
+   expecting what Windows answered (docs/research/saves.md "Windows"). The game tree is its own folder
+   here, so C:\savecheck\ (the support folder's C:) is outside it, as the game's profile folders are. ---- */
+static uint32_t g_r, g_err;
+static char g_sup[1100];
+/* the call with the last error set to 0 before it; g_r its return, g_err the last error after it */
+#define WCALL(...) (call("SetLastError", 1, 0u), g_r = call(__VA_ARGS__), g_err = call("GetLastError", 0), g_r)
+#define SCHECK(name, c) do { if (!(c)) { printf("FAIL save files %s: %s (ret=%x err=%u)\n", name, #c, g_r, g_err); fails++; } } while (0)
+static uint32_t sp(const char *rel) { char g[512]; snprintf(g, sizeof g, "C:\\savecheck\\%s", rel); return gstr(g); }
+static const char *hp(const char *rel) {                 /* the host path of C:\savecheck\rel, '/' for '\' */
+    static char buf[4][1400];
+    static int i;
+    char *b = buf[i++ & 3];
+    snprintf(b, sizeof buf[0], "%s/C/savecheck/%s", g_sup, rel);
+    for (char *s = b + strlen(g_sup); *s; s++) if (*s == '\\') *s = '/';
+    return b;
+}
+static int hexists(const char *rel) { struct stat st; return stat(hp(rel), &st) == 0; }
+static void hmkdir(const char *rel) { mkdir(hp(rel), 0755); }
+static void hfile(const char *rel, const char *text) { write_file(hp(rel), text, strlen(text)); }
+#define HINVALID 0xFFFFFFFFu
+
+static void save_files(void) {
+    char top[1024];
+    CHECK(getcwd(top, sizeof top) != NULL);
+    mkdir("savegame", 0755);
+    snprintf(g_sup, sizeof g_sup, "%s/savesupport", top);
+    CHECK(bw2_mount("savegame", g_sup) == 0);
+    mkdir(hp(""), 0755);
+
+    /* mkdir_new, mkdir_exists */
+    WCALL("CreateDirectoryA", 2, sp("d1"), 0u);
+    SCHECK("mkdir_new", g_r == 1 && g_err == 0 && hexists("d1"));
+    WCALL("CreateDirectoryA", 2, sp("d1"), 0u);
+    SCHECK("mkdir_exists", g_r == 0 && g_err == 183);
+
+    /* shmkdir_nested_new, shmkdir_exists, shmkdir_relative */
+    WCALL("SHCreateDirectoryExA", 3, 0u, sp("s1\\s2\\s3"), 0u);
+    SCHECK("shmkdir_nested_new", g_r == 0 && g_err == 0 && hexists("s1/s2/s3"));
+    WCALL("SHCreateDirectoryExA", 3, 0u, sp("s1\\s2\\s3"), 0u);
+    SCHECK("shmkdir_exists", g_r == 183 && g_err == 183);
+    {
+        struct stat st;
+        char ov[1200];
+        snprintf(ov, sizeof ov, "%s/Game/rel1", g_sup);
+        WCALL("SHCreateDirectoryExA", 3, 0u, gstr("rel1\\rel2"), 0u);
+        SCHECK("shmkdir_relative", g_r == 161 && g_err == 161 && stat("rel1", &st) != 0 && stat(ov, &st) != 0);
+    }
+
+    /* attr_dir, attr_dir_slash, attr_file, attr_missing_file, attr_missing_dir */
+    hfile("f.txt", "hello");
+    WCALL("GetFileAttributesA", 1, sp("d1"));
+    SCHECK("attr_dir", g_r == 0x10 && g_err == 0);
+    WCALL("GetFileAttributesA", 1, sp("d1\\"));
+    SCHECK("attr_dir_slash", g_r == 0x10 && g_err == 0);
+    WCALL("GetFileAttributesA", 1, sp("f.txt"));
+    SCHECK("attr_file", g_r == 0x20 && g_err == 0);
+    WCALL("GetFileAttributesA", 1, sp("d1\\nofile"));
+    SCHECK("attr_missing_file", g_r == HINVALID && g_err == 2);
+    WCALL("GetFileAttributesA", 1, sp("nodir\\nofile"));
+    SCHECK("attr_missing_dir", g_r == HINVALID && g_err == 3);
+
+    /* find_order: NTFS's order, the dots first; then find_dir_data, find_missing_dir, find_no_match */
+    {
+        static const char *names[] = { "a_b", "aB", "a", "A1", "~x", "_y", "Zeta", "b.txt", "[q", "^r" };
+        char rel[64], got[1024];
+        uint32_t fd = gmem(320);
+        hmkdir("f");
+        for (unsigned i = 0; i < sizeof names / sizeof *names; i++) { snprintf(rel, sizeof rel, "f/%s", names[i]); hfile(rel, "x"); }
+        hmkdir("f/sub");
+        uint32_t h = WCALL("FindFirstFileA", 2, sp("f\\*"), fd);
+        SCHECK("find_order", h != HINVALID && g_err == 0);
+        got[0] = 0;
+        if (h != HINVALID) {
+            snprintf(got, sizeof got, "%s", (char *)hle_ptr(fd + 44));
+            while (WCALL("FindNextFileA", 2, h, fd))
+                snprintf(got + strlen(got), sizeof got - strlen(got), "/%s", (char *)hle_ptr(fd + 44));
+            SCHECK("find_order_end", g_r == 0 && g_err == 18);
+            call("FindClose", 1, h);
+        }
+        if (strcmp(got, "./../a/A1/aB/a_b/b.txt/sub/Zeta/[q/^r/_y/~x")) {
+            printf("FAIL save files find_order: %s\n", got);
+            fails++;
+        }
+        memset(hle_ptr(fd), 0xAA, 320);
+        h = WCALL("FindFirstFileA", 2, sp("f\\sub"), fd);
+        SCHECK("find_dir_data", h != HINVALID && g_err == 0 && MEM32(fd) == 0x10 && MEM32(fd + 28) == 0 && MEM32(fd + 32) == 0
+               && !strcmp((char *)hle_ptr(fd + 44), "sub"));
+        if (h != HINVALID) call("FindClose", 1, h);
+        h = WCALL("FindFirstFileA", 2, sp("nodir\\*"), fd);
+        SCHECK("find_missing_dir", h == HINVALID && g_err == 3);
+        hmkdir("empty");
+        h = WCALL("FindFirstFileA", 2, sp("empty\\*.sav"), fd);
+        SCHECK("find_no_match", h == HINVALID && g_err == 2);
+    }
+
+    /* move_file_new; move_onto (move_file_onto, move_dir_onto); move_dir_new, move_missing */
+    hmkdir("m");
+    hfile("m/a", "aaa");
+    hfile("m/c", "c");
+    hmkdir("m/d1");
+    hfile("m/d1/in", "i");
+    hmkdir("m/d3");
+    WCALL("MoveFileA", 2, sp("m\\a"), sp("m\\b"));
+    SCHECK("move_file_new", g_r == 1 && g_err == 0 && !hexists("m/a") && hexists("m/b"));
+    WCALL("MoveFileA", 2, sp("m\\b"), sp("m\\c"));
+    SCHECK("move_onto", g_r == 0 && g_err == 183 && hexists("m/b") && hexists("m/c"));
+    WCALL("MoveFileA", 2, sp("m\\d1"), sp("m\\d2"));
+    SCHECK("move_dir_new", g_r == 1 && g_err == 0 && !hexists("m/d1") && hexists("m/d2/in"));
+    WCALL("MoveFileA", 2, sp("m\\d2"), sp("m\\d3"));
+    SCHECK("move_onto", g_r == 0 && g_err == 183 && hexists("m/d2/in") && hexists("m/d3"));
+    WCALL("MoveFileA", 2, sp("m\\nothere"), sp("m\\x"));
+    SCHECK("move_missing", g_r == 0 && g_err == 2 && !hexists("m/x"));
+
+    /* delete_cases: delete_missing, delete_dir, delete_readonly (read-only on the Mac: no owner write bit) */
+    hmkdir("x");
+    hmkdir("x/dir");
+    hfile("x/ro", "r");
+    chmod(hp("x/ro"), 0444);
+    WCALL("DeleteFileA", 1, sp("x\\missing"));
+    SCHECK("delete_cases", g_r == 0 && g_err == 2);
+    WCALL("DeleteFileA", 1, sp("x\\dir"));
+    SCHECK("delete_cases", g_r == 0 && g_err == 5 && hexists("x/dir"));
+    WCALL("DeleteFileA", 1, sp("x\\ro"));
+    SCHECK("delete_cases", g_r == 0 && g_err == 5 && hexists("x/ro"));
+    chmod(hp("x/ro"), 0644);
+
+    /* rmdir_cases: rmdir_nonempty, rmdir_missing, rmdir_empty, rmdir_slash */
+    hmkdir("r");
+    hmkdir("r/full");
+    hfile("r/full/f", "f");
+    hmkdir("r/e1");
+    hmkdir("r/e2");
+    WCALL("RemoveDirectoryA", 1, sp("r\\full"));
+    SCHECK("rmdir_cases", g_r == 0 && g_err == 145 && hexists("r/full/f"));
+    WCALL("RemoveDirectoryA", 1, sp("r\\missing"));
+    SCHECK("rmdir_cases", g_r == 0 && g_err == 2);
+    WCALL("RemoveDirectoryA", 1, sp("r\\e1"));
+    SCHECK("rmdir_cases", g_r == 1 && g_err == 0 && !hexists("r/e1"));
+    WCALL("RemoveDirectoryA", 1, sp("r\\e2\\"));
+    SCHECK("rmdir_cases", g_r == 1 && g_err == 0 && !hexists("r/e2"));
+
+    /* create_always_exists, open_always_exists, open_always_new, create_new_exists */
+    {
+        uint32_t h;
+        hfile("c_exists", "12345");
+        h = WCALL("CreateFileA", 7, sp("c_exists"), 0x40000000u, 0u, 0u, 2u, 0x80u, 0u);
+        SCHECK("create_always_exists", h != HINVALID && g_err == 183 && call("GetFileSize", 2, h, 0u) == 0);
+        if (h != HINVALID) call("CloseHandle", 1, h);
+        hfile("c_exists", "12345");
+        h = WCALL("CreateFileA", 7, sp("c_exists"), 0xC0000000u, 0u, 0u, 4u, 0x80u, 0u);
+        SCHECK("open_always_exists", h != HINVALID && g_err == 183 && call("GetFileSize", 2, h, 0u) == 5);
+        if (h != HINVALID) call("CloseHandle", 1, h);
+        h = WCALL("CreateFileA", 7, sp("c_new"), 0xC0000000u, 0u, 0u, 4u, 0x80u, 0u);
+        SCHECK("open_always_new", h != HINVALID && g_err == 0 && hexists("c_new"));
+        if (h != HINVALID) call("CloseHandle", 1, h);
+        h = WCALL("CreateFileA", 7, sp("c_exists"), 0x40000000u, 0u, 0u, 1u, 0x80u, 0u);
+        SCHECK("create_new_exists", h == HINVALID && g_err == 80);
+        if (h != HINVALID) call("CloseHandle", 1, h);
+    }
+
+    /* dosdate (and its rounding cases): the FILETIMEs the probe made, the words Windows gave */
+    {
+        static const struct { const char *name; uint32_t hi, lo; uint16_t date, time; } c[] = {
+            { "dosdate",       0x01DD736Bu, 0x63DB6340u, 0x5D6D, 0x645D },
+            { "dosdate_even",  0x01DD736Bu, 0x638F1800u, 0x5D6D, 0x645C },
+            { "dosdate_tick",  0x01DD736Bu, 0x638F1801u, 0x5D6D, 0x645D },
+            { "dosdate_odd",   0x01DD736Bu, 0x6427AE80u, 0x5D6D, 0x645D },
+            { "dosdate_carry", 0x01DD9983u, 0x0AAF2980u, 0x5E21, 0x0000 },
+        };
+        uint32_t ft = gmem(8), d = gmem(4), t = gmem(4);
+        for (unsigned i = 0; i < sizeof c / sizeof *c; i++) {
+            MEM32(ft) = c[i].lo, MEM32(ft + 4) = c[i].hi;
+            MEM32(d) = MEM32(t) = 0xFFFFFFFFu;
+            WCALL("CoFileTimeToDosDateTime", 3, ft, d, t);
+            if (!(g_r == 1 && g_err == 0 && MEM16(d) == c[i].date && MEM16(t) == c[i].time)) {
+                printf("FAIL save files %s: ret=%x err=%u date=0x%04X time=0x%04X\n", c[i].name, g_r, g_err, MEM16(d), MEM16(t));
+                fails++;
+            }
+        }
+    }
+
+    CHECK(chdir(top) == 0);
+    CHECK(bw2_mount(".", "support") == 0);
+}
 int main(void) {
     hle_mem_init();
     bw2_register_shims();
@@ -803,6 +989,8 @@ int main(void) {
         char err[8192];
         CHECK(in_child(c_purecall, err, sizeof err) == -1 && strstr(err, "[bw2] FATAL: msvcrt: _purecall"));
     }
+
+    save_files();
 
     printf("shims selftest: %d failed\n", fails);
     return fails != 0;

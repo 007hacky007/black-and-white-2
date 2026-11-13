@@ -17,6 +17,7 @@
 #define E_INVALIDARG          0x80070057u
 #define ERROR_INSUFFICIENT_BUFFER 122u
 #define ERROR_ALREADY_EXISTS  183u
+#define ERROR_BAD_PATHNAME    161u
 
 static const char *folder(uint32_t csidl) {
     switch (csidl & 0xFF) {
@@ -52,9 +53,17 @@ static void k_SHGetFolderPathA(void) {
     RET(0, 5);
 }
 
-/* SHCreateDirectoryExA(hwnd, path, sa): ERROR_SUCCESS or ERROR_ALREADY_EXISTS. */
+/* SHCreateDirectoryExA(hwnd, path, sa): ERROR_SUCCESS or ERROR_ALREADY_EXISTS,
+ * also set as the last error; a relative path (no drive, no leading '\') is
+ * ERROR_BAD_PATHNAME and makes nothing. As Windows 11 answers (plan 11's probe,
+ * docs/research/saves.md). */
 static void k_SHCreateDirectoryExA(void) {
-    RET(make_guest_dirs(ASTR(1)) ? ERROR_ALREADY_EXISTS : 0u, 3);
+    const char *p = ASTR(1);
+    uint32_t r;
+    if (!p || (p[0] != '\\' && p[0] != '/' && (!p[0] || p[1] != ':'))) r = ERROR_BAD_PATHNAME;
+    else r = make_guest_dirs(p) ? ERROR_ALREADY_EXISTS : 0u;
+    hle_set_last_error(r);
+    RET(r, 3);
 }
 
 /* GetUserNameA/W(buf, &size): size counts the terminator, in and out. */
