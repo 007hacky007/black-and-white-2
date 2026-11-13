@@ -9,12 +9,14 @@
  * `input_selftest <group> [arg]` runs one group and prints "<group>: <n> failed".
  * The translator groups (plan 6 Task 3) call translate.c directly.
  */
+#include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "win32hle.h"
 #include "bw2.h"
 #include "d3d_com.h"
@@ -2342,6 +2344,167 @@ static void group_script_nowin(const char *path) {
     bw2_in_set_mouse_sink(bw2_dinput8_sink);
 }
 
+/* ---- plan 11 Task 1: script blocks anchored on movies and wall time ---- */
+
+/* The fake clock: the value the case sets before each read. */
+static double g_fake_now;
+static double fake_now(void) { return g_fake_now; }
+
+/* stderr into a file, read back after each read and passed on to the real stderr, so a case sees
+ * which read printed each script line. */
+static int g_err_in = -1, g_err_orig = -1;
+static void capture_stderr(const char *path) {
+    fflush(stderr);
+    g_err_orig = dup(2);
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 || g_err_orig < 0) { printf("FAIL cannot capture stderr in %s\n", path); fails++; return; }
+    dup2(fd, 2);
+    close(fd);
+    g_err_in = open(path, O_RDONLY);
+}
+/* The "[bw2] script:" lines printed since the last call, each ending in a newline. */
+static const char *new_script_lines(void) {
+    static char buf[1 << 16], out[1 << 16];
+    out[0] = 0;
+    if (g_err_in < 0) return out;
+    fflush(stderr);
+    ssize_t k = read(g_err_in, buf, sizeof buf - 1);
+    if (k < 0) k = 0;
+    buf[k] = 0;
+    if (k && write(g_err_orig, buf, (size_t)k) < 0) { /* the echo is best effort */ }
+    size_t o = 0;
+    for (char *s = buf, *e; *s; s = e) {
+        e = strchr(s, '\n');
+        e = e ? e + 1 : s + strlen(s);
+        if (!strncmp(s, "[bw2] script:", 13) && o + (size_t)(e - s) < sizeof out) {
+            memcpy(out + o, s, (size_t)(e - s));
+            o += (size_t)(e - s);
+            out[o] = 0;
+        }
+    }
+    return out;
+}
+
+struct after_read { int sunk; int keydown, keyup; char lines[512]; };
+
+/* One real GetDeviceData read, numbered r, then the pump: what it pushed and printed. */
+static struct after_read after_read(uint32_t dev, uint32_t buf, int r) {
+    struct after_read a = { 0 };
+    int before = g_nss;
+    printf("script_after: read %d asked (%d failed so far)\n", r, fails);
+    fflush(stdout);
+    rec_reset();
+    uint32_t n = 512;
+    CHECKEQ(read_data(dev, 20, buf, &n, 0), DI_OK);
+    CHECKEQ(bw2_dinput_reads(), r);
+    pump_all();
+    a.sunk = g_nss - before;
+    a.keydown = rec_has(WM_KEYDOWN), a.keyup = rec_has(WM_KEYUP);
+    snprintf(a.lines, sizeof a.lines, "%s", new_script_lines());
+    printf("script_after: read %d answered (%d failed so far)\n", r, fails);
+    fflush(stdout);
+    return a;
+}
+/* A read that pushed `sunk` mouse events, the given keys, and printed exactly `lines`. */
+static void expect_read(int line, int r, const struct after_read *a, int sunk, int kd, int ku, const char *lines) {
+    if (a->sunk == sunk && a->keydown == kd && a->keyup == ku && !strcmp(a->lines, lines)) return;
+    printf("FAIL %s:%d: read %d sunk %d (want %d), key down %d (%d), up %d (%d), lines '%s' (want '%s')\n",
+           __FILE__, line, r, a->sunk, sunk, a->keydown, kd, a->keyup, ku, a->lines, lines);
+    fails++;
+}
+#define EXPECT_READ(r, a, sunk, kd, ku, lines) expect_read(__LINE__, r, a, sunk, kd, ku, lines)
+
+static void group_script_after(const char *which, const char *path) {
+    static const struct { const char *name, *text; } cases[] = {
+        { "anchor", "1 move 10 0\n2 down 0\nafter open 1798\n0 up 0\n5 move 1 0\n" },
+        { "stale", "3 move 1 0\nafter   last  1798   # spaces normalised\n0 down 0\n" },
+        { "empty_block", "1 down 0\nafter open 1798\nafter seconds 0.5\n0 up 0\n" },
+        { "holds", "after seconds 0.5\n0 key 0x1B 0x01 down\nafter seconds 0.5\n0 key 0x1B 0x01 up\n" },
+        { "holds_slow", "after seconds 0.5\n0 key 0x1B 0x01 down\nafter seconds 0.5\n0 key 0x1B 0x01 up\n" },
+        { "quit", "5 quit\n" },
+    };
+    const char *text = NULL;
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++)
+        if (!strcmp(cases[i].name, which)) text = cases[i].text;
+    if (!text) { printf("FAIL no script_after case %s\n", which); fails++; return; }
+    write_text(path, text);
+    setenv("BW2_INPUT_SCRIPT", path, 1);
+    bw2_script_set_clock(fake_now);
+    uint32_t di = new_di(), dev = game_mouse(di, 512);
+    bw2_in_set_window(HWND);
+    hle_proc_hook = recorder;
+    pump_all();
+    g_nss = 0;
+    bw2_in_set_mouse_sink(script_sink);
+    uint32_t buf = gmem(20 * 512);
+    char errpath[1024];
+    snprintf(errpath, sizeof errpath, "%s.stderr", path);
+    if (strcmp(which, "quit")) capture_stderr(errpath);   /* the quit never returns to pass it on */
+    struct after_read a;
+    if (!strcmp(which, "anchor")) {
+        for (int r = 1; r <= 12; r++) {
+            a = after_read(dev, buf, r);
+            if (r == 1 || r == 2 || r == 8) EXPECT_READ(r, &a, 1, 0, 0, "");
+            else if (r == 4) EXPECT_READ(r, &a, 1, 0, 0, "[bw2] script: after open 1798 at read 3\n");
+            else EXPECT_READ(r, &a, 0, 0, 0, "");
+            if (r == 2) bw2_script_movie(0, 2033);       /* another movie: nothing */
+            if (r == 3) bw2_script_movie(0, 1798);
+            if (r == 9) bw2_script_movie(0, 1798);       /* again, with no block left: nothing */
+        }
+        CHECKEQ(g_nss, 4);
+        EXPECT_SUNK(0, BW2_IN_MOVE, 10, 0, 10, 0);
+        EXPECT_SUNK(1, BW2_IN_BUTTON, 10, 0, 0, 1);
+        EXPECT_SUNK(2, BW2_IN_BUTTON, 10, 0, 0, 0);
+        EXPECT_SUNK(3, BW2_IN_MOVE, 11, 0, 1, 0);
+    } else if (!strcmp(which, "stale")) {
+        for (int r = 1; r <= 8; r++) {
+            a = after_read(dev, buf, r);
+            if (r == 3) EXPECT_READ(r, &a, 1, 0, 0, "");
+            else if (r == 7) EXPECT_READ(r, &a, 1, 0, 0, "[bw2] script: after last 1798 at read 6\n");
+            else EXPECT_READ(r, &a, 0, 0, 0, "");
+            if (r == 1 || r == 2) bw2_script_movie(1, 1798);   /* before the arming call (read 3): stale */
+            if (r == 4) bw2_script_movie(0, 1798);             /* an open, not a last frame */
+            if (r == 5) bw2_script_movie(1, 2033);             /* another movie's last frame */
+            if (r == 6) bw2_script_movie(1, 1798);
+        }
+        CHECKEQ(g_nss, 2);
+        EXPECT_SUNK(1, BW2_IN_BUTTON, 1, 0, 0, 1);
+    } else if (!strcmp(which, "empty_block")) {
+        for (int r = 1; r <= 10; r++) {
+            g_fake_now = r <= 5 ? r : 10.0 + 0.25 * (r - 6);
+            a = after_read(dev, buf, r);
+            if (r == 1) EXPECT_READ(r, &a, 1, 0, 0, "");
+            else if (r == 6) EXPECT_READ(r, &a, 0, 0, 0, "[bw2] script: after open 1798 at read 5\n");
+            else if (r == 8) EXPECT_READ(r, &a, 1, 0, 0, "[bw2] script: after seconds 0.5 at read 8\n");
+            else EXPECT_READ(r, &a, 0, 0, 0, "");
+            if (r == 5) bw2_script_movie(0, 1798);
+        }
+        CHECKEQ(g_nss, 2);
+        EXPECT_SUNK(1, BW2_IN_BUTTON, 0, 0, 0, 0);
+    } else if (!strcmp(which, "holds") || !strcmp(which, "holds_slow")) {
+        int slow = which[5] != 0, down_at = slow ? 2 : 513, up_at = slow ? 3 : 1025, last = slow ? 6 : 1100;
+        char dl[96], ul[96];
+        snprintf(dl, sizeof dl, "[bw2] script: after seconds 0.5 at read %d\n", down_at);
+        snprintf(ul, sizeof ul, "[bw2] script: after seconds 0.5 at read %d\n", up_at);
+        for (int r = 1; r <= last; r++) {
+            g_fake_now = slow ? r : r / 1024.0;
+            a = after_read(dev, buf, r);
+            if (r == down_at) EXPECT_READ(r, &a, 0, 1, 0, dl);
+            else if (r == up_at) EXPECT_READ(r, &a, 0, 0, 1, ul);
+            else EXPECT_READ(r, &a, 0, 0, 0, "");
+        }
+    } else if (!strcmp(which, "quit")) {
+        for (int r = 1; r <= 8; r++) {
+            a = after_read(dev, buf, r);
+            EXPECT_READ(r, &a, 0, 0, 0, "");
+        }
+        printf("script_after: returned\n");
+    }
+    bw2_script_set_clock(NULL);
+    bw2_in_set_mouse_sink(bw2_dinput8_sink);
+    hle_proc_hook = NULL;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: input_selftest <group> [arg]\n"); return 2; }
     hle_mem_init();
@@ -2385,6 +2548,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "script")) group_script();
     else if (!strcmp(argv[1], "script_reads") && argc > 2) group_script_reads(argv[2]);
     else if (!strcmp(argv[1], "script_nowin") && argc > 2) group_script_nowin(argv[2]);
+    else if (!strcmp(argv[1], "script_after") && argc > 3) group_script_after(argv[2], argv[3]);
     else { fprintf(stderr, "input_selftest: no group %s\n", argv[1]); return 2; }
     printf("%s: %d failed\n", argv[1], fails);
     fflush(stdout);

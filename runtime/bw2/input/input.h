@@ -57,6 +57,14 @@ extern const win32hle_shim bw2_input_shims[];
  * whose read number is at most n and not yet pushed. The file is read at the first call; a bad line
  * or a file that cannot be opened stops the run (d3d_fail). Unset, nothing happens. */
 void bw2_script_at_read(unsigned long long n);
+/* Plan 11 Task 1: binkw32.c's movie notices, last = 0 when _BinkOpen@8 returns a handle and 1 at the
+ * copy that shows a movie's last frame. Only records the event and bw2_dinput_reads(); pushes and
+ * prints nothing. */
+void bw2_script_movie(int last, uint32_t frames);
+/* The script's wall clock in seconds: NULL (the start) is CLOCK_MONOTONIC; the selftest sets its own. */
+void bw2_script_set_clock(double (*now)(void));
+/* dinput8.c: the read counter's current value (GetDeviceData and GetDeviceState reads so far). */
+unsigned long long bw2_dinput_reads(void);
 
 /* ---- cursor.c: the cursor policy (plan 6 Task 5) ---- */
 struct bw2_cursor_mode {

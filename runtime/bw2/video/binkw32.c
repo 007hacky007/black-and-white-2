@@ -14,6 +14,8 @@
  * Test switches (read once): BW2_BINK_LOG=1 prints numbers about each movie;
  * BW2_QUIT_AFTER_MOVIE=<frames>:<frame>[+<presents>] ends a run with exit 0 at
  * a frame of the movie with that many frames (Ruling 15).
+ * A movie's open and the copy that shows its last frame are told to the
+ * input script (bw2_script_movie, plan 11 Task 1), whatever the log switch.
  */
 #include <errno.h>
 #include <stdarg.h>
@@ -25,6 +27,7 @@
 #include "d3d_com.h"
 #include "d3d9_device.h"
 #include "bink_dec.h"
+#include "input.h"                       /* bw2_script_movie: the script's movie anchors (plan 11) */
 
 int hle_vm_is_reserved(uint32_t va, uint32_t size);   /* guest_mem.c (based build) */
 
@@ -177,6 +180,7 @@ static void b_BinkOpen(void) {
     if (log_on())
         fprintf(stderr, "[bw2] bink open: %ux%u, %u frames at %u/%u fps, %u audio tracks, %u bytes from memory\n",
                 in->width, in->height, in->frames, in->rate, in->rate_div, in->tracks, in->bytes);
+    bw2_script_movie(0, in->frames);
     RET(h, 2);
 }
 
@@ -225,6 +229,7 @@ static void b_BinkCopyToBuffer(void) {
     if (e->shown == e->frames && !e->last_said) {
         e->last_said = 1;
         if (log_on()) fprintf(stderr, "[bw2] bink last frame: %u\n", e->frames);
+        bw2_script_movie(1, e->frames);
     }
     if (g_quit.on && !g_quit.armed && e->frames == g_quit.frames && e->shown >= g_quit.frame) {
         g_quit.armed = 1, g_quit.left = g_quit.presents;

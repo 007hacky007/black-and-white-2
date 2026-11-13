@@ -238,3 +238,61 @@ def test_script_bad(selftest, tmp_path, text, words):
     assert "FATAL: d3d9: " in r.stderr, r.stderr[-2000:]
     for w in words:
         assert w in r.stderr, r.stderr[-2000:]
+
+
+# ---- plan 11 Task 1: script blocks anchored on movies and wall time ----
+
+AFTER_LINES = {
+    "anchor": ["[bw2] script: after open 1798 at read 3"],
+    "stale": ["[bw2] script: after last 1798 at read 6"],
+    "empty_block": ["[bw2] script: after open 1798 at read 5", "[bw2] script: after seconds 0.5 at read 8"],
+    "holds": ["[bw2] script: after seconds 0.5 at read 513", "[bw2] script: after seconds 0.5 at read 1025"],
+    "holds_slow": ["[bw2] script: after seconds 0.5 at read 2", "[bw2] script: after seconds 0.5 at read 3"],
+}
+
+
+@pytest.mark.parametrize("case", list(AFTER_LINES))
+def test_script_after(selftest, tmp_path, case):
+    # each case in its own process (script.c loads its file once); the group checks at which read each
+    # event is pushed and each anchor line printed, and the lines reach stderr in file order
+    r = check(selftest, "script_after", tmp_path, case, tmp_path / "after.script")
+    lines = [ln for ln in r.stderr.splitlines() if ln.startswith("[bw2] script:")]
+    assert lines == AFTER_LINES[case], r.stderr[-2000:]
+
+
+def test_script_after_quit(selftest, tmp_path):
+    # 5 quit: exit 0 at read 5, before answering it
+    r = run_group(selftest, "script_after", tmp_path, "quit", tmp_path / "after.script")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "[bw2] script: quit at read 5" in r.stderr, r.stderr[-2000:]
+    assert "FAIL" not in r.stdout, r.stdout[-2000:]
+    assert "script_after: read 4 answered (0 failed so far)" in r.stdout, r.stdout[-2000:]
+    assert "script_after: read 5 asked" in r.stdout, r.stdout[-2000:]
+    assert "script_after: read 5 answered" not in r.stdout, r.stdout[-2000:]
+    assert "script_after: returned" not in r.stdout, r.stdout[-2000:]
+
+
+@pytest.mark.parametrize("text, words", [
+    ("1 down 0\nafter soon 3\n", ["BW2_INPUT_SCRIPT line 2:", "soon"]),
+    ("after seconds 0\n", ["BW2_INPUT_SCRIPT line 1:", "seconds"]),
+    ("after seconds -1\n", ["BW2_INPUT_SCRIPT line 1:", "-1"]),
+    ("after seconds x\n", ["BW2_INPUT_SCRIPT line 1:", "'x'"]),
+    ("after seconds 3601\n", ["BW2_INPUT_SCRIPT line 1:", "3601"]),
+    ("after seconds 0.5 2\n", ["BW2_INPUT_SCRIPT line 1:", "after seconds"]),
+    ("after open 0\n", ["BW2_INPUT_SCRIPT line 1:", "frames"]),
+    ("after open\n", ["BW2_INPUT_SCRIPT line 1:", "after open"]),
+    ("after last x\n", ["BW2_INPUT_SCRIPT line 1:", "'x'"]),
+    ("after\n", ["BW2_INPUT_SCRIPT line 1:", "after"]),
+    ("after open 1798\n3 down 0\n2 up 0\n", ["BW2_INPUT_SCRIPT line 3:", "read 2"]),
+    ("after open 1798\n-1 down 0\n", ["BW2_INPUT_SCRIPT line 2:", "read"]),
+    ("1 quit 1\n", ["BW2_INPUT_SCRIPT line 1:", "quit"]),
+    ("2 move 1 1\nquit\n", ["BW2_INPUT_SCRIPT line 2:", "quit"]),
+])
+def test_script_after_bad(selftest, tmp_path, text, words):
+    # as test_script_bad: the first read stops the run, naming the line
+    r = run_group(selftest, "script", tmp_path, script=write_script(tmp_path, text))
+    assert r.returncode != 0 and "script: read 1 answered" not in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "script: read 1 asked" in r.stdout, r.stdout[-2000:]
+    assert "FATAL: d3d9: " in r.stderr, r.stderr[-2000:]
+    for w in words:
+        assert w in r.stderr, r.stderr[-2000:]

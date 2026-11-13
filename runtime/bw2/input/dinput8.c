@@ -366,6 +366,7 @@ static unsigned long long count_read(void) {
     }
     return reads;
 }
+unsigned long long bw2_dinput_reads(void) { return __atomic_load_n(&g_reads, __ATOMIC_SEQ_CST); }
 
 /* What every read does first: the marker, the counter (and the quit check),
  * the script's events up to this read (script.c), the partial drain; then a
