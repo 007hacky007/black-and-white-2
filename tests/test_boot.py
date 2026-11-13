@@ -132,15 +132,23 @@ CAMPAIGN_QUIT = f"[bw2] quit at movie frame 1798:{INTRO_LAST} + 600 presents (BW
 INTRO_LAST_SHOWN = "[bw2] bink last frame: 1798"
 
 
-def run_boot(tmp_path, script, timeout, **env_vars):
+def run_boot(tmp_path, script, timeout, support=None, **env_vars):
+    """One headless boot with a fresh support folder under tmp_path, or with `support` used as it is."""
     assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
-    support = tmp_path / "support"
+    support = tmp_path / "support" if support is None else support
     path = tmp_path / "input.script"
     path.write_text(script)
     env = dict(os.environ, BW2_SUPPORT=str(support), BW2_HEADLESS="1", BW2_INPUT_SCRIPT=str(path), **env_vars)
     env.pop("BW2_QUIT_AFTER_READS", None)
-    r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
-                       timeout=timeout, env=env)
+    try:
+        r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
+                           timeout=timeout, env=env)
+    except subprocess.TimeoutExpired as e:
+        # a click that missed leaves the game waiting: fail with the script's lines (each fired anchor) and the tail
+        err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        (tmp_path / "stderr.txt").write_text(err)
+        fired = [ln for ln in engine_lines(err) if ln.startswith("[bw2] script: ")]
+        pytest.fail(f"no exit in {timeout} s; script lines {fired}\n{err[-4000:]}")
     (tmp_path / "stderr.txt").write_text(r.stderr)
     return r, engine_lines(r.stderr), support
 
@@ -263,6 +271,88 @@ def test_boot_new_campaign(tmp_path):
     assert len(last) * 2 > 100, len(last)
     dark = [f for f in last if 2 * f[6] < f[7]]
     assert not dark, dark
+
+
+# Plan 11 Task 3: settings. After the profile (the running point at (422, 427)) the script waits SETTINGS_WAIT s
+# for the front end to take input, then clicks, each click 2 s after the one before: options (766, 711), the
+# video tab (452, 181), the 800x600 row (448, 260), exit (688, 573) and yes to saving the changes (424, 409), all
+# 1024x768 places. The game resets its device to 800x600 and asks at once whether to keep the new size (it
+# reverts by itself after a while); the script answers yes (312, 325), and 3 s later clicks the front end's quit
+# button (731, 555) and its confirm yes (312, 325), all measured at 800x600 (docs/research/saves.md). Each move
+# is a delta from the running point; a click is a down 4 reads after the move and an up 4 reads after that.
+SETTINGS_WAIT = 3
+SETTINGS_CLICKS = [(766, 711), (452, 181), (448, 260), (688, 573), (424, 409)]
+SETTINGS_KEEP = (312, 325)
+SETTINGS_QUIT = [(731, 555), (312, 325)]
+PROFILE_POINT = (422, 427)
+SCRIPT_ANCHOR = re.compile(r"^\[bw2\] script: (after .+) at read (\d+)$")
+EXIT_LINE = "[win32hle] ExitProcess(0)"
+
+
+def click_blocks(start, waits_and_places):
+    """Script blocks, one per (wait, place): `after seconds <wait>`, a move from the running point to the place,
+    a down 4 reads later and an up 4 reads after that."""
+    out, (x, y) = [], start
+    for wait, (px, py) in waits_and_places:
+        out += [f"after seconds {wait}", f"0 move {px - x} {py - y}", "4 down 0", "8 up 0"]
+        x, y = px, py
+    return out
+
+
+SETTINGS_STEPS = ([(SETTINGS_WAIT, SETTINGS_CLICKS[0])] + [(2, p) for p in SETTINGS_CLICKS[1:]]
+                  + [(2, SETTINGS_KEEP), (3, SETTINGS_QUIT[0]), (2, SETTINGS_QUIT[1])])
+SETTINGS_SCRIPT = PROFILE_SCRIPT + "\n".join(click_blocks(PROFILE_POINT, SETTINGS_STEPS)) + "\n"
+RESTART_SCRIPT = "after seconds 10\n0 quit\n"
+
+
+def game_files_made(support):
+    return sorted(p for p in (support / "Game").rglob("*") if p.is_file()) if (support / "Game").exists() else []
+
+
+@pytest.mark.gamefiles
+def test_boot_settings_persist(tmp_path):
+    # Plan 11 Task 3: the front end's options change the resolution to 800x600, the game's own quit writes the
+    # settings, and a second boot on the same support folder starts at 800x600 (docs/research/saves.md).
+    r, lines, support = run_boot(tmp_path, SETTINGS_SCRIPT, 300, BW2_FRAME_LOG="1")
+    tail = r.stderr[-4000:]
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    assert EXIT_LINE in lines, tail
+    assert not any("BW2_QUIT_AFTER" in ln or ln.startswith("[bw2] script: quit") for ln in lines), tail
+    anchors = [m.group(1) for m in map(SCRIPT_ANCHOR.match, lines) if m]
+    assert anchors == [f"after seconds {w}" for w, _ in SETTINGS_STEPS], (anchors, tail)
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
+    # the device goes from 1024x768 to 800x600 once and stays there to the quit
+    sizes = [(f[1], f[2]) for f in frames_of(lines)]
+    runs = [s for i, s in enumerate(sizes) if i == 0 or s != sizes[i - 1]]
+    assert runs == [(1024, 768), (800, 600)], runs
+    # the game's quit writes the settings and the profile in My Documents
+    docs = support / "C" / "Documents and Settings" / "Player" / "My Documents" / "Black & White 2"
+    for f in (docs / "Settings.ini", docs / "Profiles" / "~ab" / "Profile.ini"):
+        assert f.is_file() and f.stat().st_size > 0, f
+    assert not game_files_made(support), game_files_made(support)
+
+    # boot 2 on the same folder: no input, a quit 10 s after the first read
+    boot2 = tmp_path / "boot2"
+    boot2.mkdir()
+    r, lines, _ = run_boot(boot2, RESTART_SCRIPT, 300, support=support, BW2_FRAME_LOG="1", BW2_HLSL_LOG="1")
+    tail = r.stderr[-4000:]
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    anchors = [m.group(1) for m in map(SCRIPT_ANCHOR.match, lines) if m]
+    assert anchors == ["after seconds 10"], (anchors, tail)
+    quits = [ln for ln in lines if re.fullmatch(r"\[bw2\] script: quit at read \d+", ln)]
+    assert len(quits) == 1, tail
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
+    # the front end starts at 800x600: the first frame after the first read and every one after it
+    assert lines.count(FIRST_READ) == 1, tail
+    first_read = lines.index(FIRST_READ)
+    after = frames_of(lines[first_read:])
+    assert after and all((f[1], f[2]) == (800, 600) for f in after), sorted({(f[1], f[2]) for f in after})
+    # no profile dialog: a reused folder compiles the one HLSL effect before the first read
+    effects = [i for i, ln in enumerate(lines) if ln.startswith("[bw2] hlsl effect: ")]
+    assert len(effects) == 1 and effects[0] < first_read, (effects, first_read)
+    assert not game_files_made(support), game_files_made(support)
 
 
 @pytest.mark.gamefiles
