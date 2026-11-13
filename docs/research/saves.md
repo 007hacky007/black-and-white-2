@@ -25,7 +25,10 @@ whether a path exists after the call (`GetFileAttributesA`).
 
 The probe ran twice (the second run added the four `dosdate_*` rounding
 cases after the first showed that the two-second step does not truncate);
-every line the two runs share was the same in both.
+every line the two runs share was the same in both. A third run (plan 11
+Task 5, the same day, the same VM, under its own snapshot, rolled back and
+deleted after in the same way) added the `datefmt_*` and `timefmt_*` cases for
+the load dialog's dates; its other lines were the same as before.
 
 | Case | Call | ret | err | Extra |
 |---|---|---|---|---|
@@ -65,6 +68,17 @@ every line the two runs share was the same in both.
 | `dosdate_tick` | 12:34:56.000 plus one 100 ns tick | 1 | 0 | ft=01DD736B:638F1801 date=0x5D6D time=0x645D |
 | `dosdate_odd` | 12:34:57.000 | 1 | 0 | ft=01DD736B:6427AE80 date=0x5D6D time=0x645D |
 | `dosdate_carry` | 2026-12-31 23:59:59.000 | 1 | 0 | ft=01DD9983:0AAF2980 date=0x5E21 time=0x0000 |
+| `datefmt_user_lcid` | `GetUserDefaultLCID()` (printed, not a call result) | | | lcid=0409 |
+| `datefmt_am_0409` | `GetDateFormatW(0x409, DATE_SHORTDATE, 2026-11-13 09:05:07, NULL, buf, 64)` | 0xB (11) | 0 | text=`11/13/2026`, NUL-terminated |
+| `timefmt_am_0409` | `GetTimeFormatW(0x409, TIME_NOSECONDS, the same, NULL, buf, 64)` | 8 | 0 | text=`9:05 AM` |
+| `datefmt_am_0400`, `timefmt_am_0400` | the same two with `LOCALE_USER_DEFAULT` (0x400) | 0xB, 8 | 0 | the same texts |
+| `datefmt_pm_0409` | `GetDateFormatW(0x409, DATE_SHORTDATE, 2026-01-02 21:34:56, ...)` | 9 | 0 | text=`1/2/2026` |
+| `timefmt_pm_0409` | `GetTimeFormatW(0x409, TIME_NOSECONDS, the same, ...)` | 8 | 0 | text=`9:34 PM` |
+| `datefmt_pm_0400`, `timefmt_pm_0400` | the same two with 0x400 | 9, 8 | 0 | the same texts |
+| `datefmt_count` | `GetDateFormatW` of the 09:05:07 date with `buf` NULL, `cch` 0 | 0xB | 0 | |
+| `timefmt_count` | `GetTimeFormatW` of it with `cch` 0 | 8 | 0 | |
+| `datefmt_short` | `GetDateFormatW` of it with `cch` 10 | 0 | 122 | |
+| `timefmt_short` | `GetTimeFormatW` of it with `cch` 7 | 0 | 122 | |
 
 What these show:
 
@@ -96,3 +110,11 @@ What these show:
   with `SystemTimeToFileTime`, which converts no time zone); the VM's time
   zone was not recorded, so this run does not show whether a FILETIME is
   ever converted to local time.
+- **`GetDateFormatW` and `GetTimeFormatW`** with en-US (and the VM's user
+  default, which is en-US) give the short date as `M/d/yyyy` and, with
+  `TIME_NOSECONDS`, the time as `h:mm tt` (no leading zero on the hour, a
+  plain space before AM or PM, all ASCII). The return counts WCHARs with the
+  NUL; `cch` 0 asks for that count; a buffer one WCHAR short answers 0 with
+  `ERROR_INSUFFICIENT_BUFFER` (122). These are the two calls the game's load
+  dialog makes (`sub_00552370`, after `FileTimeToSystemTime`) to show each
+  save's date.

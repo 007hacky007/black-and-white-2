@@ -251,6 +251,47 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* the load dialog's dates (plan 11 Task 5): GetDateFormatW(lcid, DATE_SHORTDATE, &st, NULL, buf, 64) and
+       GetTimeFormatW(lcid, TIME_NOSECONDS, &st, NULL, buf, 64), as the game calls them, for en-US (0x409) and
+       the user default (0x400); then a count query (cch 0) and a buffer one unit too short for the en-US text. The text prints
+       with each code unit outside printable ASCII as \uXXXX */
+    {
+        static const struct { const char *name; SYSTEMTIME st; } c[] = {
+            { "am", { 2026, 11, 5, 13, 9, 5, 7, 0 } },
+            { "pm", { 2026, 1, 5, 2, 21, 34, 56, 0 } },
+        };
+        static const LCID lcids[] = { 0x409, 0x400 };
+        snprintf(extra, sizeof extra, "lcid=%04lx", (unsigned long)GetUserDefaultLCID());
+        line("datefmt_user_lcid", 0, 0, extra);
+        for (unsigned i = 0; i < sizeof c / sizeof *c; i++)
+            for (unsigned l = 0; l < 2; l++)
+                for (int is_time = 0; is_time < 2; is_time++) {
+                    WCHAR buf[64];
+                    char name[64], text[400];
+                    int k = 0;
+                    memset(buf, 0xAB, sizeof buf);
+                    CALL(r, (DWORD)(is_time ? GetTimeFormatW(lcids[l], TIME_NOSECONDS, &c[i].st, NULL, buf, 64)
+                                            : GetDateFormatW(lcids[l], DATE_SHORTDATE, &c[i].st, NULL, buf, 64)));
+                    for (int j = 0; r && j < (int)r - 1 && k < (int)sizeof text - 8; j++)
+                        k += buf[j] >= 0x20 && buf[j] < 0x7F ? snprintf(text + k, sizeof text - k, "%c", (char)buf[j])
+                                                             : snprintf(text + k, sizeof text - k, "\\u%04X", buf[j]);
+                    text[k] = 0;
+                    snprintf(extra, sizeof extra, "text=[%s] nul=%d", text, r ? buf[r - 1] == 0 : -1);
+                    snprintf(name, sizeof name, "%s_%s_%04lx", is_time ? "timefmt" : "datefmt", c[i].name,
+                             (unsigned long)lcids[l]);
+                    line(name, r, err, extra);
+                }
+        WCHAR small[64];
+        CALL(r, (DWORD)GetDateFormatW(0x409, DATE_SHORTDATE, &c[0].st, NULL, NULL, 0));
+        line("datefmt_count", r, err, NULL);
+        CALL(r, (DWORD)GetTimeFormatW(0x409, TIME_NOSECONDS, &c[0].st, NULL, NULL, 0));
+        line("timefmt_count", r, err, NULL);
+        CALL(r, (DWORD)GetDateFormatW(0x409, DATE_SHORTDATE, &c[0].st, NULL, small, 10));
+        line("datefmt_short", r, err, NULL);
+        CALL(r, (DWORD)GetTimeFormatW(0x409, TIME_NOSECONDS, &c[0].st, NULL, small, 7));
+        line("timefmt_short", r, err, NULL);
+    }
+
     SetCurrentDirectoryA("\\");
     rm_tree(W, 0);
     return 0;

@@ -193,6 +193,9 @@ static char g_sup[1100];
 /* the call with the last error set to 0 before it; g_r its return, g_err the last error after it */
 #define WCALL(...) (call("SetLastError", 1, 0u), g_r = call(__VA_ARGS__), g_err = call("GetLastError", 0), g_r)
 #define SCHECK(name, c) do { if (!(c)) { printf("FAIL save files %s: %s (ret=%x err=%u)\n", name, #c, g_r, g_err); fails++; } } while (0)
+static uint32_t g_date_st, g_date_buf;
+static void c_time_24h(void) { call("GetTimeFormatW", 6, 0x409u, 8u, g_date_st, 0u, g_date_buf, 64u); }
+static void c_date_yearmonth(void) { call("GetDateFormatW", 6, 0x409u, 8u, g_date_st, 0u, g_date_buf, 64u); }
 static uint32_t sp(const char *rel) { char g[512]; snprintf(g, sizeof g, "C:\\savecheck\\%s", rel); return gstr(g); }
 static const char *hp(const char *rel) {                 /* the host path of C:\savecheck\rel, '/' for '\' */
     static char buf[4][1400];
@@ -365,6 +368,54 @@ static void save_files(void) {
                 fails++;
             }
         }
+    }
+
+    /* the load dialog's dates (plan 11 Task 5): GetDateFormatW(lcid, DATE_SHORTDATE, &st, NULL, buf, 64) and
+       GetTimeFormatW(lcid, TIME_NOSECONDS, ...), as the game's sub_00552370 calls them; the texts Windows gave */
+    {
+        static const struct { const char *name; int is_time; uint32_t lcid; uint16_t st[8]; const char *text; } c[] = {
+            { "datefmt_am_0409", 0, 0x409, { 2026, 11, 5, 13, 9, 5, 7, 0 }, "11/13/2026" },
+            { "timefmt_am_0409", 1, 0x409, { 2026, 11, 5, 13, 9, 5, 7, 0 }, "9:05 AM" },
+            { "datefmt_am_0400", 0, 0x400, { 2026, 11, 5, 13, 9, 5, 7, 0 }, "11/13/2026" },
+            { "timefmt_am_0400", 1, 0x400, { 2026, 11, 5, 13, 9, 5, 7, 0 }, "9:05 AM" },
+            { "datefmt_pm_0409", 0, 0x409, { 2026, 1, 5, 2, 21, 34, 56, 0 }, "1/2/2026" },
+            { "timefmt_pm_0409", 1, 0x409, { 2026, 1, 5, 2, 21, 34, 56, 0 }, "9:34 PM" },
+            { "datefmt_pm_0400", 0, 0x400, { 2026, 1, 5, 2, 21, 34, 56, 0 }, "1/2/2026" },
+            { "timefmt_pm_0400", 1, 0x400, { 2026, 1, 5, 2, 21, 34, 56, 0 }, "9:34 PM" },
+        };
+        uint32_t st = gmem(16), buf = gmem(128);
+        for (unsigned i = 0; i < sizeof c / sizeof *c; i++) {
+            memcpy(hle_ptr(st), c[i].st, 16);
+            memset(hle_ptr(buf), 0xAB, 128);
+            WCALL(c[i].is_time ? "GetTimeFormatW" : "GetDateFormatW", 6, c[i].lcid, c[i].is_time ? 2u : 1u, st, 0u,
+                  buf, 64u);
+            size_t n = strlen(c[i].text);
+            int ok = g_r == n + 1 && g_err == 0 && MEM16(buf + 2u * (uint32_t)n) == 0;
+            for (size_t j = 0; ok && j < n; j++) ok = MEM16(buf + 2u * (uint32_t)j) == (uint8_t)c[i].text[j];
+            if (!ok) {
+                char got[65] = "";
+                for (unsigned j = 0; j < 64 && MEM16(buf + 2u * j) && MEM16(buf + 2u * j) < 0x80; j++)
+                    got[j] = (char)MEM16(buf + 2u * j), got[j + 1] = 0;
+                printf("FAIL save files %s: ret=%x err=%u text=[%s]\n", c[i].name, g_r, g_err, got);
+                fails++;
+            }
+        }
+        memcpy(hle_ptr(st), c[0].st, 16);
+        WCALL("GetDateFormatW", 6, 0x409u, 1u, st, 0u, 0u, 0u);
+        SCHECK("datefmt_count", g_r == 11 && g_err == 0);
+        WCALL("GetTimeFormatW", 6, 0x409u, 2u, st, 0u, 0u, 0u);
+        SCHECK("timefmt_count", g_r == 8 && g_err == 0);
+        WCALL("GetDateFormatW", 6, 0x409u, 1u, st, 0u, buf, 10u);
+        SCHECK("datefmt_short", g_r == 0 && g_err == 122);
+        WCALL("GetTimeFormatW", 6, 0x409u, 2u, st, 0u, buf, 7u);
+        SCHECK("timefmt_short", g_r == 0 && g_err == 122);
+        /* a flag the game never passes stops, naming the call and the flags */
+        char err[2048];
+        g_date_st = st, g_date_buf = buf;
+        SCHECK("timefmt_other_flags", in_child(c_time_24h, err, sizeof err) == -1
+               && strstr(err, "GetTimeFormatW") && strstr(err, "flags 0x8"));
+        SCHECK("datefmt_other_flags", in_child(c_date_yearmonth, err, sizeof err) == -1
+               && strstr(err, "GetDateFormatW") && strstr(err, "flags 0x8"));
     }
 
     CHECK(chdir(top) == 0);
