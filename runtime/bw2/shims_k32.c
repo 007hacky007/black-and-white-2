@@ -4,7 +4,9 @@
  */
 #define RECOMP_HOST_CPU      /* recomp_cpuid is cpu.c's */
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "win32hle.h"
@@ -87,6 +89,108 @@ static void k_GetProcessWorkingSetSize(void) {
     RET(1, 3);
 }
 static void k_SetProcessWorkingSetSize(void) { RET(1, 3); }
+
+/* ---- VirtualLock, VirtualUnlock and HeapCompact ----
+ * win32hle keeps every reservation (VirtualAlloc, the heap's carves and large
+ * blocks, stacks, images) read-write for its whole life, and guest memory is
+ * never paged out under the game, so a lock pins nothing on the host: it is
+ * checked against the reservation table and remembered for VirtualUnlock.
+ * The land load locks two heap blocks (sub_009B5090, sub_00A02A40). */
+uint32_t hle_vm_largest_free(void);                        /* guest_mem.c */
+int hle_vm_is_reserved(uint32_t va, uint32_t size);        /* guest_mem.c */
+
+static pthread_mutex_t g_lock_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint64_t lo, hi; } *g_locked;              /* locked pages: sorted, disjoint, not adjacent */
+static size_t g_nlocked, g_caplocked;
+
+static void locked_room(size_t n) {
+    if (n <= g_caplocked) return;
+    size_t cap = g_caplocked ? g_caplocked * 2 : 16;
+    while (cap < n) cap *= 2;
+    void *p = realloc(g_locked, cap * sizeof *g_locked);
+    if (!p) hle_fatal("VirtualLock: no host memory for %zu locked ranges", cap);
+    g_locked = p, g_caplocked = cap;
+}
+
+/* The page-rounded [lo, hi) of (addr, size); 0 when size is 0 or the range wraps. */
+static int page_span(uint32_t addr, uint32_t size, uint64_t *lo, uint64_t *hi) {
+    *lo = addr & ~0xFFFull;
+    *hi = ((uint64_t)addr + size + 0xFFFu) & ~0xFFFull;
+    return size && *hi <= 0x100000000ull;
+}
+
+/* VirtualLock(addr, size): TRUE for pages that all lie in reservations (a
+ * decommitted page inside one is still there to lock), else FALSE with
+ * ERROR_INVALID_ADDRESS. A lock is not counted, as on Windows. */
+static void k_VirtualLock(void) {
+    uint64_t lo, hi;
+    if (!page_span(A32(0), A32(1), &lo, &hi) || !hle_vm_is_reserved((uint32_t)lo, (uint32_t)(hi - lo))) {
+        hle_set_last_error(487u);                          /* ERROR_INVALID_ADDRESS */
+        RET(0, 2);
+    }
+    pthread_mutex_lock(&g_lock_mu);
+    locked_room(g_nlocked + 1);
+    size_t out = 0, at = 0;
+    for (size_t i = 0; i < g_nlocked; i++) {               /* merge every range this one touches */
+        if (g_locked[i].hi >= lo && g_locked[i].lo <= hi) {
+            if (g_locked[i].lo < lo) lo = g_locked[i].lo;
+            if (g_locked[i].hi > hi) hi = g_locked[i].hi;
+            continue;
+        }
+        if (g_locked[i].hi < lo) at = out + 1;
+        g_locked[out++] = g_locked[i];
+    }
+    memmove(&g_locked[at + 1], &g_locked[at], (out - at) * sizeof *g_locked);
+    g_locked[at].lo = lo, g_locked[at].hi = hi;
+    g_nlocked = out + 1;
+    pthread_mutex_unlock(&g_lock_mu);
+    RET(1, 2);
+}
+
+/* VirtualUnlock(addr, size): TRUE when every page was locked, and they are no
+ * longer; else FALSE with ERROR_NOT_LOCKED and nothing changes. */
+static void k_VirtualUnlock(void) {
+    uint64_t lo, hi;
+    size_t i = 0;
+    int ok = page_span(A32(0), A32(1), &lo, &hi);
+    pthread_mutex_lock(&g_lock_mu);
+    if (ok) {
+        while (i < g_nlocked && !(g_locked[i].lo <= lo && hi <= g_locked[i].hi)) i++;
+        ok = i < g_nlocked;
+    }
+    if (ok) {
+        uint64_t llo = g_locked[i].lo, lhi = g_locked[i].hi;
+        int left = llo < lo, right = hi < lhi;
+        if (left && right) {                               /* a hole in the middle: two ranges */
+            locked_room(g_nlocked + 1);
+            memmove(&g_locked[i + 1], &g_locked[i], (g_nlocked - i) * sizeof *g_locked);
+            g_nlocked++;
+            g_locked[i].hi = lo, g_locked[i + 1].lo = hi;
+        } else if (left) {
+            g_locked[i].hi = lo;
+        } else if (right) {
+            g_locked[i].lo = hi;
+        } else {
+            memmove(&g_locked[i], &g_locked[i + 1], (g_nlocked - i - 1) * sizeof *g_locked);
+            g_nlocked--;
+        }
+    }
+    pthread_mutex_unlock(&g_lock_mu);
+    if (!ok) { hle_set_last_error(158u); RET(0, 2); }      /* ERROR_NOT_LOCKED */
+    RET(1, 2);
+}
+
+/* HeapCompact(heap, flags): the largest block the guest could still get, capped
+ * at the 1.5 GB GlobalMemoryStatus reports so the two answers agree. win32hle
+ * has one heap, handle 1 (GetProcessHeap and HeapCreate). The game's one call
+ * (sub_006139E0, 0x613C6D, heap from [0x240042C], flags 0) drops the value. */
+static void k_HeapCompact(void) {
+    uint32_t heap = A32(0), flags = A32(1);
+    if (flags & ~1u) hle_fatal("HeapCompact: flags 0x%08X not measured (from guest 0x%08X)", flags, MEM32(g_esp));
+    if (heap != 1u) { hle_set_last_error(6u); RET(0, 2); }   /* ERROR_INVALID_HANDLE */
+    uint32_t n = hle_vm_largest_free();
+    RET(n < (uint32_t)VIRT_FREE ? n : (uint32_t)VIRT_FREE, 2);
+}
 
 /* ---- ReadFileEx and the alertable waits ----
  * The game's streaming reads (0xB524F0) use ReadFileEx on a file opened with
@@ -189,6 +293,9 @@ const win32hle_shim bw2_k32_shims[] = {
     { "WaitForSingleObjectEx",                 k_WaitForSingleObjectEx },
     { "GetProcessWorkingSetSize",              k_GetProcessWorkingSetSize },
     { "SetProcessWorkingSetSize",              k_SetProcessWorkingSetSize },
+    { "VirtualLock",                           k_VirtualLock },
+    { "VirtualUnlock",                         k_VirtualUnlock },
+    { "HeapCompact",                           k_HeapCompact },
     { "GlobalMemoryStatusEx",                  k_GlobalMemoryStatusEx },
     { "GlobalMemoryStatus",                    k_GlobalMemoryStatus },
     { "HeapSetInformation",                    k_HeapSetInformation },

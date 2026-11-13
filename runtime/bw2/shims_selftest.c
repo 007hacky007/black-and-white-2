@@ -225,6 +225,42 @@ int main(void) {
         CHECK(call("SetProcessWorkingSetSize", 3, 0xFFFFFFFFu, 64u << 20, 256u << 20) == 1);
     }
 
+    /* VirtualLock/VirtualUnlock on heap and VirtualAlloc memory, HeapCompact (plan 10 Task 2). */
+    {
+        uint32_t heap = call("GetProcessHeap", 0);
+        uint32_t a = call("HeapAlloc", 3, heap, 0u, 2097152u);
+        uint32_t b0 = call("HeapAlloc", 3, heap, 0u, 2101250u + 0x100u), b = b0 + ((0x40u - b0) & 0xFFu);   /* ends in 0x40 */
+        CHECK(a != 0 && b0 != 0 && (b & 0xFFu) == 0x40u && b + 2101250u <= b0 + 2101250u + 0x100u);
+        CHECK(call("VirtualLock", 2, a, 2097152u) == 1);
+        CHECK(call("VirtualLock", 2, b, 2101250u) == 1);
+        CHECK(call("VirtualUnlock", 2, a, 2097152u) == 1);
+        CHECK(call("VirtualUnlock", 2, b, 2101250u) == 1);
+        CHECK(call("VirtualUnlock", 2, a, 2097152u) == 0 && call("GetLastError", 0) == 158);   /* ERROR_NOT_LOCKED */
+        CHECK(call("VirtualUnlock", 2, b, 2101250u) == 0 && call("GetLastError", 0) == 158);
+
+        uint32_t v = call("VirtualAlloc", 4, 0x7E000000u, 65536u, 0x3000u, 4u);   /* MEM_RESERVE | MEM_COMMIT */
+        CHECK(v == 0x7E000000u);
+        CHECK(call("VirtualLock", 2, v, 65536u) == 1);
+        CHECK(call("VirtualLock", 2, 0x7E00F000u, 8192u) == 0 && call("GetLastError", 0) == 487);   /* one page past the end */
+        CHECK(call("VirtualUnlock", 2, v, 65536u) == 1);
+        CHECK(call("VirtualLock", 2, v, 65536u) == 1 && call("VirtualLock", 2, v, 65536u) == 1);   /* not counted */
+        CHECK(call("VirtualUnlock", 2, v, 65536u) == 1);
+        CHECK(call("VirtualUnlock", 2, v, 4096u) == 0 && call("GetLastError", 0) == 158);
+        CHECK(call("VirtualLock", 2, v + 0x8000u, 0x8000u) == 1 && call("VirtualLock", 2, v, 0x8000u) == 1);   /* adjacent: merged */
+        CHECK(call("VirtualUnlock", 2, v + 0x3000u, 0x2000u) == 1);                 /* a hole in the middle */
+        CHECK(call("VirtualUnlock", 2, v + 0x2000u, 0x2000u) == 0 && call("GetLastError", 0) == 158);   /* half in the hole */
+        CHECK(call("VirtualUnlock", 2, v, 0x3000u) == 1 && call("VirtualUnlock", 2, v + 0x5000u, 0xB000u) == 1);
+        CHECK(call("VirtualUnlock", 2, v + 0xF000u, 0x1000u) == 0);                  /* all gone */
+        CHECK(call("VirtualLock", 2, 0x00001000u, 4096u) == 0 && call("GetLastError", 0) == 487);   /* unmapped */
+
+        uint32_t free_ = call("HeapCompact", 2, heap, 0u);
+        CHECK(free_ > 0 && free_ <= 0x60000000u && (free_ & 0xFFFu) == 0);
+        CHECK(call("HeapCompact", 2, 0xDEADBEEFu, 0u) == 0 && call("GetLastError", 0) == 6);   /* ERROR_INVALID_HANDLE */
+        call("VirtualFree", 3, v, 0u, 0x8000u);
+        call("HeapFree", 3, heap, 0u, a);
+        call("HeapFree", 3, heap, 0u, b0);
+    }
+
     /* user32 */
     {
         uint32_t v = gmem(64);
