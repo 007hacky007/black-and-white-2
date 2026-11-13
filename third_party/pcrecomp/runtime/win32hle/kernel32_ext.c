@@ -381,7 +381,7 @@ static void k_RemoveDirectoryA(void) {
     char path[1024];
     hle_host_path(ASTR(0), path, sizeof path);
     if (rmdir(path) == 0) { hle_path_changed(); RET(1, 1); }
-    hle_set_last_error(errno_to_win(errno));
+    hle_set_last_error(errno == ENOTEMPTY ? 145u /* ERROR_DIR_NOT_EMPTY */ : errno_to_win(errno));
     RET(0, 1);
 }
 /* A folder or a read-only file (no owner write bit) is ERROR_ACCESS_DENIED and
