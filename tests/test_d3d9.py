@@ -124,3 +124,20 @@ def test_display_mode(selftest, tmp_path):
     # GetSystemMetrics and a window that covered the screen), the desktop again after a windowed Reset
     # or the last Release; the mode list stays the desktop's throughout
     check(selftest, "display_mode", tmp_path)
+
+
+# ---- Plan 10 Task 7: uploads during a long load ----
+
+def test_mtl_upload_flood(selftest, tmp_path):
+    # Task 7 Step 1's mechanism: small boxes into a big texture, each staging only what it covers, with no
+    # Present; no command buffer fails and every box reads its colour back from the GPU
+    r = run_group(selftest, "mtl_upload_flood", tmp_path)
+    assert r.returncode == 0 and "mtl_upload_flood: 0 failed" in r.stdout, r.stdout[-4000:] + r.stderr[-4000:]
+    assert "[bw2] metal: command buffer failed" not in r.stderr, r.stderr[-4000:]
+
+
+def test_mtl_upload_bound(selftest, tmp_path):
+    # Ruling 13: the open command buffer is sent once its staging passes 64 MB
+    r = run_group(selftest, "mtl_upload_bound", tmp_path)
+    assert r.returncode == 0 and "mtl_upload_bound: 0 failed" in r.stdout, r.stdout[-4000:] + r.stderr[-4000:]
+    assert "[bw2] metal: command buffer failed" not in r.stderr, r.stderr[-4000:]

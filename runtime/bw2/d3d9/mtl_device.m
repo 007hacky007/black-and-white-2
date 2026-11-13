@@ -3,7 +3,10 @@
  * device, queue, the frame's command buffer, the window and CAMetalLayer,
  * clears, copies in command order, readback and Present. Everything the
  * guest asks for is recorded into one command buffer per frame, in the order
- * asked; a readback commits and waits.
+ * asked; a readback commits and waits. Copies into textures go through staging
+ * buffers that hold only the box copied, and a command buffer is sent once its
+ * staging passes STAGE_BOUND, so a long load with no Present stays bounded
+ * (plan 10 Task 7).
  */
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
@@ -15,6 +18,7 @@
 #include "mtl_internal.h"
 
 #define VIS_SLOTS 16384u                 /* occlusion counting slots */
+#define STAGE_BOUND (64ull << 20)        /* staging per command buffer (plan 10 Ruling 13) */
 
 static NSString *const kUtilSource = @
     "#include <metal_stdlib>\n"
@@ -125,7 +129,7 @@ void mtl_end_encoders(MtlCtx *c) {
     if (c.blit) { [c.blit endEncoding]; c.blit = nil; }
 }
 static id<MTLCommandBuffer> cmdbuf(MtlCtx *c) {
-    if (!c.cb) c.cb = [c.queue commandBuffer];
+    if (!c.cb) c.cb = [c.queue commandBuffer], c.staged = 0;
     return c.cb;
 }
 id<MTLBlitCommandEncoder> mtl_blit(MtlCtx *c) {
@@ -150,6 +154,14 @@ void mtl_commit(MtlCtx *c, int wait) {
     mtl_heap_collect();
 }
 static void commit_wait(MtlCtx *c) { mtl_commit(c, 1); }
+/* After a copy from a staging buffer of len bytes is recorded: once the open command buffer holds more than
+ * STAGE_BOUND of staging it is sent (not waited for) and the next command starts a new one. Metal keeps every
+ * staging buffer alive until its command buffer finishes, so with no Present (a level load) they would all pile
+ * up in one buffer, and the GPU refuses a buffer it cannot make resident (Insufficient Memory). */
+static void staged(MtlCtx *c, NSUInteger len) {
+    c.staged += len;
+    if (c.staged > STAGE_BOUND) mtl_commit(c, 0);
+}
 void mtl_flush(struct mtl_ctx *cc) { commit_wait(ctx(cc)); }
 
 /* ---- context ---- */
@@ -239,6 +251,7 @@ static void zero_texture(MtlCtx *c, id<MTLTexture> t, int opaque) {
                    sourceSize:MTLSizeMake(w, h, d) toTexture:t destinationSlice:s destinationLevel:l
             destinationOrigin:MTLOriginMake(0, 0, 0)];
         }
+    staged(c, z.length);
 }
 
 mtl_obj mtl_tex_new(struct mtl_ctx *cc, enum mtl_store st, enum mtl_textype type, uint32_t w, uint32_t h,
@@ -295,15 +308,24 @@ void mtl_tex_upload(struct mtl_ctx *cc, mtl_obj tex, uint32_t slice, uint32_t le
     id<MTLTexture> t = (__bridge id<MTLTexture>)tex;
     uint32_t rows = is_bc(t.pixelFormat) ? (h + 3) / 4 : h, dd = d ? d : 1;
     if (!slice_pitch) slice_pitch = pitch * rows;
-    /* Read only the bytes the box covers: a box that is not the whole level starts inside the
-     * caller's memory, so a whole slice from there would read past its end. */
+    /* Stage only the box, its rows packed: the caller's rows are a whole level's pitch apart, and a staging copy
+     * of the level for each small box was what failed the land load (Task 7 Step 1: 38.7 GB staged in one command
+     * buffer for 16x16 boxes into 1024x1024 levels). Only the bytes the box covers are read. */
     NSUInteger rowb = (NSUInteger)(is_bc(t.pixelFormat) ? (w + 3) / 4 : w) * fmt_bytes(t.pixelFormat);
-    NSUInteger span = (NSUInteger)slice_pitch * (dd - 1) + (NSUInteger)pitch * (rows - 1) + rowb;
-    id<MTLBuffer> b = [c.dev newBufferWithLength:(NSUInteger)slice_pitch * dd options:MTLResourceStorageModeShared];
-    memcpy(b.contents, data, span);
-    [mtl_blit(c) copyFromBuffer:b sourceOffset:0 sourceBytesPerRow:pitch sourceBytesPerImage:slice_pitch
-                     sourceSize:MTLSizeMake(w, h, d ? d : 1) toTexture:t destinationSlice:slice
+    NSUInteger image = rowb * rows;
+    id<MTLBuffer> b = [c.dev newBufferWithLength:image * dd options:MTLResourceStorageModeShared];
+    if (!b) { fprintf(stderr, "[bw2] FATAL: metal: no %lu-byte staging buffer\n", (unsigned long)(image * dd)); abort(); }
+    uint8_t *dst = b.contents;
+    const uint8_t *src = data;
+    if (pitch == rowb && slice_pitch == image) memcpy(dst, src, image * dd);
+    else
+        for (uint32_t s = 0; s < dd; s++)
+            for (uint32_t r = 0; r < rows; r++)
+                memcpy(dst + s * image + r * rowb, src + (size_t)s * slice_pitch + (size_t)r * pitch, rowb);
+    [mtl_blit(c) copyFromBuffer:b sourceOffset:0 sourceBytesPerRow:rowb sourceBytesPerImage:image
+                     sourceSize:MTLSizeMake(w, h, dd) toTexture:t destinationSlice:slice
                destinationLevel:level destinationOrigin:MTLOriginMake(x, y, z)];
+    staged(c, b.length);
 }
 
 void mtl_tex_download(struct mtl_ctx *cc, mtl_obj tex, uint32_t slice, uint32_t level, uint32_t x, uint32_t y,

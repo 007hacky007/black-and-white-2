@@ -29,6 +29,7 @@
 @property uint64_t submitted;                 /* serial of the last committed command buffer */
 @property(atomic) uint64_t completed;         /* serial of the last finished one */
 @property uint64_t frames, encGen;
+@property uint64_t staged;                    /* staging bytes the open command buffer holds */
 @property int vsync;
 @property(strong) id<MTLBuffer> vis;             /* occlusion counts, 8 bytes per slot */
 @property uint32_t visNext;

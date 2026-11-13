@@ -2115,7 +2115,94 @@ static void group_draw_count(void) {
     vcall(vb, 2, 0), vcall(ib, 2, 0);
 }
 
+/* ---- Plan 10 Task 7: uploads during a long load ---- */
+
+static const char *g_arg;                                    /* the group's argument (argv[2]), or NULL */
+
+/* A texel colour per box or texture: opaque, never black. */
+static uint32_t flood_colour(uint32_t i) { return 0xFF000000u | ((i + 1u) * 2654435761u >> 8); }
+
+/* Task 7 Step 1 measured the land load (headless, the New Game script): one command buffer stayed open 16-19 s
+ * with 37,159 uploads, and 36,864 of them were 16x16 boxes into 1024x1024 levels (sub_00A532B0). Each upload
+ * staged a copy of its whole level (slice pitch times depth), not of its box: 38,679,035,923 bytes staged for
+ * 504,444,945 bytes of source span, where 256 bytes per box were needed. The buffer failed with Insufficient
+ * Memory (or a GPU hang). Here: 16x16 boxes, each its own colour, into one managed 4096x4096 A8R8G8B8 texture
+ * (a 64 MB lock copy, the guest footprint), with no Present. Before the fix each box staged 64 MB: on this Mac
+ * (32 GB) 604 boxes (the measured 38.7 GB) failed with Insufficient Memory, and bisecting found 396 boxes
+ * (26.6 GB staged) the smallest count to fail (395 passed; 396, 399 and 402 failed every time); the check runs
+ * twice that. */
+#define FLOOD_FAIL 396u
+#define FLOOD_BOXES (2u * FLOOD_FAIL)
+static void group_mtl_upload_flood(void) {
+    uint32_t n = g_arg ? (uint32_t)strtoul(g_arg, NULL, 0) : FLOOD_BOXES;
+    uint32_t dev = new_device(16, 16), tex = texture(dev, 4096, 4096, 1, FMT_A8R8G8B8), lr = gmem(8), r = gmem(16);
+    struct d3d_device *d = d3d_dev(dev);
+    uint64_t s0 = mtl_serial(d->mtl);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t x = i % 256 * 16, y = i / 256 * 16;
+        MEM32(r) = x, MEM32(r + 4) = y, MEM32(r + 8) = x + 16, MEM32(r + 12) = y + 16;
+        if (vcall(tex, TX_LockRect, 4, 0u, lr, r, 0u) != D3D_OK) { printf("FAIL lock of box %u\n", i); fails++; return; }
+        uint8_t *bits = hle_ptr(MEM32(lr + 4));
+        for (uint32_t row = 0; row < 16; row++)
+            for (uint32_t col = 0; col < 16; col++) memcpy(bits + row * MEM32(lr) + col * 4, &(uint32_t){ flood_colour(i) }, 4);
+        CHECKEQ(vcall(tex, TX_UnlockRect, 1, 0u), D3D_OK);
+    }
+    /* the boxes stage only what they cover (n KB in all): at most one command buffer is sent before the readback */
+    uint64_t sent = mtl_serial(d->mtl) - s0;
+    if (sent > 1) printf("FAIL %llu command buffers sent for %u boxes\n", (unsigned long long)sent, n), fails++;
+    uint32_t *px = malloc((size_t)4096 * 4096 * 4);
+    memset(px, 0x5A, (size_t)4096 * 4096 * 4);
+    mtl_tex_download(d->mtl, d3d_tex(tex)->tex, 0, 0, 0, 0, 4096, 4096, px, 4096 * 4);   /* what the GPU holds */
+    uint32_t bad = 0;
+    for (uint32_t i = 0; i < 65536u; i++) {
+        uint32_t x = i % 256 * 16, y = i / 256 * 16, want = i < n ? flood_colour(i) : 0;   /* the rest stays zeroed */
+        for (uint32_t row = 0; row < 16; row++)
+            for (uint32_t col = 0; col < 16; col++)
+                if (px[(y + row) * 4096 + x + col] != want) {
+                    if (bad++ < 4) printf("FAIL box %u texel (%u,%u): 0x%08X, want 0x%08X\n", i, x + col, y + row,
+                                          px[(y + row) * 4096 + x + col], want);
+                }
+    }
+    if (bad) printf("FAIL %u texels wrong\n", bad), fails++;
+    free(px);
+    CHECKEQ(vcall(tex, 2, 0), 0);
+}
+
+/* The bound behind it (Ruling 13): the open command buffer is sent once the staging it holds passes 64 MB. With
+ * no Present, 256 managed 1024x1024 A8R8G8B8 textures are made, filled with their own colour and released, as a
+ * long load does; every 32nd is kept (32 MB of lock copies in all). Each stages 8 MB (its zero fill and its
+ * fill), 2 GB in all: at least 2 GB / 72 MB = 28 command buffers are sent, and every kept texture reads its
+ * colour from the GPU. */
+static void group_mtl_upload_bound(void) {
+    uint32_t dev = new_device(16, 16), lr = gmem(8), kept[8], nkept = 0;
+    struct d3d_device *d = d3d_dev(dev);
+    uint64_t s0 = mtl_serial(d->mtl);
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t t = texture(dev, 1024, 1024, 1, FMT_A8R8G8B8);
+        CHECKEQ(vcall(t, TX_LockRect, 4, 0u, lr, 0u, 0u), D3D_OK);
+        uint8_t *bits = hle_ptr(MEM32(lr + 4));
+        for (uint32_t y = 0; y < 1024; y++)
+            for (uint32_t x = 0; x < 1024; x++) memcpy(bits + y * MEM32(lr) + x * 4, &(uint32_t){ flood_colour(i) }, 4);
+        CHECKEQ(vcall(t, TX_UnlockRect, 1, 0u), D3D_OK);
+        if (i % 32 == 0) kept[nkept++] = t;
+        else CHECKEQ(vcall(t, 2, 0), 0);
+    }
+    uint64_t sent = mtl_serial(d->mtl) - s0;
+    if (sent < 28) printf("FAIL %llu command buffers sent for 2 GB of staging, want 28 or more\n", (unsigned long long)sent), fails++;
+    uint32_t *px = malloc((size_t)1024 * 1024 * 4);
+    for (uint32_t k = 0; k < nkept; k++) {
+        memset(px, 0x5A, (size_t)1024 * 1024 * 4);
+        mtl_tex_download(d->mtl, d3d_tex(kept[k])->tex, 0, 0, 0, 0, 1024, 1024, px, 1024 * 4);
+        uint32_t bad = 0;
+        for (uint32_t j = 0; j < 1024u * 1024u; j++) bad += px[j] != flood_colour(k * 32);
+        if (bad) printf("FAIL kept texture %u: %u texels wrong (first 0x%08X)\n", k * 32, bad, px[0]), fails++;
+        CHECKEQ(vcall(kept[k], 2, 0), 0);
+    }
+    free(px);
+}
+
 static const struct { const char *name; void (*fn)(void); } g_groups[] = {
+    { "mtl_upload_flood", group_mtl_upload_flood }, { "mtl_upload_bound", group_mtl_upload_bound },
     { "draw_count", group_draw_count },
     { "display_mode", group_display_mode },
     { "frame_log", group_frame_log },
@@ -2146,6 +2233,7 @@ int main(int argc, char **argv) {
     bw2_register_shims();
     mach_enter();
     g_esp = hle_va(hle_alloc(1u << 20)) + (1u << 20) - 64;
+    g_arg = argc > 2 ? argv[2] : NULL;
     for (size_t i = 0; i < sizeof g_groups / sizeof *g_groups; i++)
         if (!strcmp(argv[1], g_groups[i].name)) {
             g_groups[i].fn();
