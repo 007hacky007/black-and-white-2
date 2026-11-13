@@ -170,6 +170,7 @@ static uint32_t children(const struct fx_param *p) { return p->elements ? p->ele
 
 static void value_at(struct rd *r, struct fx_param *p, uint32_t *off) {
     if (r->bad) return;
+    p->voff = *off + 8u;
     uint32_t n = children(p);
     if (n) {
         for (uint32_t i = 0; i < n && !r->bad; i++) value_at(r, &p->members[i], off);
@@ -215,6 +216,7 @@ static void top_init(struct rd *r, struct fx_param *p) {
 
 static void state_at(struct rd *r, uint32_t off, struct fx_state *st) {
     st->op = u32(r, off), st->index = u32(r, off + 4), st->usage = FX_USAGE_NONE;
+    st->at = off + 8u;
     uint32_t toff = u32(r, off + 8), voff = u32(r, off + 12);
     typedef_at(r, &toff, NULL, &st->param, 0);
     top_init(r, &st->param);
@@ -223,6 +225,7 @@ static void state_at(struct rd *r, uint32_t off, struct fx_state *st) {
 static void anno_at(struct rd *r, uint32_t off, struct fx_param *a) {
     uint32_t toff = u32(r, off), voff = u32(r, off + 4);
     typedef_at(r, &toff, NULL, a, FX_ANNOTATION);
+    a->rec = off + 8u;
     top_init(r, a);
     value_at(r, a, &voff);
 }
@@ -472,6 +475,7 @@ int fx_parse(const uint8_t *data, uint32_t len, struct fx_effect *e, char *err, 
         uint32_t toff = u32(&r, o), voff = u32(&r, o + 4), flags = u32(&r, o + 8), na = u32(&r, o + 12);
         o += 16;
         typedef_at(&r, &toff, NULL, p, flags);
+        p->rec = o - 16u + 8u;                                /* the 16-byte record just read, from byte 0 */
         top_init(&r, p);
         value_at(&r, p, &voff);
         annos_at(&r, &o, na, &p->annos, &p->nannos);

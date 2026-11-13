@@ -10,6 +10,11 @@
  * Task 5 adds HLSL effects (D3DXCreateEffect with text), the fragment linker
  * and D3DXCreateSphere, the last two handing out the lifted DLL's own objects.
  *
+ * Task 6 checks the lifted compiler against the game's own inputs: a check's
+ * line may carry arguments after its name ("sdv_oracle <game dir> <name>...",
+ * "fxsrc_compile <game dir> <item>..."), and those two read the game's files
+ * in memory and print numbers only.
+ *
  * Calls go through the game's own imports (hle_resolve: the shims the game
  * binds to, the D3DXCompileShader forwarders among them) or straight to a
  * lifted export (d3dx_lifted_proc).
@@ -21,6 +26,7 @@
 #include <strings.h>
 #include "d3d_com.h"
 #include "d3dx.h"
+#include "fx.h"
 #include "sm.h"
 
 uint32_t bw2_validator_calls(int slot);                 /* d3dx_lifted.c */
@@ -646,6 +652,451 @@ static int c_hlsl_sphere_draw(void) {
     return 1;
 }
 
+/* ---- Task 6: the lifted compiler against the game's own compiled effects ----
+ * Both checks read the game's files in memory and print numbers, kind names, offsets, profiles and addresses
+ * only: never a name, a message or a byte of shader text from the game. Nothing is written to disk. */
+
+static int g_argc;                                      /* the words after the check's name */
+static char *g_argv[64];
+
+/* a file of the game tree, NUL-ended in host memory; NULL when missing */
+static uint8_t *host_file(const char *path, uint32_t *n) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *d = malloc((size_t)len + 1);
+    *n = (uint32_t)fread(d, 1, (size_t)len, f);
+    d[*n] = 0;
+    fclose(f);
+    return d;
+}
+/* the line numbers a D3DX message names ("(12):" or "(12,3):"), comma-separated, at most 8, and its error codes
+ * (Microsoft's X<number>) */
+static void error_lines(uint32_t errors, char *out, size_t n) {
+    const char *t = errtext(errors);
+    out[0] = 0;
+    int k = 0;
+    for (const char *p = strchr(t, '('); p && k < 8; p = strchr(p + 1, '(')) {
+        char *end;
+        unsigned long line = strtoul(p + 1, &end, 10);
+        if (end == p + 1 || (*end != ')' && *end != ',')) continue;
+        size_t l = strlen(out);
+        snprintf(out + l, n - l, "%s%lu", k++ ? "," : "", line);
+    }
+    if (!k) snprintf(out, n, "none");
+    int codes = 0;
+    for (const char *p = strstr(t, "error X"); p && codes < 8; p = strstr(p + 1, "error X")) {
+        char *end;
+        unsigned long code = strtoul(p + 7, &end, 10);
+        if (end == p + 7) continue;
+        size_t l = strlen(out);
+        snprintf(out + l, n - l, "%s%lu", codes++ ? ",X" : " codes X", code);
+    }
+}
+
+/* The comparison of our fx_2_0 binary (a) with the shipped one (b). */
+enum { K_ONLY_OURS, K_ONLY_SHIPPED, K_ANNO, K_FLAGS, K_ORDER, K_VALUE, K_BODY, K_SET, K_PVALUE, NKINDS };
+static const char *const g_kind[NKINDS] = { "param_only_ours", "param_only_shipped", "annotation_differs",
+    "param_flags_differs", "state_order_differs", "state_value_differs", "shader_body_differs",
+    "state_set_differs", "param_value_differs" };
+#define NO_OFF 0xFFFFFFFFu
+struct cmp {
+    const struct fx_effect *a, *b;
+    uint32_t n[NKINDS], oa[NKINDS], ob[NKINDS];
+    uint32_t identical, sha, shb;
+    char must[256];                                     /* the first must-hold item that failed */
+};
+static void finding(struct cmp *c, int k, uint32_t oa, uint32_t ob) {
+    if (!c->n[k]++) c->oa[k] = oa, c->ob[k] = ob;
+}
+static void must(struct cmp *c, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void must(struct cmp *c, const char *fmt, ...) {
+    if (c->must[0]) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(c->must, sizeof c->must, fmt, ap);
+    va_end(ap);
+}
+/* a byte offset in e's binary of something that points into it */
+static uint32_t off_in(const struct fx_effect *e, const void *p) { return p ? (uint32_t)((const uint8_t *)p - e->raw) : NO_OFF; }
+static int same_str(const char *x, const char *y) { return (!x && !y) || (x && y && !strcmp(x, y)); }
+static uint32_t nchildren(const struct fx_param *p) { return p->elements ? p->elements : p->cls == FXC_STRUCT ? p->nmembers : 0; }
+
+/* a growing byte buffer */
+struct bytes { uint8_t *p; size_t n, cap; };
+static void put(struct bytes *b, const void *d, size_t n) {
+    if (b->n + n > b->cap) b->p = realloc(b->p, b->cap = 2 * (b->n + n) + 64);
+    memcpy(b->p + b->n, d, n), b->n += n;
+}
+/* An expression's meaning (a state's, a selector's or a preshader's tokens): the version, the constant table's
+ * entries (name, register set, index, count), CLIT, PRSI and FXLC, and the tokens after the comments. The CTAB's
+ * creator and target strings are left out, like any other comment. malloc'd, *len its bytes. */
+static uint8_t *expr_meaning(const uint32_t *t, uint32_t n, uint32_t *len) {
+    struct bytes b = { 0 };
+    put(&b, "", 0);
+    uint32_t i = n ? 1 : 0;
+    if (n) put(&b, &t[0], 4);
+    for (; i < n && (t[i] & 0xFFFFu) == 0xFFFEu;) {
+        uint32_t l = (t[i] >> 16) & 0x7FFFu;
+        if (l > n - i - 1) break;
+        uint32_t cc = l ? t[i + 1] : 0;
+        const uint8_t *d = (const uint8_t *)(t + i + 2);
+        uint32_t dl = l ? 4 * (l - 1) : 0;
+        if (cc == 0x42415443u && dl >= 28) {            /* CTAB: Size, Creator, Version, Constants, ConstantInfo */
+            uint32_t nc, ci;
+            memcpy(&nc, d + 12, 4), memcpy(&ci, d + 16, 4);
+            for (uint32_t k = 0; k < nc && ci <= dl && (dl - ci) / 20 > k; k++) {
+                const uint8_t *e = d + ci + 20 * k;
+                uint32_t name;
+                memcpy(&name, e, 4);
+                if (name < dl && memchr(d + name, 0, dl - name)) put(&b, d + name, strlen((const char *)d + name) + 1);
+                put(&b, e + 4, 6);                      /* RegisterSet, RegisterIndex, RegisterCount */
+            }
+        } else if (cc == 0x54494C43u || cc == 0x49535250u || cc == 0x434C5846u) {   /* CLIT, PRSI, FXLC */
+            put(&b, &cc, 4);
+            put(&b, d, dl);
+        }
+        i += 1 + l;
+    }
+    for (; i < n; i++) put(&b, &t[i], 4);
+    *len = (uint32_t)b.n;
+    return b.p;
+}
+static int same_expr(const uint8_t *x, uint32_t nx, const uint8_t *y, uint32_t ny) {
+    uint32_t la, lb;
+    uint8_t *a = expr_meaning((const uint32_t *)x, nx / 4, &la), *b = expr_meaning((const uint32_t *)y, ny / 4, &lb);
+    int same = la == lb && !memcmp(a, b, la);
+    free(a), free(b);
+    return same;
+}
+
+/* the shader a state sets (its own, or the parameter it names), or NULL; a selector's is NULL */
+static const struct fx_object *state_shader(const struct fx_effect *e, const struct fx_state *s) {
+    const struct fx_param *p = s->usage == FX_USAGE_PARAM ? s->ref : s->usage == FX_USAGE_SELECTOR ? NULL : &s->param;
+    if (!p || p->cls != FXC_OBJECT || !FX_IS_SHADER(p->type) || p->elements) return NULL;
+    return &e->objects[p->object];
+}
+static uint32_t shader_version(const struct fx_object *o) { uint32_t v = 0; if (o && o->size >= 4) memcpy(&v, o->data, 4); return v; }
+static int is_shader_op(uint32_t op) { return op == 146 || op == 147; }  /* VertexShader, PixelShader */
+
+/* two shaders' tokens: without comments (body), and their preshaders (a state value) */
+static void cmp_shader(struct cmp *c, const struct fx_object *x, const struct fx_object *y, int pass) {
+    uint32_t nx = x->size / 4, ny = y->size / 4;
+    uint32_t *sx = malloc(4 * nx + 4), *sy = malloc(4 * ny + 4);
+    uint32_t kx = strip((const uint32_t *)x->data, nx, sx), ky = strip((const uint32_t *)y->data, ny, sy);
+    if (kx == ky && !memcmp(sx, sy, 4 * kx)) c->identical += pass;
+    else finding(c, K_BODY, off_in(c->a, x->data), off_in(c->b, y->data));
+    free(sx), free(sy);
+    uint32_t lx = 0, ly = 0;
+    const uint32_t *px = nx ? fx_comment((const uint32_t *)x->data, nx, 0x53455250u, &lx) : NULL;   /* PRES */
+    const uint32_t *py = ny ? fx_comment((const uint32_t *)y->data, ny, 0x53455250u, &ly) : NULL;
+    if (!px) lx = 0;
+    if (!py) ly = 0;
+    if ((lx || ly) && !same_expr((const uint8_t *)px, 4 * lx, (const uint8_t *)py, 4 * ly))
+        finding(c, K_VALUE, px ? off_in(c->a, px) : off_in(c->a, x->data), py ? off_in(c->b, py) : off_in(c->b, y->data));
+}
+
+static void cmp_state(struct cmp *c, const struct fx_state *x, const struct fx_state *y, int pass) {
+    if (is_shader_op(x->op) && x->usage != FX_USAGE_SELECTOR && y->usage != FX_USAGE_SELECTOR) {
+        const struct fx_object *ox = state_shader(c->a, x), *oy = state_shader(c->b, y);
+        if (ox && oy && ox->size && oy->size) { cmp_shader(c, ox, oy, pass); return; }
+    }
+    uint32_t oa = x->blob ? off_in(c->a, x->blob) : x->param.voff, ob = y->blob ? off_in(c->b, y->blob) : y->param.voff;
+    if (x->usage != y->usage) { finding(c, K_VALUE, oa, ob); return; }
+    int same = 1;
+    if (x->usage == FX_USAGE_PARAM) same = x->ref && y->ref && same_str(x->ref->name, y->ref->name);
+    else if (x->usage == FX_USAGE_SELECTOR) {
+        uint32_t lx = 0, ly = 0;
+        if (x->bloblen >= 4) memcpy(&lx, x->blob, 4), lx += 4;
+        if (y->bloblen >= 4) memcpy(&ly, y->blob, 4), ly += 4;
+        same = lx == ly && lx <= x->bloblen && ly <= y->bloblen && !memcmp(x->blob, y->blob, lx)
+               && same_expr(x->blob + lx, x->bloblen - lx, y->blob + ly, y->bloblen - ly);
+    } else if (x->usage == FX_USAGE_BLOB) same = same_expr(x->blob, x->bloblen, y->blob, y->bloblen);
+    else if (x->param.cls == FXC_OBJECT) {
+        if (x->param.type == FXT_STRING || FX_IS_SHADER(x->param.type)) {
+            const struct fx_object *ox = &c->a->objects[x->param.object], *oy = &c->b->objects[y->param.object];
+            same = ox->size == oy->size && (!ox->size || !memcmp(ox->data, oy->data, ox->size));
+        }
+    } else same = x->param.type == y->param.type && x->param.bytes == y->param.bytes
+                  && !memcmp(x->param.data, y->param.data, x->param.bytes);
+    if (!same) finding(c, K_VALUE, oa, ob);
+}
+
+/* two lists of states (a pass's, or a sampler's): the same operations, in the same order, with the same values;
+ * the k-th state of an (operation, index) in one is paired with the k-th in the other */
+static uint64_t skey(const struct fx_state *s) { return (uint64_t)s->op << 32 | s->index; }
+static void cmp_states(struct cmp *c, const struct fx_state *x, uint32_t nx, const struct fx_state *y, uint32_t ny,
+                       uint32_t owner_a, uint32_t owner_b, int pass) {
+    uint8_t *used = calloc(ny + 1, 1);
+    int in_order = nx == ny, all = nx == ny;
+    for (uint32_t i = 0; i < nx; i++) {
+        uint32_t j = 0;
+        while (j < ny && (used[j] || skey(&y[j]) != skey(&x[i]))) j++;
+        if (j == ny) { all = 0; continue; }
+        used[j] = 1;
+        if (i != j) in_order = 0;
+        cmp_state(c, &x[i], &y[j], pass);
+    }
+    free(used);
+    if (!all) finding(c, K_SET, nx ? x[0].at : owner_a, ny ? y[0].at : owner_b);
+    else if (!in_order) finding(c, K_ORDER, nx ? x[0].at : owner_a, ny ? y[0].at : owner_b);
+}
+
+/* annotations: the same names, types and values */
+static int same_value(const struct cmp *c, const struct fx_param *x, const struct fx_param *y);
+static int same_annos(const struct cmp *c, const struct fx_param *x, uint32_t nx, const struct fx_param *y, uint32_t ny) {
+    if (nx != ny) return 0;
+    for (uint32_t i = 0; i < nx; i++) {
+        char *sx = fx_signature(&x[i]), *sy = fx_signature(&y[i]);
+        int same = !strcmp(sx, sy);
+        free(sx), free(sy);
+        if (!same || !same_value(c, &x[i], &y[i])) return 0;
+    }
+    return 1;
+}
+static void cmp_annos(struct cmp *c, const struct fx_param *x, uint32_t nx, const struct fx_param *y, uint32_t ny,
+                      uint32_t owner_a, uint32_t owner_b) {
+    if (!same_annos(c, x, nx, y, ny)) finding(c, K_ANNO, nx ? x[0].rec : owner_a, ny ? y[0].rec : owner_b);
+}
+/* the values of two parameters of one type (numbers and strings; textures hold none) */
+static int same_value(const struct cmp *c, const struct fx_param *x, const struct fx_param *y) {
+    uint32_t n = nchildren(x);
+    if (n) {
+        for (uint32_t i = 0; i < n; i++)
+            if (!same_value(c, &x->members[i], &y->members[i])) return 0;
+        return 1;
+    }
+    if (x->cls != FXC_OBJECT) return x->bytes == y->bytes && !memcmp(x->data, y->data, x->bytes);
+    if (x->type == FXT_STRING) {
+        const struct fx_object *ox = &c->a->objects[x->object], *oy = &c->b->objects[y->object];
+        return ox->size == oy->size && (!ox->size || !memcmp(ox->data, oy->data, ox->size));
+    }
+    return 1;
+}
+/* a common parameter's leaves: numbers and strings (param_value_differs), samplers' states, shaders' tokens */
+static void cmp_leaves(struct cmp *c, const struct fx_param *x, const struct fx_param *y) {
+    uint32_t n = nchildren(x);
+    if (n) {
+        for (uint32_t i = 0; i < n; i++) cmp_leaves(c, &x->members[i], &y->members[i]);
+        return;
+    }
+    if (x->cls == FXC_OBJECT && FX_IS_SAMPLER(x->type)) cmp_states(c, x->states, x->nstates, y->states, y->nstates, x->voff, y->voff, 0);
+    else if (x->cls == FXC_OBJECT && FX_IS_SHADER(x->type)) {
+        const struct fx_object *ox = &c->a->objects[x->object], *oy = &c->b->objects[y->object];
+        if (shader_version(ox) != shader_version(oy)) must(c, "shader parameter versions 0x%08X and 0x%08X", shader_version(ox), shader_version(oy));
+        else if (ox->size && oy->size) cmp_shader(c, ox, oy, 0);
+    } else if (!same_value(c, x, y)) finding(c, K_PVALUE, x->voff, y->voff);
+}
+
+static const struct fx_param *param_named(const struct fx_effect *e, const char *name, uint32_t *at) {
+    for (uint32_t i = 0; i < e->nparams; i++)
+        if (same_str(e->params[i].name, name)) { *at = i; return &e->params[i]; }
+    return NULL;
+}
+/* a pass's shader states, as (operation << 32 | version), sorted */
+static int u64cmp(const void *p, const void *q) { uint64_t a = *(const uint64_t *)p, b = *(const uint64_t *)q; return a < b ? -1 : a > b; }
+static uint32_t pass_shaders(const struct fx_effect *e, const struct fx_pass *ps, uint64_t *out, uint32_t max) {
+    uint32_t n = 0;
+    for (uint32_t s = 0; s < ps->nstates && n < max; s++) {
+        const struct fx_state *st = &ps->states[s];
+        if (!is_shader_op(st->op)) continue;
+        uint32_t v = st->usage == FX_USAGE_SELECTOR ? 0xFFFFFFFFu : shader_version(state_shader(e, st));
+        out[n++] = (uint64_t)st->op << 32 | v;
+    }
+    qsort(out, n, sizeof *out, u64cmp);
+    return n;
+}
+
+static void compare_effects(struct cmp *c) {
+    const struct fx_effect *a = c->a, *b = c->b;
+    /* parameters: those in one only, and the common ones' types, order, flags, annotations and values */
+    uint32_t last = 0, have_last = 0;
+    for (uint32_t i = 0; i < a->nparams; i++) {
+        const struct fx_param *x = &a->params[i];
+        uint32_t j;
+        const struct fx_param *y = param_named(b, x->name, &j);
+        if (!y) { finding(c, K_ONLY_OURS, x->rec, NO_OFF); continue; }
+        if (have_last && j < last) must(c, "common parameters in another order (offsets 0x%X and 0x%X)", x->rec, y->rec);
+        last = j, have_last = 1;
+        char *sx = fx_signature(x), *sy = fx_signature(y);
+        if (strcmp(sx, sy)) must(c, "a common parameter's type differs (offsets 0x%X and 0x%X)", x->rec, y->rec);
+        int same_type = !strcmp(sx, sy);
+        free(sx), free(sy);
+        if (!same_type) continue;
+        if (x->flags != y->flags) finding(c, K_FLAGS, x->rec + 8, y->rec + 8);
+        cmp_annos(c, x->annos, x->nannos, y->annos, y->nannos, x->rec, y->rec);
+        cmp_leaves(c, x, y);
+    }
+    for (uint32_t j = 0; j < b->nparams; j++) {
+        uint32_t i;
+        if (!param_named(a, b->params[j].name, &i)) finding(c, K_ONLY_SHIPPED, NO_OFF, b->params[j].rec);
+    }
+    /* techniques and passes: the same names in the same order; per pass the same shader slots and versions */
+    if (a->ntechs != b->ntechs) must(c, "%u and %u techniques", a->ntechs, b->ntechs);
+    for (uint32_t t = 0; t < a->ntechs && t < b->ntechs; t++) {
+        const struct fx_technique *x = &a->techs[t], *y = &b->techs[t];
+        if (!same_str(x->name, y->name)) must(c, "technique %u's names differ (offsets 0x%X and 0x%X)", t, off_in(a, x->name), off_in(b, y->name));
+        if (x->npasses != y->npasses) must(c, "technique %u: %u and %u passes", t, x->npasses, y->npasses);
+        cmp_annos(c, x->annos, x->nannos, y->annos, y->nannos, off_in(a, x->name), off_in(b, y->name));
+        for (uint32_t p = 0; p < x->npasses && p < y->npasses; p++) {
+            const struct fx_pass *px = &x->passes[p], *py = &y->passes[p];
+            if (!same_str(px->name, py->name)) must(c, "technique %u pass %u's names differ", t, p);
+            uint64_t sx[32], sy[32];
+            uint32_t nx = pass_shaders(a, px, sx, 32), ny = pass_shaders(b, py, sy, 32);
+            if (nx != ny || memcmp(sx, sy, 8u * nx))
+                must(c, "technique %u pass %u: shader slots differ (%u and %u; first 0x%llX and 0x%llX)", t, p, nx, ny,
+                     nx ? (unsigned long long)sx[0] : 0ull, ny ? (unsigned long long)sy[0] : 0ull);
+            cmp_annos(c, px->annos, px->nannos, py->annos, py->nannos, off_in(a, px->name), off_in(b, py->name));
+            cmp_states(c, px->states, px->nstates, py->states, py->nstates, off_in(a, px->name), off_in(b, py->name), 1);
+        }
+    }
+}
+static void count_pass_shaders(const struct fx_effect *e, uint32_t *passes, uint32_t *shaders) {
+    *passes = *shaders = 0;
+    for (uint32_t t = 0; t < e->ntechs; t++)
+        for (uint32_t p = 0; p < e->techs[t].npasses; p++, (*passes)++)
+            for (uint32_t s = 0; s < e->techs[t].passes[p].nstates; s++) {
+                const struct fx_state *st = &e->techs[t].passes[p].states[s];
+                const struct fx_object *o = is_shader_op(st->op) ? state_shader(e, st) : NULL;
+                *shaders += o && o->size >= 4;
+            }
+}
+
+/* ID3DXEffectCompiler::CompileEffect */
+enum { EC_COMPILEEFFECT = 59 };
+#define SDV_SOURCE_AT 372u
+static int sdv_one(const char *game, const char *name) {
+    char path[2048];
+    snprintf(path, sizeof path, "%s/Data/effects/%s.sdv", game, name);
+    uint32_t n;
+    uint8_t *f = host_file(path, &n);
+    if (!f) { printf("sdv %s: no file\n", name); return 0; }
+    static const uint8_t magic[4] = { 0x01, 0x09, 0xFF, 0xFE };
+    uint32_t fx = 0;
+    while (fx + 4 <= n && memcmp(f + fx, magic, 4)) fx++;
+    uint32_t srclen = n > SDV_SOURCE_AT ? (uint32_t)strnlen((const char *)f + SDV_SOURCE_AT, n - SDV_SOURCE_AT) : 0;
+    if (fx + 4 > n || !srclen || fx < SDV_SOURCE_AT + srclen) {
+        printf("sdv %s: source %u bytes at %u, fx_2_0 at %u of %u\n", name, srclen, SDV_SOURCE_AT, fx, n);
+        free(f);
+        return 0;
+    }
+    /* our compile: D3DXCreateEffectCompiler(text, no defines, no include, flags 0), CompileEffect(0) */
+    uint32_t src = gmem(srclen + 1), out = gmem(16);
+    memcpy(hle_ptr(src), f + SDV_SOURCE_AT, srclen);
+    uint32_t hr = lcall("D3DXCreateEffectCompiler", 7, src, srclen, 0u, 0u, 0u, out, out + 4);
+    uint32_t compiler = MEM32(out), buf = 0;
+    if (!(hr & 0x80000000u)) {
+        release(MEM32(out + 4));
+        MEM32(out + 4) = 0;
+        hr = vcall(compiler, EC_COMPILEEFFECT, 3, 0u, out + 8, out + 4);
+        buf = MEM32(out + 8);
+    }
+    release(compiler);
+    if ((hr & 0x80000000u) || !buf) {
+        char lines[128];
+        error_lines(MEM32(out + 4), lines, sizeof lines);
+        printf("sdv %s: compile 0x%08X, error lines %s\n", name, hr, lines);
+        release(MEM32(out + 4)), release(buf);
+        free(f);
+        return 0;
+    }
+    release(MEM32(out + 4));
+    struct fx_effect a = { 0 }, b = { 0 };
+    char ea[256], eb[256];
+    int pa = fx_parse(hle_ptr(vcall(buf, BUF_PTR, 0)), vcall(buf, BUF_SIZE, 0), &a, ea, sizeof ea);
+    int pb = fx_parse(f + fx, n - fx, &b, eb, sizeof eb);
+    release(buf);
+    free(f);
+    if (pa || pb) {                                     /* (a message may quote a name: cut it at the quote) */
+        ea[strcspn(ea, "'")] = 0, eb[strcspn(eb, "'")] = 0;
+        printf("sdv %s: compile 0x%08X, fx_parse rejects %s: %s\n", name, hr, pa ? "ours" : "the shipped binary", pa ? ea : eb);
+        fx_free(&a), fx_free(&b);
+        return 0;
+    }
+    struct cmp c = { .a = &a, .b = &b };
+    compare_effects(&c);
+    uint32_t passa, passb, common = 0, j;
+    count_pass_shaders(&a, &passa, &c.sha), count_pass_shaders(&b, &passb, &c.shb);
+    for (uint32_t i = 0; i < a.nparams; i++) common += param_named(&b, a.params[i].name, &j) != NULL;
+    char list[1024] = "";
+    for (int k = 0; k < NKINDS; k++) {
+        if (!c.n[k]) continue;
+        size_t l = strlen(list);
+        char oa[16] = "-", ob[16] = "-";
+        if (c.oa[k] != NO_OFF) snprintf(oa, sizeof oa, "0x%X", c.oa[k]);
+        if (c.ob[k] != NO_OFF) snprintf(ob, sizeof ob, "0x%X", c.ob[k]);
+        snprintf(list + l, sizeof list - l, "%s%s=%u@%s/%s", l ? " " : "", g_kind[k], c.n[k], oa, ob);
+    }
+    printf("sdv %s: compile 0x%08X, params %u/%u common %u, techniques %u/%u, passes %u/%u, shaders %u/%u, "
+           "identical shaders %u, findings %s\n", name, hr, a.nparams, b.nparams, common, a.ntechs, b.ntechs, passa,
+           passb, c.sha, c.shb, c.identical, list[0] ? list : "none");
+    if (c.must[0]) printf("sdv %s: must-hold failed: %s\n", name, c.must);
+    fflush(stdout);
+    fx_free(&a), fx_free(&b);
+    return !c.must[0];
+}
+static int c_sdv_oracle(void) {
+    if (g_argc < 2) FAIL("usage: sdv_oracle <game dir> <name>...");
+    int bad = 0;
+    for (int i = 1; i < g_argc; i++) bad += !sdv_one(g_argv[0], g_argv[i]);
+    if (bad) FAIL("%d of %d files failed", bad, g_argc - 1);
+    return 1;
+}
+
+/* D3DXCompileShader as the game's wrappers call it (sub_AB3130, sub_AB31F0): the decoded file's bytes, its length,
+ * the defines (none at both sites), no include, the entry and profile the caller passes, D3DXSHADER_DEBUG (1),
+ * and no constant table */
+#define GAME_COMPILE_FLAGS 1u
+static int fxsrc_one(const char *game, const char *item) {
+    char stem[256], profile[32];
+    unsigned entry = 0, defines = 0;
+    int k = sscanf(item, "%255[^:]:%x:%31[^:]:%x", stem, &entry, profile, &defines);
+    if (k < 3) { printf("fxsrc %s: not <stem>:<entry va>:<profile>[:<defines va>]\n", item); return 0; }
+    char path[2048];
+    snprintf(path, sizeof path, "%s/Data/EncryptedShaders/%s.fx.caesar3", game, stem);
+    uint32_t n;
+    uint8_t *f = host_file(path, &n);
+    if (!f) { printf("fxsrc %s: no file\n", stem); return 0; }
+    if (entry < 0x400000u || entry >= 0x2451210u || !memchr(hle_ptr(entry), 0, 256)) {
+        printf("fxsrc %s 0x%08X: the entry is no string in white.exe\n", stem, entry);
+        free(f);
+        return 0;
+    }
+    uint32_t src = gmem(n + 1), out = gmem(12);
+    for (uint32_t i = 0; i < n; i++) MEM8(src + i) = (uint8_t)(f[i] - 3);
+    free(f);
+    uint32_t hr = lcall("D3DXCompileShader", 10, src, n, (uint32_t)defines, 0u, (uint32_t)entry, gstr(profile),
+                        GAME_COMPILE_FLAGS, out, out + 4, 0u);
+    struct compiled c = { .hr = hr, .shader = MEM32(out), .errors = MEM32(out + 4) };
+    take_tokens(&c);
+    int ok = 0;
+    if (!(hr & 0x80000000u) && c.ntok) {
+        struct sm_shader s;
+        char err[256];
+        ok = !sm_decode(c.tok, c.ntok, &s, err, sizeof err);
+        if (ok) sm_free(&s);
+    }
+    printf("fxsrc %s 0x%08X %s: %u bytes, compile 0x%08X, version 0x%08X, %u tokens, decode %s\n", stem, entry, profile,
+           n, hr, c.ntok ? c.tok[0] : 0, c.ntok, ok ? "ok" : "FAIL");
+    if (hr & 0x80000000u) {
+        char lines[128];
+        error_lines(c.errors, lines, sizeof lines);
+        printf("fxsrc %s 0x%08X %s: error lines %s\n", stem, entry, profile, lines);
+    }
+    fflush(stdout);
+    drop(&c);
+    return ok;
+}
+static int c_fxsrc_compile(void) {
+    if (g_argc < 2) FAIL("usage: fxsrc_compile <game dir> <stem>:<entry va>:<profile>[:<defines va>]...");
+    int bad = 0;
+    for (int i = 1; i < g_argc; i++) bad += !fxsrc_one(g_argv[0], g_argv[i]);
+    if (bad) FAIL("%d of %d compiles failed", bad, g_argc - 1);
+    return 1;
+}
+
 static const struct { const char *name; int (*fn)(void); } g_checks[] = {
     { "d3dx_load", c_d3dx_load }, { "d3dx_data_import", c_d3dx_data_import },
     { "d3dx_module_name", c_d3dx_module_name }, { "d3dx_validator", c_d3dx_validator }, { "d3dx_cpu", c_d3dx_cpu },
@@ -656,16 +1107,21 @@ static const struct { const char *name; int (*fn)(void); } g_checks[] = {
     { "hlsl_effect", c_hlsl_effect }, { "hlsl_effect_stateblock", c_hlsl_effect_stateblock },
     { "hlsl_effect_pool", c_hlsl_effect_pool }, { "hlsl_effect_error", c_hlsl_effect_error },
     { "hlsl_fragment_linker", c_hlsl_fragment_linker }, { "hlsl_sphere_draw", c_hlsl_sphere_draw },
+    { "sdv_oracle", c_sdv_oracle }, { "fxsrc_compile", c_fxsrc_compile },
 };
 
 int bw2_d3dx_check(const char *dir) {
     g_dir = dir;
     mach_enter();
     int failed = 0;
-    char line[256];
+    static char line[16384];
     while (fgets(line, sizeof line, stdin)) {
         line[strcspn(line, "\r\n")] = 0;
         if (!line[0]) continue;
+        g_argc = 0;                                     /* "<check> [arguments]", split at spaces */
+        char *save = NULL;
+        strtok_r(line, " ", &save);
+        for (char *w; g_argc < 64 && (w = strtok_r(NULL, " ", &save));) g_argv[g_argc++] = w;
         size_t i = 0;
         while (i < sizeof g_checks / sizeof *g_checks && strcmp(g_checks[i].name, line)) i++;
         g_check = line;

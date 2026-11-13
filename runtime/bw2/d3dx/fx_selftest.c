@@ -218,6 +218,29 @@ static void group_fx_params(const char *path) {
     CHECKEQ(vcall(e, FX_GetFloatArray, 3, h[11], out, 3u), D3D_OK);
     CHECKF(gf(out), 1.5f), CHECKF(gf(out + 4), 2.5f), CHECKF(gf(out + 8), 3.5f);
 
+    /* the byte offsets plan 9's oracle reports: each record and value where the binary holds it */
+    struct fx_effect *x = fx_effect_of(e);
+    uint32_t nanno = 0, nstate = 0;
+    for (uint32_t i = 0; i < x->nparams; i++) {
+        const struct fx_param *p = &x->params[i];
+        uint32_t v;
+        memcpy(&v, x->raw + p->rec + 8, 4), CHECKEQ(v, p->flags);       /* typedef, value, flags, annotations */
+        memcpy(&v, x->raw + p->rec + 4, 4), CHECKEQ(v + 8, p->voff);
+        if (p->cls != FXC_OBJECT && p->cls != FXC_STRUCT && p->bytes) CHECK(!memcmp(x->raw + p->voff, p->data, p->bytes));
+        for (uint32_t k = 0; k < p->nannos; k++, nanno++)
+            memcpy(&v, x->raw + p->annos[k].rec + 4, 4), CHECKEQ(v + 8, p->annos[k].voff);
+    }
+    for (uint32_t t = 0; t < x->ntechs; t++)
+        for (uint32_t p = 0; p < x->techs[t].npasses; p++)
+            for (uint32_t s = 0; s < x->techs[t].passes[p].nstates; s++, nstate++) {
+                const struct fx_state *st = &x->techs[t].passes[p].states[s];
+                uint32_t v;
+                memcpy(&v, x->raw + st->at, 4), CHECKEQ(v, st->op);
+                memcpy(&v, x->raw + st->at + 12, 4), CHECKEQ(v + 8, st->param.voff);
+            }
+    CHECKEQ(nanno, 2);
+    CHECK(nstate > 0);
+
     /* each Set, then Get */
     CHECKEQ(vcall(e, FX_SetBool, 2, h[0], 0u), D3D_OK);
     CHECKEQ(vcall(e, FX_GetBool, 2, h[0], out), D3D_OK), CHECKEQ(MEM32(out), 0);

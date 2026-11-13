@@ -1,10 +1,13 @@
-"""Plan 9 Tasks 4-5: the lifted d3dx9_25.dll, loaded lazily beside the engine; D3DXCompileShader, HLSL effects,
-the fragment linker and D3DXCreateSphere through it.
+"""Plan 9 Tasks 4-6: the lifted d3dx9_25.dll, loaded lazily beside the engine; D3DXCompileShader, HLSL effects,
+the fragment linker and D3DXCreateSphere through it; and (Task 6) the lifted compiler against the game's own
+compiled effects and its D3DXCompileShader sources.
 
 Each test runs the engine's --check-d3dx harness (runtime/bw2/d3dx/d3dx_check.c) after the game's boot setup:
-the check names go in on stdin, one per line, and each prints "<check>: ok" or "<check>: FAIL <why>". Every
-HLSL and assembly text here is written for the test into the check folder; nothing from the game is read or
-written. The lifted DLL comes from the user's disc 1 (Task 1), so every test needs the game files."""
+the check names (with any arguments) go in on stdin, one per line, and each prints "<check>: ok" or
+"<check>: FAIL <why>". Every HLSL and assembly text here is written for the test into the check folder. Task 6's
+two checks read the game's .sdv and .fx.caesar3 files in memory and print numbers, kind names, offsets, profiles
+and addresses only; nothing from the game is written. The lifted DLL comes from the user's disc 1 (Task 1), so
+every test needs the game files."""
 import os
 import re
 import shutil
@@ -284,3 +287,95 @@ def test_hlsl_sphere_draw(tmp_path):
     passed(r, "hlsl_sphere_draw")
     assert info(r, "hlsl_sphere_draw", "mesh") == "vertices 26 faces 48 fvf 0x00000012"
     assert info(r, "hlsl_sphere_draw", "draws") == "1"
+
+
+# ---- Task 6: the lifted compiler against the game's own compiled effects ----
+# Every name below is a file name in the game tree; the checks read the files in memory and print numbers, kind
+# names and offsets only.
+
+# Data/effects/*.sdv whose source has no #include ("Measured" item 5)
+SDV_SOURCES = ["Debug", "DiscDrawCompose", "DiscDrawRender", "LowEndSeaWater", "SeaWater", "Sky", "Sun",
+               "TexBlendDebugDraw", "ToneMapping", "WaterSplash", "basic_particle", "basic_particle_pixel",
+               "terrain_depth_cueing", "terrain_fogging", "terrain_projected_shadows"]
+# Step 4: per file, the version findings (kind -> count; the shipped binaries come from compiler 5.04.00.3900, ours
+# from 9.06.168.0000) and the pass shaders whose tokens without comments are equal
+# (docs/research/hlsl.md: every one is constant register allocation, with the same instructions, literals and def
+# values, plus instruction order in two LowEndSeaWater vertex shaders)
+VERSION_FINDINGS = {
+    "LowEndSeaWater": {"state_value_differs": 3, "shader_body_differs": 5},
+    "SeaWater": {"state_value_differs": 1, "shader_body_differs": 1},
+    "basic_particle": {"state_value_differs": 2, "shader_body_differs": 2},
+}
+IDENTICAL_SHADERS = {"Debug": 4, "DiscDrawCompose": 2, "DiscDrawRender": 2, "LowEndSeaWater": 1, "SeaWater": 1, "Sky": 8,
+                     "Sun": 6, "TexBlendDebugDraw": 2, "ToneMapping": 0, "WaterSplash": 4, "basic_particle": 0,
+                     "basic_particle_pixel": 3, "terrain_depth_cueing": 2, "terrain_fogging": 2,
+                     "terrain_projected_shadows": 2}
+FINDING_KINDS = {"param_only_ours", "param_only_shipped", "annotation_differs", "param_flags_differs",
+                 "state_order_differs", "state_value_differs", "shader_body_differs"}
+SDV_LINE = re.compile(r"^sdv (\S+): compile 0x([0-9A-F]{8}), params (\d+)/(\d+) common (\d+), techniques (\d+)/(\d+), "
+                      r"passes (\d+)/(\d+), shaders (\d+)/(\d+), identical shaders (\d+), findings (.*)$", re.M)
+FINDING = re.compile(r"^([a-z_]+)=(\d+)@(0x[0-9A-F]+|-)/(0x[0-9A-F]+|-)$")
+
+# Data/EncryptedShaders/*.fx.caesar3 ("Measured" item 13), as <stem>:<entry va>:<profile>[:<defines va>], from the
+# game's D3DXCompileShader call sites (Step 3, docs/research/hlsl.md)
+FXSRC_STEMS = ["Decay", "EZRoad", "Insect", "IRing", "RoadCobblesOldSystem", "Windowlight", "ZRock"]
+# The 11 calls of sub_AB31F0/sub_AB3130 that name a shipped file (entry strings at their addresses; flags 1, no
+# defines). RoadCobblesOldSystem and ZRock are named by no code: they take the two entry strings the other callers
+# pass at 0xD0C7D0 (vertex) and 0xD0C7B0 (pixel), at 2_0 and 1_1 (RoadCobblesOldSystem's pixel shader needs 2_0).
+FXSRC_ITEMS = ["Decay:0xD0C7D0:vs_2_0", "Decay:0xD0C7B0:ps_2_0",
+               "EZRoad:0xD0C7D0:vs_2_0", "EZRoad:0xD0C7B0:ps_2_0", "EZRoad:0xD0D92C:vs_1_1", "EZRoad:0xD0D91C:ps_1_1",
+               "Insect:0xD0F6BC:vs_1_1",
+               "IRing:0xD0D7A0:vs_1_1", "IRing:0xD0D788:vs_1_1",
+               "Windowlight:0xD0C7B0:ps_1_1", "Windowlight:0xD0C7D0:vs_1_1",
+               "RoadCobblesOldSystem:0xD0C7D0:vs_2_0", "RoadCobblesOldSystem:0xD0C7B0:ps_2_0",
+               "ZRock:0xD0C7D0:vs_1_1", "ZRock:0xD0C7B0:ps_1_1"]
+FXSRC_LINE = re.compile(r"^fxsrc (\S+) 0x([0-9A-F]{8}) (\S+): (\d+) bytes, compile 0x([0-9A-F]{8}), "
+                        r"version 0x([0-9A-F]{8}), (\d+) tokens, decode (ok|FAIL)$", re.M)
+GAME = paths.GAMEFILES / "game"
+
+
+def findings_of(text):
+    """'kind=n@0xa/0xb ...' (or 'none') -> {kind: n}"""
+    if text == "none":
+        return {}
+    out = {}
+    for item in text.split():
+        m = FINDING.match(item)
+        assert m, f"finding {item!r}"
+        assert m.group(1) in FINDING_KINDS, f"a new kind of difference: {item}"
+        out[m.group(1)] = int(m.group(2))
+    return out
+
+
+def sdv_lines(r):
+    return {m.group(1): m for m in SDV_LINE.finditer(r.stdout)}
+
+
+@pytest.mark.gamefiles
+def test_sdv_oracle(tmp_path):
+    r = run_checks(tmp_path, ["sdv_oracle " + str(GAME) + " " + " ".join(SDV_SOURCES)], timeout=1800)
+    passed(r, "sdv_oracle")
+    lines = sdv_lines(r)
+    assert sorted(lines) == sorted(SDV_SOURCES), r.stdout[-3000:]
+    for name in SDV_SOURCES:
+        m = lines[name]
+        assert m.group(2) == "00000000", m.group(0)
+        assert m.group(6) == m.group(7) and m.group(8) == m.group(9) and m.group(10) == m.group(11), m.group(0)
+        assert findings_of(m.group(13)) == VERSION_FINDINGS.get(name, {}), m.group(0)
+        assert int(m.group(12)) == IDENTICAL_SHADERS[name], m.group(0)
+
+
+@pytest.mark.gamefiles
+def test_fxsrc_compile(tmp_path):
+    assert {item.split(":")[0] for item in FXSRC_ITEMS} == set(FXSRC_STEMS)
+    r = run_checks(tmp_path, ["fxsrc_compile " + str(GAME) + " " + " ".join(FXSRC_ITEMS)], timeout=1800)
+    passed(r, "fxsrc_compile")
+    got = FXSRC_LINE.findall(r.stdout)
+    assert len(got) == len(FXSRC_ITEMS), r.stdout[-3000:]
+    for (stem, va, profile, size, hr, version, ntok, decode), item in zip(got, FXSRC_ITEMS):
+        want = item.split(":")
+        assert (stem, int(va, 16), profile) == (want[0], int(want[1], 16), want[2]), (item, stem, va, profile)
+        assert hr == "00000000" and decode == "ok" and int(size) > 0 and int(ntok) > 1, (item, hr, decode)
+        kind, major, minor = re.fullmatch(r"(vs|ps)_(\d)_(\w)", profile).groups()
+        minor = 0xFF if minor == "sw" else int(minor)
+        assert int(version, 16) == (0xFFFE0000 if kind == "vs" else 0xFFFF0000) | int(major) << 8 | minor, (item, version)

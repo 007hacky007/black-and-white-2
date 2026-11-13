@@ -132,3 +132,124 @@ bytes of fx_2_0 and **2 techniques** (the `ToneMapping.sdv` source the text carr
 `technique` of its own, line 423 of that source, besides the generated one), in 8-25 ms. The boot
 then draws on and stops at `_BinkOpen@8` (`sub_0093C7B0`), plan 10's layer; Task 7 measures that
 stretch.
+
+## The game's own compile inputs (Task 6)
+
+### `D3DXCompileShader` call sites
+
+`white.exe` calls `D3DXCompileShader` (thunk `0xB523D8`) from two wrappers of the same shape:
+`sub_AB31F0` (call `0xAB324B`, then the device wrapper's vertex shader creation) and `sub_AB3130`
+(call `0xAB318B`, the pixel shader one). Each takes `(file name, profile, entry)`, calls `sub_AB2EE0`
+to load the text and then passes:
+
+| Argument | Value |
+| --- | --- |
+| `pSrcData`, `SrcDataLen` | the global buffer `0x23F75C8` and the length at `0x23F75C0` that `sub_AB2EE0` reads |
+| `pDefines`, `pInclude` | 0, 0 |
+| `pFunctionName`, `pProfile` | the wrapper's third and second arguments, string constants at each caller |
+| `Flags` | 1 (`D3DXSHADER_DEBUG`) |
+| `ppConstantTable` | 0 |
+
+`sub_AB2EE0` builds the file's path in the `EncryptedShaders` folder with the `.caesar3` extension (the
+names are given without the folder), reads at most `0x3FFF` bytes into the buffer (every shipped
+`.fx.caesar3` is smaller, the largest 12,017 bytes) and subtracts 3 from each byte (the loop at
+`0xAB2F95`). No call goes through
+`D3DXGetVertexShaderProfile`/`D3DXGetPixelShaderProfile`: every profile is a string constant.
+
+The 13 calls of the two wrappers, with the addresses of the strings they pass (the test pins these as
+`<stem>:<entry va>:<profile>`; no game string enters it):
+
+| Call | Wrapper | File | Entry string | Profile |
+| --- | --- | --- | --- | --- |
+| `0xA17214` | VS | not shipped (name at `0xD0C7B8`) | `0xD0C7D0` | `vs_1_1` |
+| `0xA1723A` | PS | not shipped (name at `0xD0C7B8`) | `0xD0C7B0` | `ps_1_1` |
+| `0xA574B2` | VS | `IRing` | `0xD0D7A0` | `vs_1_1` |
+| `0xA574D6` | VS | `IRing` | `0xD0D788` | `vs_1_1` |
+| `0xA62A7D` | VS | `EZRoad` | `0xD0C7D0` | `vs_2_0` |
+| `0xA62AA2` | PS | `EZRoad` | `0xD0C7B0` | `ps_2_0` |
+| `0xA62B43` | VS | `EZRoad` | `0xD0D92C` | `vs_1_1` |
+| `0xA62B68` | PS | `EZRoad` | `0xD0D91C` | `ps_1_1` |
+| `0xA8F9DB` | PS | `Windowlight` | `0xD0C7B0` | `ps_1_1` |
+| `0xA8F9FF` | VS | `Windowlight` | `0xD0C7D0` | `vs_1_1` |
+| `0xA9F9EA` | VS | `Insect` | `0xD0F6BC` | `vs_1_1` |
+| `0xAA0A65` | VS | `Decay` | `0xD0C7D0` | `vs_2_0` |
+| `0xAA0A8A` | PS | `Decay` | `0xD0C7B0` | `ps_2_0` |
+
+The first two name a file the game tree does not hold; on Windows the read gives 0 bytes there and the
+compile fails, so that pair is not in the test.
+
+`RoadCobblesOldSystem` and `ZRock` are named by no code: their names occur in no game binary (ASCII or
+UTF-16; `Everything.stuff` holds only a texture of a similar name). The game never compiles them.
+Their own functions carry the two entry names the other callers pass at `0xD0C7D0` (vertex) and
+`0xD0C7B0` (pixel), so the test compiles each with those entries and the flags above:
+`RoadCobblesOldSystem` at `vs_2_0`/`ps_2_0` (its pixel shader at `ps_1_1` fails with `E_FAIL`, error
+`X4502` on line 24: it needs a 2.0 model, like `EZRoad`'s high-end pair) and `ZRock` at `vs_1_1`/`ps_1_1`
+(it compiles at 2_0 as well).
+
+### `fxsrc_compile`: the 15 compiles
+
+Check `fxsrc_compile` decodes each file in memory (minus 3 per byte), calls the lifted
+`D3DXCompileShader` with the entry string read from the mapped `white.exe` and the arguments above, and
+decodes the result with `sm_decode`. All 15 give `S_OK`, the version token of their profile and a
+shader `sm_decode` accepts; no trap, no unanswered import and no `[module]` line on the way.
+
+| File | Profiles (tokens) |
+| --- | --- |
+| `Decay` | `vs_2_0` (229), `ps_2_0` (609) |
+| `EZRoad` | `vs_2_0` (426), `ps_2_0` (1,240), `vs_1_1` (241), `ps_1_1` (215) |
+| `Insect` | `vs_1_1` (1,056) |
+| `IRing` | `vs_1_1` (657), `vs_1_1` (687) |
+| `Windowlight` | `ps_1_1` (163), `vs_1_1` (226) |
+| `RoadCobblesOldSystem` | `vs_2_0` (283), `ps_2_0` (719) |
+| `ZRock` | `vs_1_1` (334), `ps_1_1` (122) |
+
+## The oracle: the shipped `.sdv` effects (Task 6)
+
+Check `sdv_oracle` takes each self-contained `.sdv` source (the NUL-ended text at offset 372),
+compiles it with the lifted `D3DXCreateEffectCompiler` and `CompileEffect` (no defines, no include,
+flags 0), parses our binary and the shipped one (at the first `01 09 FF FE`) with plan 5's `fx_parse`,
+and compares them: techniques and passes by name and order, each pass's shader slots and versions,
+common parameters' types, order, flags, annotations and values, every state (pass and sampler) by
+operation, order and value, shaders with every comment token stripped, and preshaders and state
+expressions by their constant table entries, `CLIT`, `PRSI` and `FXLC`. `fx_parse` records the byte
+offset of each parameter's record and value and each state's record for this (`fx.h`).
+
+All 15 sources compile with `S_OK`, both binaries parse, and every must-hold item holds: the same
+technique and pass names in the same order (`ToneMapping`'s one technique has no pass in either), the
+same shader slots and versions in every pass, every parameter in both binaries with the same type and
+order (no parameter is in one binary only), the same flags, annotations and values.
+
+| File | Params | Techniques | Passes | Pass shaders | Identical shaders | Version findings (ours/shipped offset of the first) |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Debug` | 2 | 2 | 2 | 4 | 4 | none |
+| `DiscDrawCompose` | 2 | 1 | 1 | 2 | 2 | none |
+| `DiscDrawRender` | 2 | 1 | 1 | 2 | 2 | none |
+| `LowEndSeaWater` | 32 | 2 | 3 | 6 | 1 | `state_value_differs` 3 (`0x2F78`/`0x2F7C`), `shader_body_differs` 5 (`0x2E28`/`0x2E30`) |
+| `SeaWater` | 49 | 2 | 1 | 2 | 1 | `state_value_differs` 1 (`0x1CCC`/`0x1CC4`), `shader_body_differs` 1 (`0x1A88`/`0x1A84`) |
+| `Sky` | 21 | 4 | 4 | 8 | 8 | none |
+| `Sun` | 11 | 3 | 3 | 6 | 6 | none |
+| `TexBlendDebugDraw` | 2 | 1 | 1 | 2 | 2 | none |
+| `ToneMapping` | 21 | 1 | 0 | 0 | 0 | none |
+| `WaterSplash` | 14 | 2 | 2 | 4 | 4 | none |
+| `basic_particle` | 14 | 2 | 2 | 2 | 0 | `state_value_differs` 2 (`0xFB8`/`0xFB4`), `shader_body_differs` 2 (`0xDA0`/`0xD9C`) |
+| `basic_particle_pixel` | 11 | 3 | 3 | 3 | 3 | none |
+| `terrain_depth_cueing` | 9 | 1 | 1 | 2 | 2 | none |
+| `terrain_fogging` | 4 | 1 | 1 | 2 | 2 | none |
+| `terrain_projected_shadows` | 4 | 1 | 1 | 2 | 2 | none |
+
+39 of the 47 pass shaders are equal token for token once comments are stripped. The 8 that differ and
+the 6 preshaders were read at the printed offsets (a one-off token dump, not kept), and every
+difference is in the bytes of the binaries, so none is a parser bug:
+
+- **`shader_body_differs`** (all 8): the same instruction count, opcodes, source and destination
+  registers, swizzles and `def` values (e.g. the same float bits for every literal); only the constant
+  register numbers differ (the two compilers lay out `def` constants and parameters in another order).
+  In two `LowEndSeaWater` vertex shaders (`vs_1_1`, 127 and 87 tokens without comments) the 9.06
+  compiler also schedules a run of `dp4`/`mul`/`mad`/`mov` instructions in another order, and writes
+  `oPos.z` with a `dp4` of its own and then `oPos.xyw` where the 5.04 output writes `oPos.xyzw` at
+  once.
+- **`state_value_differs`** (all 6 are shader preshaders): the `CLIT` literals are equal double for
+  double and the `FXLC` instructions are equal opcode for opcode and input for input; only the output
+  constant registers differ, and with them the `PRSI` ranges (the 5.04 compiler sometimes splits the
+  outputs into two ranges) and the constant table's register indices. No FPU cause: no literal or
+  `def` value differs anywhere, so the x87 folding and `atof` give the 5.04 compiler's values.

@@ -52,6 +52,8 @@ struct fx_param {
     uint32_t array_lo, array_hi;             /* SetArrayRange */
     uint32_t handle;                         /* guest handle */
     uint8_t *owned;                          /* the value buffer this top-level parameter owns, or NULL */
+    uint32_t rec, voff;                      /* byte offsets in the binary: a top-level parameter's or annotation's
+                                                record (typedef, value, ...), and its value (plan 9's oracle) */
 };
 
 struct fx_state {
@@ -62,6 +64,7 @@ struct fx_state {
     uint32_t bloblen;
     struct fx_param *ref;                    /* FX_USAGE_PARAM: the parameter named; SELECTOR: the array */
     struct fx_expr *expr;                    /* an expression's (or a selector's index), parsed at first use */
+    uint32_t at;                             /* its record's byte offset in the binary (operation, index, ...) */
 };
 
 struct fx_pass {
