@@ -1,0 +1,226 @@
+# Plan 11: Settings, saving and loading in the first land Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Scripted headless runs change a setting in the front end and find it again after a restart, save a game from the first land's pause bar, quit through the game's own path, and load that save from the front end back into the land, with no stop on the way. That is the spec's "change settings, and save and load" (section 2), checked on the first land.
+
+**Architecture:**
+- **Scripts that follow the game, not the frame rate.** The engine has no stop left to end on: the land runs and waits for the player. Read counts no longer mark the same moment in two runs (headless rates measured from 41 to 343 Presents a second, and a frame dump slows a run several times over), while the game's scenes run on its own clock. `BW2_INPUT_SCRIPT` gains blocks anchored on the game's movie events (`after open`, `after last`) and on wall time (`after seconds`), and a `quit` verb. Keys are held for a wall-clock time, because the land missed 40 ms presses.
+- **Windows facts for the save files.** The save path is the game's own code on win32hle's file calls (directory make, move, delete, find). A small probe program, built on the Mac with mingw-w64 and run on the user's Windows 11 VM, records what Windows answers for the cases the save path meets. Our answers are checked against those facts and fixed where they differ.
+- **Three gamefiles boot tests** drive the front end's Options, the pause bar's save dialog and the front end's load dialog by script, and each ends through the game's own quit (`ExitProcess(0)`), so the game writes its profile as it does on Windows.
+- **Next layer:** the creature choice and the first land's tutorial (plan 12), and Bink audio tracks when a scene opens a movie that has one.
+
+**Tech Stack:** C and Objective-C (clang, arm64, macOS 13+), pcrecomp win32hle (vendored, MIT), mingw-w64 (Homebrew; a build tool for the Windows probe only, Ruling 6), the winbench Windows 11 VM, Python 3.14 and pytest.
+
+**Spec:** `docs/superpowers/specs/2026-11-10-bw2-macos-port-design.md` (sections 2, 5.2 Input and Files and saves, 7.3, 7.4, 9, 11). Facts: `docs/research/campaign.md` ("For the next plan"), `input.md`, `frontend.md`.
+
+## Measured before writing (2026-11-13)
+
+Main at `3052203`, `out/bw2` relinked (143,624,504 bytes), headless. A throwaway spike branch (deleted; nothing kept; main's engine rebuilt after it) printed the read counter every 250 reads with a monotonic time, the reads at which the intro opened and showed its last frame, every 100th `_BinkGoto@12`, and each distinct string `ID3DXFont::DrawText` drew (with a hash), and let script lines count reads from those two movie events. Frames were looked at as PNGs (`BW2_FRAME_DUMP`) in a scratch folder outside the repo and deleted. Coordinates below are client pixels at 1024x768.
+
+1. **No stop.** `NEW_GAME_SCRIPT` with `BW2_QUIT_AFTER_MOVIE=1798:1798+6000` and `+12000` (exit 0 each, no loud line): after the intro the land plays an in-engine scene over the island with both advisors, then a scene that presents the four creatures one by one, then the creature choice, where the game's hand cursor appears and follows the mouse. Without skipping, the presentation ran more than 12,000 Presents (about 130 s at 90 a second) after the intro's last frame. The land reads the mouse once per Present from the front end on, through the intro too: in one run frame `n` was read `n - 1117` throughout.
+2. **Read counts drift.** The intro's last frame came at read 26,663, 27,461 and 21,780 in three runs, and at about 16,500 in a run that dumped every 20th frame. A script line 8,000 reads after the last frame landed in the creature presentation in one run and after it in another.
+3. **Escape skips the intro, but not at once.** Escape (vk `0x1B`, scan `0x01`, down at read `r`, up at `r + 4`, about 40 ms) every 100 reads from the intro's open: the movie stopped advancing (no further `_BinkGoto@12`) at the first press after movie frame 42, 31, 68, 69 and 101 in five runs (1.3 to 4.2 s after the open), and earlier presses were ignored. The skipped intro is never closed (no `bink close` line) and never shows its last frame, so `after last 1798` never fires on that path.
+4. **Escape skips the land's scenes, then toggles the pause bar.** Further presses each cut a part of the advisor scene and of the presentation. After about 20 of them (about 27 s after the open) the choice is live, and from then on each press opens or closes the pause bar: the land frozen behind a title, and a bar along the bottom with six buttons at y = 710: continue (85), load (255, greyed in the first land), save (425), options (594), restart land (765) and quit (936). Which state a run ends in depends on how many presses the scenes took, which varied.
+5. **The land's UI text is not ID3DXFont's.** Over a run from boot to the pause bar, `DrawText` drew 15 distinct strings, all in the front end's profile dialog, none in the land. So no engine-side hook sees the pause bar or a dialog; scripts wait by time (Ruling 5).
+6. **The save dialog.** With the choice live, Escape and then a click at the save button (425, 710) open a dialog centred on the screen: a list whose first row is the new-save entry (390, 263), a name field (510, 480), and OK (409, 547), a greyed delete button (511, 547) and cancel (610, 547). A run that went on to click the new-save row, type a key and click OK reached the dialog in one run only (item 4's toggling), so the save itself is not yet measured.
+7. **The New Game autosave** (a traced run, `BW2_TRACE_IMPORTS=1 HLE_FILETRACE=1`, to the intro's first frame): the game makes its profile folders with `SHCreateDirectoryExA` (`sub_0060FFE0`, 7 calls; `sub_0060F8E0`, 2), `CreateDirectoryA` (`sub_00AD997A`, 18), probes with `GetFileAttributesA` (`sub_00923DB0`, 452; `sub_008872F0`, 60) and `FindFirstFileA`/`FindNextFileA`/`FindClose` (`sub_0091F270`: 61, 54, 54; 6 of the firsts on folders that do not exist yet), writes the files, then `DeleteFileA` and `MoveFileA` (`sub_006137B0`, 4 each), `DeleteFileA` (`sub_00AD62F0`, 3; `sub_0060F940`, 1; `ScriptLibraryR.dll`'s `sub_1003D734`, 1) and one `RemoveDirectoryA` (`sub_0060F910`). `CoFileTimeToDosDateTime` (`sub_0091DFB0`) runs 108 times. The result is five files in `Profiles/~ab/Saved Games/Autosave/<folder>/1/` (`Game.sav` 3,698,360 bytes, `Game.sav.meta` 1,114,980, `Script.sav` 903,032, `SaveGame.inf` 284, `ter.sav` 15,555,915), `Profiles/~ab/helpstats.dat`, and empty `Saved Games/Pictures`, `Current`, `Cache` and `Persistant Data` folders. The autosave's folder name is six characters that differed in every run.
+8. **The profile is written on the game's own quit.** A support folder reused after a New Game run that `BW2_QUIT_AFTER_MOVIE` ended shows the front end with its continue and load buttons greyed: that run never quit by the game's path, so its profile was not rewritten. The front end's quit button (936, 711) asks for confirmation (yes at (424, 409), no at (598, 409)); yes runs the game's close path (its debug output marks the close and the D3D release) and `[win32hle] ExitProcess(0)`, exit 0, and rewrites `Settings.ini` and `Profiles/~ab/Profile.ini`.
+9. **Settings.** In the front end, options (766, 711) opens a panel with tabs at y = 181 (audio 335, video 452, input 570) and a credits tab (687, 174), and restore-defaults (335, 573) and exit (688, 573) along its foot. The video tab lists resolutions from (448, 242) down in 18-pixel rows (640x480, 800x600, 1024x768, 1152x864, ...), with detail boxes, a subtitles box and four sliders. Choosing 800x600 and exit asks to save the changes (yes (424, 409), no (599, 409)). Yes resets the device to 800x600 full screen (the game's debug line for its reset names the size), every later frame is 800x600 (480,000 pixels, all non-black), and both `Settings.ini` and `Profile.ini` record the new size at once.
+10. **The Windows VM** (winbench; Microsoft Basic Display Adapter, driver 10.0.26100.1, 1280x800, no GPU): the patched game tree (without `SECDRV.SYS`, `DrvMgt.dll` and `00000000.256`) with disc 1's `d3dx9_25.dll` beside `white.exe` starts, opens its window and stops at once with its fatal-error box saying it could not create its 3D device. It asked for no disc and no driver. It made `Documents/Black & White 2/Cache` and `Profiles` and nothing else. The game cannot be a reference there; Win32 probes can. The VM was snapshotted first and rolled back to that snapshot after (Ruling 7). No mingw-w64 is installed on this Mac yet.
+11. **Absent** in every run: any disc, volume or driver question, any tripwire, any call from the protection VM beyond `GetCurrentThreadId`, and any `owned by a later plan` line.
+
+**The engine today:**
+- `runtime/bw2/input/script.c` reads `BW2_INPUT_SCRIPT` once at the first read; each line is `<read> <verb> ...` with absolute, non-decreasing read numbers; `bw2_script_at_read(n)` pushes due events. Verbs: `move`, `down`, `up`, `wheel`, `key`, `close`.
+- `runtime/bw2/video/binkw32.c` prints `[bw2] bink open: ...` (with `BW2_BINK_LOG`) in `_BinkOpen@8` and `[bw2] bink last frame: <frames>` once per movie in `_BinkCopyToBuffer@28`.
+- Save-path files: `GetFileAttributesA`, `CreateDirectoryA`, `RemoveDirectoryA`, `DeleteFileA`, `MoveFileA`, `FindFirstFileA`/`FindNextFileA` are win32hle's (`third_party/pcrecomp/runtime/win32hle/kernel32_ext.c`); `runtime/bw2/mount.c` wraps `DeleteFileA`, `RemoveDirectoryA` and `MoveFileA` to refuse the read-only game tree; `SHCreateDirectoryExA` is ours (`runtime/bw2/shell.c`); `CoFileTimeToDosDateTime` is win32hle's `ole32.c`. `FindFirstFileA` sorts its names without case (`by_name`, `strcasecmp`, dots first) and answers `ERROR_FILE_NOT_FOUND` for a pattern in a folder that does not exist.
+
+## Global Constraints
+
+- Never commit game material: exes, DLLs, extracted files, strings, bytes, frames or pictures from the game, the game's saves, profiles or settings files, shaders or effects, or generated C. Facts only (addresses, sizes, counts, hashes, coordinates). No test writes the game's files into the repo; the boot tests use `tmp_path`. Run `.venv/bin/python third_party/pcrecomp/tools/audit_repo.py .` before every commit that adds data; it must say CLEAN.
+- Docs and tests never quote the game's own output, UI text or file contents: a debug line, a button or a dialog is described in neutral words with its address or position. File, folder, DLL and API names are facts. A test may check that a file exists and is non-empty, and its size, never its text.
+- Nothing taken from the VM is committed: no binary, dump, screenshot or file the game or the probe wrote. Only measured facts go into `docs/research/`. The probe's source is ours (MIT) and is committed; its `.exe` is built into `out/` and never committed.
+- On the VM: `vm_snapshot` before any change, restore after (Ruling 7). Never install or start `secdrv` or any SafeDisc driver; never try to satisfy a disc or driver check there.
+- **Standing rule (user):** if the protection VM or the code it runs asks for a disc or driver check, stop and ask the user. The tripwire stays on and its allow list (`runtime/bw2/guard.c` `g_allowed`) stays empty. Winsock keeps answering "no network". A disc, volume or driver question during any run of this plan stops the work and goes to the user with the evidence.
+- Fail loudly, never return 0 silently: a script line this plan does not define stops the run naming the line, as today; an anchor the script waits for that never comes is visible (each fired anchor prints a line, and every test asserts all the lines it expects).
+- **Later plans' layers** each exit 4 with `[bw2] reached <name>: owned by a later plan` (a movie with an audio track exits 4 as `reached Bink audio track`). `dinput.dll`, `openal32.dll` and `wrap_oal.dll` stay in `g_later_dlls`, as do `DirectDrawCreate` and `DirectDrawEnumerateExA`.
+- **`bw2.h` and the win32hle headers do not change** (a change rebuilds 55,000 functions). New cross-file functions go in a header under a `BW2_SUBDIRS` folder (`runtime/bw2/input/input.h`; a 2-minute host rebuild) or are declared `extern` where used.
+- Exit codes are unchanged: 0 normal (including `BW2_QUIT_AFTER_READS`, `BW2_QUIT_AFTER_MOVIE` and the script's `quit`), 2 boot failure, 3 tripwire, 4 later plan's layer, `abort()` otherwise.
+- Headless (`BW2_HEADLESS=1`) for every test. Tests that need game files carry `@pytest.mark.gamefiles` (`BW2_GAMEFILES=1`).
+- Changes inside `third_party/pcrecomp/` are small, separate commits, each with one line in `third_party/pcrecomp.PATCHES` (path relative to `third_party/pcrecomp`). No NFSU2Recomp code, no Wine or ReactOS source. New Homebrew package: `mingw-w64` only (Ruling 6).
+- Generated documents use only the ASCII hyphen-minus. Commit subjects are short and imperative, with no body or trailers. Never push, never add a remote, never change git config, never write the user's real name or email anywhere. Work on branch `plan11`.
+
+## Review Focus
+
+- **A script anchor that never fires.** A skipped intro never shows its last frame ("Measured" item 3), so a script that waits for `after last 1798` on that path waits forever and the test only times out. Each firing must print one line naming the anchor and the read, and a test must fail on a missing line with that tail in its message. (Task 1, check `script_after`: a movie of another frame count never fires the block, and nothing after it is pushed; every boot test asserts its full list of anchor lines.)
+- **A key press shorter than the game samples.** 40 ms Escapes were missed in the land ("Measured" item 3). A held key must stay down for its wall-clock time whatever the frame rate, with its up pushed at the first read after that time, never in the same read as its down. (Task 1, check `script_after`, with a fake clock that advances 1 ms per read and one that advances 1 s per read.)
+- **Find order.** The game's lists (saves, profiles) come from `FindFirstFileA`. Windows orders names on NTFS by upper case, where `strcasecmp` compares lower case, so names with `_`, `[`, `\`, `]`, `^` or `` ` `` sort differently (the default profile name holds `_`). The order must be NTFS's as the probe measures it. (Task 2, check `find_order` in `shims_selftest.c`.)
+- **Saving over a save.** A second autosave or a save into an existing slot moves files onto names that exist and removes folders that may not be empty. `MoveFileA` onto an existing name, `DeleteFileA` of a missing or read-only file, and `RemoveDirectoryA` of a non-empty folder must answer as Windows does, with Windows' error codes. (Task 2, checks `move_onto`, `delete_cases`, `rmdir_cases`.)
+- **A resolution change under the script.** After the settings test's reset to 800x600 the client rect shrinks. The script's running point is clamped to the new client size, the game's own cursor may differ, and the front end's buttons move. A click at a 1024x768 place must not be assumed to work at 800x600. (Task 3: the 800x600 places are measured from frames and the test clicks there; the second boot checks the device size from its first frame.)
+
+---
+
+### Task 1: Script blocks anchored on movies and wall time
+
+**Files:**
+- Modify: `runtime/bw2/input/script.c` (blocks, anchors, holds, `quit`), `runtime/bw2/input/input.h` (declarations), `runtime/bw2/video/binkw32.c` (the two movie notices).
+- Test: `runtime/bw2/input/input_selftest.c` (group `script_after`), `tests/test_input.py::test_script_after`.
+
+**Interfaces:**
+- Produces:
+  - Script syntax (in addition to today's lines, which keep their meaning before the first `after`):
+    - a block is armed once every event before it has been pushed (at once if there is none), and its anchor is looked for only from then on. Inside a block, read numbers are `0` or more and non-decreasing, and count from the anchor's read: event `k` is pushed at the first read numbered at least that read plus `k`;
+    - `after open <frames>`: the anchor's read is the read counter's value when a movie with `<frames>` frames is opened (`_BinkOpen@8` returns a handle) at or after arming;
+    - `after last <frames>`: the same, when that movie's last frame is copied at or after arming;
+    - `after seconds <s>`: the first read at least `<s>` wall seconds (decimal, `strtod`, greater than 0 and at most 3600) after the block was armed;
+    - `<read> quit`: exit 0 with `[bw2] script: quit at read <n>` (a test switch like `BW2_QUIT_AFTER_READS`).
+  - Each anchor that fires prints `[bw2] script: after <anchor words> at read <n>` (for example `[bw2] script: after seconds 0.5 at read 1234`), with `<anchor words>` as written in the script, normalised to single spaces.
+  - `void bw2_script_movie(int last, uint32_t frames)` in `input.h`: `binkw32.c` calls it with `last = 0` when `_BinkOpen@8` returns a handle and with `last = 1` at the copy that shows a movie's last frame (the moment the `bink last frame` line prints, whether or not `BW2_BINK_LOG` is set). It only records the event and the read counter's value; it pushes nothing.
+  - `void bw2_script_set_clock(double (*now)(void))` in `input.h`: the selftest's fake clock; `NULL` restores `CLOCK_MONOTONIC`.
+  - The read counter's current value for `bw2_script_movie`: `unsigned long long bw2_dinput_reads(void)` in `dinput8.c`, declared in `input.h`.
+
+- [ ] **Step 1: Write the failing checks** (`group_script_after` in `input_selftest.c`, driven like `group_script`; `test_script_after` expects `script_after: 0 failed`):
+  - absolute lines `1 move 10 0` and `2 down 0`, then `after open 1798`, `0 up 0`, `5 move 1 0`: `bw2_script_movie(0, 2033)` at read 3 fires nothing; `bw2_script_movie(0, 1798)` at read 4 fires the block, read 4 pushes the up and the anchor line says `after open 1798 at read 4`; the move comes at read 9, not before;
+  - `after last 1798` armed after its movie's last frame was already shown does not fire on that old event (the event must come at or after arming);
+  - holds: `after seconds 0.5`, `0 key 0x1B 0x01 down`, `after seconds 0.5`, `0 key 0x1B 0x01 up` with a fake clock that advances 1 ms per read: the down at the first read 500 ms after the block before it was armed, the up 500 reads after the down; with a clock that advances 1 s per read: the down and the up on different reads, one read apart;
+  - `5 quit` in a child: exit 0 and `[bw2] script: quit at read 5` on stderr;
+  - parse errors, each a child that stops naming the line: `after soon 3`, `after seconds 0`, `after seconds -1`, `after seconds x`, `after seconds 3601`, `after open 0`, `after open`, a block read that decreases, a negative block read, `quit 1`.
+- [ ] **Step 2: Run it.** `.venv/bin/pytest tests/test_input.py -k script -v`. Expected: `test_script_after` FAILS; `test_script` and the other script tests pass.
+- [ ] **Step 3: Implement** in `script.c` (events carry their block; a block holds its anchor kind, value and the read it fired at), `dinput8.c` (`bw2_dinput_reads`) and `binkw32.c` (the two calls). The anchor check runs inside `bw2_script_at_read(n)` before pushing, with the read counter's value. Relink with `.venv/bin/python -m bw2.pipeline --build-only` (about 2 minutes: `input.h` is in a `BW2_SUBDIRS` folder).
+- [ ] **Step 4: Run it, then `tests/test_input.py tests/test_video.py -q`.** Expected: all pass.
+- [ ] **Step 5: Commit.** `git commit -m "Anchor input script blocks on movies and time"`
+
+### Task 2: Windows facts for the save files
+
+**Files:**
+- Create: `tools/winprobe/saveprobe.c` (ours, MIT), `tools/winprobe/build.sh` (builds `out/winprobe/saveprobe.exe` with `i686-w64-mingw32-gcc -O1 -Wall -o ... -lole32`), `docs/research/saves.md` (its "Windows" section; Task 6 fills the rest).
+- Modify: `third_party/pcrecomp/runtime/win32hle/kernel32_ext.c` and `ole32.c` where a fact differs, `third_party/pcrecomp.PATCHES`; `runtime/bw2/shell.c` and `runtime/bw2/mount.c` where a fact differs.
+- Test: `runtime/bw2/shims_selftest.c` (a "save files" section), `tests/test_engine.py::test_shims_selftest`, `tests/test_hygiene.py` (the probe binary is never tracked).
+
+**Interfaces:**
+- Produces: `saveprobe.exe <work folder>` prints one line per case, `<case> ret=<hex> err=<decimal>[ <extra>]`, where `err` is `GetLastError()` right after the call (set to 0 before it), and makes and removes everything inside the work folder it is given. Cases, in this order (names are the probe's own, all ASCII):
+  - `mkdir_new`, `mkdir_exists` (`CreateDirectoryA`);
+  - `shmkdir_nested_new` (three levels at once), `shmkdir_exists`, `shmkdir_relative` (`SHCreateDirectoryExA(NULL, ...)`);
+  - `attr_dir`, `attr_dir_slash` (with a trailing `\`), `attr_file`, `attr_missing_file` (in an existing folder), `attr_missing_dir` (a file in a folder that does not exist) (`GetFileAttributesA`);
+  - `find_order`: a folder holding files `a_b`, `aB`, `a`, `A1`, `~x`, `_y`, `Zeta`, `b.txt`, `[q`, `^r` and a folder `sub`, searched with `*`: every name in the order returned, then the `FindNextFileA` that ends (`err=18` expected), then `find_dir_data` (the attributes and size `FindFirstFileA` gives for `sub`), `find_missing_dir` (`<missing>\*`), `find_no_match` (`*.sav` in an empty folder);
+  - `move_file_new`, `move_file_onto` (onto an existing file), `move_dir_new`, `move_dir_onto` (onto an existing folder), `move_missing` (`MoveFileA`);
+  - `delete_missing`, `delete_dir`, `delete_readonly` (`DeleteFileA`);
+  - `rmdir_nonempty`, `rmdir_missing`, `rmdir_empty`, `rmdir_slash` (`RemoveDirectoryA`);
+  - `create_always_exists`, `open_always_exists`, `open_always_new`, `create_new_exists` (`CreateFileA` dispositions; `err` is the last error after a successful open too);
+  - `dosdate`: `CoFileTimeToDosDateTime` of the FILETIME for 2026-11-13 12:34:56.5 UTC (made in the probe with `SystemTimeToFileTime`), printing the FILETIME and the DOS date and time words.
+
+- [ ] **Step 1: Install the cross compiler and build the probe.** `brew install mingw-w64` (Ruling 6). Write `saveprobe.c` and `build.sh`; `sh tools/winprobe/build.sh` builds `out/winprobe/saveprobe.exe`. `file out/winprobe/saveprobe.exe` says PE32 (Intel 80386).
+- [ ] **Step 2: Run it on the VM.** Load the winbench tools (`ToolSearch`, query `+winbench`). `vm_snapshot("bw2-plan11")`; `upload` the exe to `C:\bench\bw2probe\saveprobe.exe`; `run` it with the work folder `C:\bench\bw2probe\w` on NTFS, once, and keep its output in a scratch file. Then `vm_rollback("bw2-plan11")` and `vm_delsnapshot("bw2-plan11")`. Record every line in `docs/research/saves.md` "Windows" (the case, the return, the error, the extra), with the VM's Windows build (`ver`).
+- [ ] **Step 3: Write the failing checks** in `shims_selftest.c`, one per probe case, the same operations through our shims under `C:\savecheck\` (the selftest's support folder), each expecting the probe's answer from Step 2. Three of them are the Review Focus checks by name: `find_order` (the probe's order, dots first if the probe shows them), `move_onto` (both onto-cases), `delete_cases` and `rmdir_cases`. A case whose answer already matches passes now; that is fine.
+- [ ] **Step 4: Run it.** `.venv/bin/pytest tests/test_engine.py -k shims_selftest -v`. Expected: FAIL on each case where win32hle or our shims differ from Windows (for example, `FindFirstFileA` in a missing folder answers 2 where Windows is expected to answer 3, and `strcasecmp` orders `_` before letters).
+- [ ] **Step 5: Fix each difference** in the file that owns the call: win32hle's (a vendored commit with one `PATCHES` line per change, naming the probe case) or ours (`shell.c`, `mount.c`). The sort becomes NTFS's order as measured (upper-casing both names before comparing, if the probe shows that). Relink.
+- [ ] **Step 6: Run it, then `tests/test_engine.py tests/test_boot.py -k "shims or front_end or profile" -q`** (the boot tests with `BW2_GAMEFILES=1`). Expected: all pass. `test_hygiene` checks that no `.exe` is tracked.
+- [ ] **Step 7: Commit.** `git commit -m "Add the Windows save-file probe"`, then the vendored fix (for example `git commit -m "Answer file calls as the Windows probe does"`), then `git commit -m "Check save-file answers against Windows"`.
+
+### Task 3: Settings, kept across a restart
+
+**Files:**
+- Modify: `tests/test_boot.py` (`SETTINGS_SCRIPT`, `test_boot_settings_persist`, a `run_boot` variant that keeps a given support folder).
+- Modify only if the bring-up finds a stop: the file that owns it, with its check first.
+
+**Interfaces:**
+- Consumes: Task 1's script syntax; `PROFILE_SCRIPT` (it leaves the running point at (422, 427)).
+- Produces: `run_boot(tmp_path, script, timeout, support=None, **env)`: with `support` given, that folder is used as it is.
+
+- [ ] **Step 1: Write the failing test** `test_boot_settings_persist` (gamefiles, timeout 300 s per boot):
+  - boot 1, fresh support folder: `PROFILE_SCRIPT`, then `after seconds 3` and clicks (down, then up 4 reads later) at the options button (766, 711), the video tab (452, 181), the 800x600 row (448, 260), exit (688, 573) and the save-changes yes (424, 409), each move a delta from the running point and each click 2 s (`after seconds 2`) after the one before; then `after seconds 3` and the quit button and its confirm yes at their 800x600 places (Step 3 measures them; expected near (731, 555) and (331, 319), the 1024x768 places scaled). It asserts: exit 0 with `[win32hle] ExitProcess(0)` and no quit-switch line; every anchor line; the frame lines go from 1024x768 to 800x600 once and stay 800x600; no loud line, no `owned by a later plan`; no file under `<support>/Game/`;
+  - boot 2, the same folder, with `BW2_HLSL_LOG=1`: no input but `after seconds 10` and `0 quit`. It asserts: exit 0 with the script's quit line; the first frame line after the first-read marker is 800x600, and every frame after it is too; the profile dialog is not shown, which a reused folder shows by compiling its one HLSL effect before the first-read marker (`campaign.md`, "Frame rates").
+- [ ] **Step 2: Run it.** `BW2_GAMEFILES=1 .venv/bin/pytest tests/test_boot.py -k settings -v`. Expected: FAIL (the script syntax is there; the 800x600 places are not measured yet).
+- [ ] **Step 3: Bring-up.** Run boot 1 by hand with `BW2_FRAME_LOG=1 BW2_FRAME_DUMP=<scratch>:25` (a folder outside the repo) and look at the frames after the reset to find the quit button and its confirm at 800x600, and whether the game's cursor follows the script's running point there (the running point is clamped to the client rect). Put the measured places in the test. A stop goes to its owner with a check first; a disc, volume or driver question goes to the user. Delete the PNGs.
+- [ ] **Step 4: Run it three times.** Expected: PASS each time. Record the times (boot 1's reset, quit and exit) for Task 6.
+- [ ] **Step 5: Commit.** `git commit -m "Test settings across a restart"`
+
+### Task 4: A saved game from the first land
+
+**Files:**
+- Modify: `tests/test_boot.py` (`SKIP_TO_CHOICE`, `SAVE_SCRIPT`, a module-scoped `saved_game` fixture, `test_boot_save_game`).
+- Modify only if the bring-up finds a stop: the file that owns it, with its check first.
+
+**Interfaces:**
+- Consumes: Task 1's syntax; `NEW_GAME_SCRIPT` (it leaves the running point at (252, 711)).
+- Produces:
+  - `SKIP_TO_CHOICE`: `after open 1798`, `after seconds 3`, then `N` Escape presses, each held 0.5 s with 1.5 s between presses (Ruling 4; `N` starts at 25 and is set in Step 3), then `after seconds 5` and a click at the pause bar's continue place (85, 710) (Ruling 5), then `after seconds 2` and one held Escape: the pause bar is then open in every run.
+  - `SAVE_SCRIPT = NEW_GAME_SCRIPT + SKIP_TO_CHOICE +` the save button (425, 710), the new-save row (390, 263), the keys A (`0x41 0x1E`) and B (`0x42 0x30`), each held 0.2 s, OK (409, 547), then `after seconds 20` for the save to be written, then the pause bar's quit (936, 710) and its confirm, then (back in the front end, if Step 3 finds the game goes there) the front end's quit and its confirm. Every click is 2 s after the one before it.
+  - `saved_game` (module scope): runs `SAVE_SCRIPT` once in its own folder with `HLE_FILETRACE=1 BW2_FRAME_LOG=1 BW2_BINK_LOG=1` and returns `(result, lines, support)`. Task 5 uses its support folder.
+
+- [ ] **Step 1: Write the failing test** `test_boot_save_game` (gamefiles; the fixture's timeout 900 s). It asserts:
+  - exit 0 with `[win32hle] ExitProcess(0)`, and no quit-switch line;
+  - every anchor line of the script, in order;
+  - the intro opened once (its open line) and never showed its last frame (no `bink last frame: 1798`): it was skipped;
+  - a new folder under `Profiles/~ab/Saved Games/` other than `Autosave`, `Pictures` and the ones the New Game made, holding the file set Step 3 measures, every file non-empty (the expectation starts as the autosave's five names, "Measured" item 7);
+  - the file trace shows that folder's files created for writing;
+  - no loud line, no `owned by a later plan`; no file under `<support>/Game/`; `[module]` lines only from `MODULE_LINES_BEFORE`.
+- [ ] **Step 2: Run it.** `BW2_GAMEFILES=1 .venv/bin/pytest tests/test_boot.py -k save_game -v`. Expected: FAIL.
+- [ ] **Step 3: Bring-up loop**, by hand with `BW2_FRAME_DUMP=<scratch>:50` and the script, three runs at least:
+  - measure how many held presses bring the choice, and set `N` to that count plus 5 (the continue click and the extra Escape absorb the surplus: a press on the live choice toggles the pause bar, and the continue click closes it if open; check from frames that the continue click on the land does nothing visible when the bar is closed, and record it);
+  - check from frames that the pause bar is open before the save click in every run, that the dialog opens, that the new-save row takes the typed name, and that OK writes the save; measure what the pause bar's quit leads to (a confirm, then the front end or the desktop) and the places of its buttons;
+  - each stop in an owned layer is fixed in its file with a check first; a stop at a later plan's name is recorded and the test's end becomes that stop (exit 4); a disc, volume or driver question goes to the user;
+  - record for Task 6: the save's file set and sizes, the folder's name pattern, the time from OK to the last file closed, the import trace of the save (`BW2_TRACE_IMPORTS=1` in one run: every file call by function, as "Measured" item 7 lists them for the autosave), and whether the game writes anything into `Saved Games/Pictures`.
+  Delete the PNGs.
+- [ ] **Step 4: Run it three times.** Expected: PASS each time.
+- [ ] **Step 5: Commit.** `git commit -m "Save a game from the first land by script"`
+
+### Task 5: Loading the save from the front end
+
+**Files:**
+- Modify: `tests/test_boot.py` (`LOAD_SCRIPT`, `test_boot_load_game`).
+- Modify only if the bring-up finds a stop: the file that owns it, with its check first.
+
+**Interfaces:**
+- Consumes: `saved_game` (Task 4) and its support folder; Task 1's syntax.
+- Produces: `LOAD_SCRIPT`: `after seconds 3`, a click at the front end's load button (425, 711), the saved game's row and the dialog's load button at the places Step 3 measures, then `after seconds 60` and `0 quit`.
+
+- [ ] **Step 1: Write the failing test** `test_boot_load_game` (gamefiles; timeout 600 s). It copies `saved_game`'s support folder to its own `tmp_path` (`shutil.copytree`) and boots with `LOAD_SCRIPT`, `HLE_FILETRACE=1`, `BW2_FRAME_LOG=1`, `BW2_BINK_LOG=1`. It asserts:
+  - exit 0 with the script's quit line, and every anchor line;
+  - the file trace shows the saved folder's `Game.sav` (and every other file of Task 4's set that Step 3 finds read) opened for reading after the load click's anchor line;
+  - no New Game: no intro open line (unless Step 3 finds the load plays it, in which case the test pins that instead);
+  - the land is drawn: the last 100 frames before the quit line are each at least half non-black, leaving out frames macOS aborted (`aborted_frames`);
+  - no loud line, no `owned by a later plan`; no file under `<support>/Game/`; `[module]` lines only from `MODULE_LINES_BEFORE`.
+- [ ] **Step 2: Run it.** `BW2_GAMEFILES=1 .venv/bin/pytest tests/test_boot.py -k load_game -v`. Expected: FAIL.
+- [ ] **Step 3: Bring-up loop**, as in Task 4 Step 3: find the load dialog's rows and buttons from frames, check the load button is enabled after Task 4's clean quit (the front end greys it after a run that did not quit by the game's path, "Measured" item 8), measure the load's time from click to the first land frame, and fix or record stops the same way. Also boot once with the same folder and click the front end's continue button (85, 711), and record whether it loads the same save. Delete the PNGs.
+- [ ] **Step 4: Run it three times.** Expected: PASS each time.
+- [ ] **Step 5: Commit.** `git commit -m "Load the saved game from the front end"`
+
+### Task 6: The save, load and settings paths, measured
+
+**Files:**
+- Modify: `docs/research/saves.md` (the rest), `docs/research/campaign.md` (a pointer from "For the next plan"), the spec (5.2 Input, 5.2 Files and saves, 7.3, 11), `tests/test_boot.py` (module docstring).
+
+**Interfaces:**
+- Consumes: everything above.
+- Produces: the measured record plan 12 starts from.
+
+- [ ] **Step 1: Write `docs/research/saves.md`** (facts only; the game's UI and output described, never quoted):
+  - the Windows section (Task 2) and the differences fixed;
+  - the script anchors and why (frame-rate spread, "Measured" items 2 and 3), the intro skip and the scene skips with the measured counts and times, the pause bar's toggling and the continue click;
+  - settings (Task 3): the panel's places at 1024x768 and 800x600, the reset, what is written when, and the second boot's device size;
+  - the save (Task 4): the file set and sizes, the folder naming, the file calls by function, the time to write, `Pictures`;
+  - the load (Task 5): the dialog's places, the files read, the time to the first land frame, and the continue button's behaviour;
+  - the profile: written on the game's own quit; greyed buttons after a run ended by a switch;
+  - the VM: its adapter, the game's stop there (no 3D device; no disc or driver question), and the snapshot rule followed;
+  - for the next plan: where each test ends, and what the creature choice waits for.
+- [ ] **Step 2: Update the spec.**
+  - **5.2 Input:** a "Plan 11" note: script blocks anchored on movie events and wall time, held keys, `quit`.
+  - **5.2 Files and saves:** a "Plan 11" note: the save path's file calls answered as the Windows probe measured, saves and the profile under the support folder's My Documents, written on the game's own quit, a save made and loaded by script in the first land.
+  - **7.3:** after "There is no Windows reference for BW2 now", a sentence: a Windows 11 VM without a GPU is available (user, 2026-11-13); the game cannot create its device there, so it is a reference for Win32 behaviour through probe programs only (`docs/research/saves.md`).
+  - **11 "Left to the builder":** nothing new is left; Ruling 6's mingw-w64 is a development tool only, not part of the Builder.
+- [ ] **Step 3: Run the full suite.** `BW2_GAMEFILES=1 .venv/bin/pytest -q > .superpowers/sdd/plan11-suite.txt 2>&1; tail -3 .superpowers/sdd/plan11-suite.txt`. Expected: all pass.
+- [ ] **Step 4: Audit and commit.** `.venv/bin/python third_party/pcrecomp/tools/audit_repo.py .` reports CLEAN. `git commit -m "Record the save, load and settings paths"`
+
+## Rulings (my calls; the spec leaves them to the builder)
+
+1. **Scope and number.** Plan 6 (input) is done and merged, so this is plan 11. The boot no longer stops: the land runs and waits for the player ("Measured" item 1). Of the spec's "Done means" (section 2), the front end's settings and saving and loading are reachable now, on the first land, with no new layer. The creature choice, the first land's tutorial and the rest of the campaign are plan 12 onwards; the Builder app and packaging come after the campaign plays. Bink audio tracks stay a later-plan stop until a scene opens a movie that has one.
+2. **Script anchors on the game's events and wall time, not read counts.** Read counts drift with the frame rate ("Measured" item 2), and the game's scenes run on its own clock. The movie events are the ones the engine already sees (`_BinkOpen@8`, the last frame's copy). Wall time is the game's own time base, and every scene this plan waits through ends in a state that waits for input, so a generous wait is safe. No test-only virtual clock: the game's audio and streaming run on real time, and a fake clock would be a new way to be wrong.
+3. **`quit` in the script** ends a run at a moment the script names, as `BW2_QUIT_AFTER_READS` and `BW2_QUIT_AFTER_MOVIE` do, for runs where the game's own quit is not what is being tested. The save and settings tests end through the game's own quit instead, because the game writes its profile there ("Measured" item 8).
+4. **Held keys.** The land missed 40 ms Escapes ("Measured" item 3), as a game that samples key state at its own tick would. Scripts hold Escape 0.5 s and typed letters 0.2 s; mouse clicks stay as they are (DirectInput's buffered elements carry every press).
+5. **Skipping by Escape, then a continue click.** Skipping the scenes saves about 2 minutes a run. Once the choice is live, Escape toggles the pause bar, and nothing the engine sees tells which state the game is in: the land's text is not drawn through `ID3DXFont` ("Measured" item 5), and a hook on the game's own text would mean matching its strings. So the script presses more than enough times and then clicks the pause bar's continue place, which closes the bar if it is open and does nothing on the land if it is not (checked from frames in Task 4), and opens the bar with one more press.
+6. **mingw-w64 from Homebrew** builds the probe (installed in Task 2; recorded here). It is a development tool on this Mac, like Homebrew's FFmpeg: its compiler is GPL but nothing of it enters the repo, and the probe binary (linked against mingw-w64's permissively licensed runtime) is never committed or shipped. The probe's source is ours, MIT.
+7. **The VM.** Used for Win32 facts only; the game cannot be a reference there ("Measured" item 10). Before any change a `vm_snapshot` is taken, and after the work the VM is rolled back to that snapshot, which is then deleted. That returns the VM to exactly the state it was found in; rolling back to its older "clean" snapshot would also throw away state other work left on it since. Nothing from the VM is committed, only facts. No SafeDisc driver is installed or started there.
+8. **Windows wins over win32hle where the probe measured it,** and only there: each difference is fixed with the probe's answer as the check, in a vendored commit for win32hle's code. Cases the probe did not measure keep their present answers.
+9. **One saved game per test session.** `saved_game` is a module-scoped fixture: the save test and the load test share one save boot (about 3 minutes), so the suite grows by about 10 minutes, not 15. The load test copies the folder, so the two never share writes.
+10. **Coordinates are facts.** Client positions of the game's buttons and rows (measured from frames that were deleted) are committed in tests and docs, like addresses; the frames and the UI's words are not.
