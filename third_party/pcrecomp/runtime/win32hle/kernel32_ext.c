@@ -489,7 +489,8 @@ static void fill_find(uint32_t o, const char *dir, const char *name) {
         put_ft(o + 4, unix_to_ft(st.st_mtim.tv_sec, st.st_mtim.tv_nsec));
         put_ft(o + 12, unix_to_ft(st.st_atim.tv_sec, st.st_atim.tv_nsec));
         put_ft(o + 20, unix_to_ft(st.st_mtim.tv_sec, st.st_mtim.tv_nsec));
-        MEM32(o + 28) = (uint32_t)((uint64_t)st.st_size >> 32), MEM32(o + 32) = (uint32_t)st.st_size;
+        if (!S_ISDIR(st.st_mode))                            /* a folder's size is 0, as on Windows */
+            MEM32(o + 28) = (uint32_t)((uint64_t)st.st_size >> 32), MEM32(o + 32) = (uint32_t)st.st_size;
     }
     strncpy((char *)hle_ptr(o + 44), name, 259);
 }
@@ -556,9 +557,10 @@ static void k_FindFirstFileA(void) {                     /* (pattern, &data) */
     list_dir(f, f->base, 1);
     if (f->n) qsort(f->names, (size_t)f->n, sizeof *f->names, by_name);
     if (!f->d || !find_next(f, A32(1))) {
+        int no_dir = !f->d && !f->base;                      /* the folder itself is missing */
         find_closer(f);
         if (hle_filetrace()) fprintf(stderr, "[file] FindFirstFileA \"%s\": not found\n", pat);
-        hle_set_last_error(ERROR_FILE_NOT_FOUND);
+        hle_set_last_error(no_dir ? ERROR_PATH_NOT_FOUND : ERROR_FILE_NOT_FOUND);
         RET(INVALID_HANDLE, 2);
     }
     if (hle_filetrace()) fprintf(stderr, "[file] FindFirstFileA \"%s\" in %s\n", pat, f->dir);
