@@ -47,16 +47,18 @@ def lifted_c(tmp_path):
 def make_fake_ffmpeg_prefix(root: Path, install_name=lambda name: f"@rpath/{name}") -> Path:
     """A prefix laid out as FFmpeg installs itself: for each of FFMPEG_DYLIBS a tiny real dylib
     <stem>.1.2.dylib, the versioned name as a symlink to it, and lib<x>.dylib as another symlink.
-    install_name(name) gives each library's install name."""
+    install_name(name) gives each library's install name. Each library also exports its own
+    int bw2_fake_<x>(void) (bw2_fake_avformat, ...), returning 1, so a test engine can call all three."""
     import subprocess
     from bw2.build import check_tools, sdk_path
     from bw2.ffmpeg import FFMPEG_DYLIBS
     lib = root / "lib"
     lib.mkdir(parents=True, exist_ok=True)
-    src = root / "empty.c"
-    src.write_text("int bw2_fake_ffmpeg(void) { return 0; }\n")
     for name in FFMPEG_DYLIBS:
         stem = name[:-len(".dylib")]
+        src = root / f"{stem}.c"
+        src.write_text(f"int bw2_fake_ffmpeg(void) {{ return 0; }}\n"
+                       f"int bw2_fake_{name.split('.')[0][3:]}(void) {{ return 1; }}\n")
         real = lib / f"{stem}.1.2.dylib"
         subprocess.run([str(check_tools()), "-dynamiclib", "-isysroot", str(sdk_path()),
                         "-mmacosx-version-min=13.0", "-install_name", install_name(name),
