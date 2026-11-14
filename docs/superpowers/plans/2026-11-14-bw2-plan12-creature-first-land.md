@@ -184,6 +184,10 @@ Dropped on 2026-11-14 by the user: agents run no long play sessions; the user te
 - [ ] **Step 3: Run the full suite.** `BW2_GAMEFILES=1 .venv/bin/pytest -q > .superpowers/sdd/plan12-suite.txt 2>&1; tail -3 .superpowers/sdd/plan12-suite.txt`. Expected: all pass. The long tests (`-m long`) are not run (user, 2026-11-14). Record the suite's wall time and the load average it ran at in `land1.md`; record no frame rate unless the Mac was quiet (1-minute load below 25% of `hw.ncpu`).
 - [ ] **Step 4: Audit and commit.** `.venv/bin/python third_party/pcrecomp/tools/audit_repo.py .` reports CLEAN. `git commit -m "Record the first land's paths"`
 
+## Before merging
+
+- [ ] **Open: the save-dependent tests on a quiet Mac.** The suite has not been green on this branch since Task 4's fourth run (`docs/research/land1.md`, "Suite times"). On a quiet Mac (1-minute load below 25% of `hw.ncpu`, no process above 50% CPU, GPU "Device Utilization %" below 50), run `BW2_GAMEFILES=1 .venv/bin/pytest -q tests/test_boot.py::test_land_move_tutorial` once, and once the `saved_game` group (`-k 'save_game or load_game or creature_choice or chosen_game_loads or move_tutorial'`). If the tutorial fails there, give the pan-right drags more wall time per block, or wait longer than 14 s before the first pan-right drag. This item stays open until both pass; the result goes into `land1.md`.
+
 ## Rulings (my calls; the spec leaves them to the builder)
 
 1. **Scope and number.** Plan 6 (input) is done and merged, so this is plan 12. The boot has no stop of its own: every New Game and loaded save waits at the creature choice, which the spike measured on the port as two clicks ("Measured" items 3 and 4; not verified on Windows, which cannot run the game, so Task 2 records the bindings and the first click's effect as the evidence, and a fault found there is fixed). So the next layer is the game itself: the choice, the first land's movement tutorial and the land's end, with a soak for long sessions. The Builder app and packaging come once the campaign plays through, as plan 11 Ruling 1 set; the second land onward is plan 13.

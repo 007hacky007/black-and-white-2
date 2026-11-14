@@ -316,7 +316,11 @@ alone once on a quiet Mac (1-minute load below 25% of `hw.ncpu`, no process
 above 50% CPU, and the GPU not held by other work), and so should the
 `saved_game` group. If the tutorial fails there too, the pan-right step needs more time:
 more wall time per drag block, or a longer wait than 14 s before the first
-pan-right drag (Task 4's note).
+pan-right drag (Task 4's note). The plan's "Before merging" list keeps this
+item open. A later wait for a quiet Mac (seven checks, ten minutes apart,
+over an hour) found none: the 1-minute load was 1.3 to 4.0 on 10 cores, a
+process used 60 to 100% CPU at every check, and the GPU was at 99% at six
+of the seven. So neither run was made, and the item is still open.
 
 Frame rates: not measured in Task 6, because the Mac was under load (load 3.5
 to 218 during the suite; a GPU hashcat job, dotnet builds and a browser ran
