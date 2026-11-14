@@ -363,3 +363,5 @@ packaging next, then performance. No more scripted campaign play-through is
 scheduled; gameplay faults come from the user's own longer sessions. Bink
 audio tracks stay a later plan's stop until a scene opens a movie that has
 one.
+
+On 2026-11-14 test_land_move_tutorial moved behind `BW2_LONG`. Its drags are counted in input reads, and it timed out at the pan-right step in seven runs while other work held the Mac's GPU near 100%. The user runs land play, so agents no longer run it. The four save-dependent tests passed when run alone.

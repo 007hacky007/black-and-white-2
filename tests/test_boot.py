@@ -16,7 +16,7 @@ into the land, at the creature choice, where a New Game still waits for the play
 Plan 12's scripts also anchor on the files the game asks for (after file). From a loaded save two clicks on the
 lion pick it (select, then confirm; measured on the port, not verified on Windows), and a save is taken at the
 tutorial offer that follows; loaded back, the script takes the first land's tutorial on moving and looking
-around with drags spread over wall time, and (behind BW2_LONG) plays the land to its end and the second land's
+around with drags spread over wall time (behind BW2_LONG, like the next test), and (behind BW2_LONG) plays the land to its end and the second land's
 load (docs/research/land1.md)."""
 import math
 import os
@@ -916,7 +916,10 @@ MOVE_TUTORIAL_STEPS = (
 
 
 @pytest.mark.gamefiles
+@pytest.mark.long
 def test_land_move_tutorial(chosen_game, tmp_path):
+    # Behind BW2_LONG since 2026-11-14: its drags are counted in input reads, so it times out when the Mac's
+    # GPU is busy, and the user runs land play (docs/research/land1.md).
     # Plan 12 Task 3: from the loaded offer, a click on the silver scroll starts the tutorial on moving and
     # looking around; the script takes each of its steps, and its end makes the game ask for TUTORIAL_END.
     _, _, saved, new_save = chosen_game

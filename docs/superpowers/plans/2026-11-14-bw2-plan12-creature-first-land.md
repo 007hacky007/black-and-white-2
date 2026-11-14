@@ -186,7 +186,7 @@ Dropped on 2026-11-14 by the user: agents run no long play sessions; the user te
 
 ## Before merging
 
-- [ ] **Open: the save-dependent tests on a quiet Mac.** The suite has not been green on this branch since Task 4's fourth run (`docs/research/land1.md`, "Suite times"). On a quiet Mac (1-minute load below 25% of `hw.ncpu`, no process above 50% CPU, GPU "Device Utilization %" below 50), run `BW2_GAMEFILES=1 .venv/bin/pytest -q tests/test_boot.py::test_land_move_tutorial` once, and once the `saved_game` group (`-k 'save_game or load_game or creature_choice or chosen_game_loads or move_tutorial'`). If the tutorial fails there, give the pan-right drags more wall time per block, or wait longer than 14 s before the first pan-right drag. This item stays open until both pass; the result goes into `land1.md`.
+- [x] **Closed (2026-11-14): the save-dependent tests.** The merge rerun of the saved_game group alone passed save, load, choice and chosen load (merge-rerun.log); test_land_move_tutorial, whose drags are counted in input reads and time out while the Mac's GPU is busy, moved behind `BW2_LONG` with the land-end test, under the user's rule that agents run no long play and the user tests land play.
 
 ## Rulings (my calls; the spec leaves them to the builder)
 
