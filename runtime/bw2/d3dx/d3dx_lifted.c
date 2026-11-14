@@ -2,7 +2,8 @@
  * d3dx_lifted.c - the disc's own d3dx9_25.dll, lifted with the game (plan 9).
  *
  * The rebased DLL sits beside the engine binary (the build copies it to
- * out/d3dx9_25.dll). The first call that needs it maps it at 0x08000000, binds
+ * out/d3dx9_25.dll), or in Contents/Resources when the engine is an app's
+ * executable (app.c bw2_app_resource; codesign refuses it in MacOS). The first call that needs it maps it at 0x08000000, binds
  * its imports, runs its DllMain (dll.c bw2_lifted_dll_open) and registers it as
  * bw2-d3dx9_25-lifted.dll, so the game's own d3dx9_25.dll lookups keep finding
  * the native D3DX. D3DXCompileShader, D3DXCompileShaderFromFileA,
@@ -24,7 +25,6 @@
  */
 #include <limits.h>
 #include <stdarg.h>
-#include <mach-o/dyld.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +37,7 @@
 #define LIFTED_MODULE "bw2-d3dx9_25-lifted.dll"
 
 uint32_t bw2_lifted_dll_open(const char *module_name, const char *host_path, uint32_t base);   /* dll.c */
+int bw2_app_resource(const char *name, char *out, size_t n);                                    /* app.c */
 
 static char g_path[PATH_MAX];
 static uint32_t g_hmod;
@@ -54,17 +55,12 @@ static void lifted_fatal(const char *fmt, ...) {
     abort();
 }
 
-/* d3dx9_25.dll in the engine binary's own folder. */
+/* d3dx9_25.dll in the bundle's Resources, or in the engine binary's own folder. */
 static void find_dll(void) {
-    char exe[PATH_MAX], real[PATH_MAX];
-    uint32_t n = sizeof exe;
-    if (_NSGetExecutablePath(exe, &n) != 0 || !realpath(exe, real)) {
+    if (bw2_app_resource("d3dx9_25.dll", g_path, sizeof g_path) != 0) {
         snprintf(g_path, sizeof g_path, "d3dx9_25.dll");
         lifted_fatal("cannot find the engine binary's folder");
     }
-    char *slash = strrchr(real, '/');
-    if (slash) *slash = 0;
-    snprintf(g_path, sizeof g_path, "%s/d3dx9_25.dll", real);
 }
 
 /* The PE's ImageBase and SizeOfImage, or a loud stop. */

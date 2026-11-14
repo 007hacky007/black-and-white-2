@@ -314,3 +314,43 @@ def run_engine(binary: Path, game_dir: Path, support_dir: Path, *args: str, exe:
     env = dict(os.environ, BW2_SUPPORT=str(support_dir))
     return subprocess.run([str(binary), "--game", str(game_dir), "--exe", exe, *args],
                           capture_output=True, text=True, timeout=timeout, env=env)
+
+
+# ---- app bundles (plan 13 Task 4) -----------------------------------------
+_REPO = Path(__file__).resolve().parents[1]
+APP_NAME = "Black & White 2.app"
+
+
+def _clone_file(src: Path, dst: Path) -> None:
+    import shutil
+    from bw2.gametree import _clonefile
+    if not _clonefile(src, dst):
+        shutil.copy2(src, dst)
+
+
+def make_test_bundle(dest: Path, game: Path | None, name: str = APP_NAME,
+                     engine: Path = _REPO / "out" / "bw2",
+                     dll: Path | None = _REPO / "out" / "d3dx9_25.dll") -> Path:
+    """An unsigned app bundle dest/name: Contents/MacOS/bw2 (a copy of engine), Contents/Resources/
+    d3dx9_25.dll (a copy of dll; none for dll=None), Contents/Resources/game (an APFS clone of game, or an
+    empty folder for None) and a minimal Info.plist. Returns the bundle's path."""
+    import plistlib
+    from bw2.gametree import clone_tree
+    app = Path(dest) / name
+    macos, res = app / "Contents" / "MacOS", app / "Contents" / "Resources"
+    macos.mkdir(parents=True)
+    res.mkdir()
+    assert Path(engine).exists(), f"no engine at {engine}: build it first (python -m bw2.pipeline)"
+    _clone_file(Path(engine), macos / "bw2")
+    if dll is not None:
+        assert Path(dll).exists(), f"no lifted DLL at {dll}: build it first (python -m bw2.pipeline)"
+        _clone_file(Path(dll), res / "d3dx9_25.dll")
+    if game is None:
+        (res / "game").mkdir()
+    else:
+        clone_tree(Path(game), res / "game")
+    info = {"CFBundleExecutable": "bw2", "CFBundleIdentifier": "local.bw2-port.game", "CFBundleName": "Black & White 2",
+            "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "0.1.0", "LSMinimumSystemVersion": "13.0",
+            "NSHighResolutionCapable": True}
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))
+    return app

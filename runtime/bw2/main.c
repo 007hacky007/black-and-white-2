@@ -4,6 +4,8 @@
  *
  *   bw2 --game DIR [--exe white.exe] [--strict] [--trace-eh] [--lifted-dll NAME=0xBASE]...
  *       [--check-d3dx DIR]
+ *   bw2 --log-watcher LOG        (app.c: the watcher a bundled engine starts)
+ *   bw2 --selftest-app           (where the engine finds its game and the lifted DLL)
  *
  * --check-d3dx runs the lifted D3DX's checks named on stdin (d3dx/d3dx_check.c)
  * after the boot's setup, in place of the game's entry.
@@ -11,10 +13,16 @@
  * The support folder (saves, settings, registry, everything the game writes)
  * is $BW2_SUPPORT, or ~/Library/Application Support/Black & White 2.
  *
+ * In an app bundle (Contents/MacOS/<name>, app.c) a missing --game means
+ * Contents/Resources/game, -psn_ arguments are skipped, and the output goes to
+ * <support>/Logs/bw2.log through the watcher, started before anything can stop
+ * the run, so every stop reaches the log and, when loud, an alert.
+ *
  * The bind is permissive: an import nothing answers is bound to a stub that
  * stops the run, naming itself, when it is first called (most of the game's
  * unanswered imports never run). --strict lists them all and exits 2 instead.
  */
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -278,14 +286,33 @@ static uint32_t mainsync_selftest(void) {
     return on_main ? 0 : 1;
 }
 
+int bw2_app_contents(char *out, size_t n);                    /* app.c */
+int bw2_app_resource(const char *name, char *out, size_t n);
+int bw2_app_log_start(const char *support);
+int bw2_app_log_watch(const char *log_path);
+
 int main(int argc, char **argv) {
     const char *game = NULL, *exe = "white.exe";
     int strict = 0, st_dispatch = 0, st_mem = 0, st_mainsync = 0, st_window = 0, st_input_window = 0, st_cursor_window = 0;
-    int nlifted = 0, ncall = -1;
+    int st_app = 0, nlifted = 0, ncall = -1;
     uint32_t call_args[8];
     struct { const char *name; uint32_t base; } lifted[8];
+    for (int i = 1; i < argc; i++) {                     /* these two need no log and set nothing up */
+        if (!strcmp(argv[i], "--log-watcher") && i + 1 < argc) return bw2_app_log_watch(argv[i + 1]);
+        if (!strcmp(argv[i], "--selftest-app")) st_app = 1;
+    }
+    /* the support folder depends only on BW2_SUPPORT and HOME, so the log can start before any stop */
+    char support[PATH_MAX], contents[PATH_MAX], bundled_game[PATH_MAX];
+    const char *env = getenv("BW2_SUPPORT"), *home = getenv("HOME");
+    if (env && *env) snprintf(support, sizeof support, "%s", env);
+    else snprintf(support, sizeof support, "%s/Library/Application Support/Black & White 2", home ? home : ".");
+    int bundle = bw2_app_contents(contents, sizeof contents);
+    if (!bundle) contents[0] = 0;
+    if (bundle && !st_app && bw2_app_log_start(support) != 0) return BW2_EXIT_BOOT;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--game") && i + 1 < argc) game = argv[++i];
+        if (!strncmp(argv[i], "-psn_", 5)) continue;        /* LaunchServices' process serial number */
+        else if (!strcmp(argv[i], "--selftest-app")) continue;
+        else if (!strcmp(argv[i], "--game") && i + 1 < argc) game = argv[++i];
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
         else if (!strcmp(argv[i], "--strict")) strict = 1;
         else if (!strcmp(argv[i], "--trace-eh")) bw2_eh_trace = 1;
@@ -311,6 +338,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--selftest-cursor-window")) st_cursor_window = 1;
         else { fprintf(stderr, "bw2: unknown argument %s\n", argv[i]); return usage(); }
     }
+    if (bundle && !game) {
+        snprintf(bundled_game, sizeof bundled_game, "%s/Resources/game", contents);
+        game = bundled_game;
+    }
+    if (st_app) {
+        char dll[PATH_MAX];
+        if (bw2_app_resource("d3dx9_25.dll", dll, sizeof dll) != 0) snprintf(dll, sizeof dll, "?");
+        printf("bundle %d%s%s\ngame %s\nd3dx %s\n", bundle, bundle ? " " : "", contents, game ? game : "-", dll);
+        return 0;
+    }
     if (getenv("BW2_TRACE_IMPORTS")) win32hle_trace = 1;   /* one line per import call, with its caller */
     bw2_dispatch_init();
     if (st_dispatch) return bw2_dispatch_selftest();
@@ -326,16 +363,16 @@ int main(int argc, char **argv) {
                                           : st_input_window ? input_window_selftest : cursor_window_selftest);
     }
     if (!game) return usage();
-    char support[PATH_MAX];
-    const char *env = getenv("BW2_SUPPORT"), *home = getenv("HOME");
-    if (env && *env) snprintf(support, sizeof support, "%s", env);
-    else snprintf(support, sizeof support, "%s/Library/Application Support/Black & White 2", home ? home : ".");
     char game_abs[PATH_MAX];
     if (!realpath(game, game_abs)) { fprintf(stderr, "bw2: no game folder %s\n", game); return BW2_EXIT_BOOT; }
     if (bw2_mount(game_abs, support)) return BW2_EXIT_BOOT;
     game = game_abs;
     char path[4096];
     snprintf(path, sizeof path, "%s/%s", game, exe);
+    if (access(path, R_OK) != 0) {               /* before its PE header is read */
+        fprintf(stderr, "bw2: cannot boot %s: %s\n", path, strerror(errno));
+        return BW2_EXIT_BOOT;
+    }
     bw2_later_register(path);                   /* before the rest: these names must stop the run */
     bw2_register_shims();
     bw2_threads_init();
