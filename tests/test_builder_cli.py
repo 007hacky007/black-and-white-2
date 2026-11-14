@@ -359,7 +359,7 @@ def test_setup_venv(tmp_path):
 
 # ---- the steps -----------------------------------------------------------------------------------------------------
 
-def test_build_again_after_interrupt(tmp_path, monkeypatch):
+def test_build_again_after_interrupt(tmp_path, monkeypatch, cli_env):
     """Each step's start removes the .part outputs an interrupted run left, before any work starts."""
     ws = tmp_path / "ws"
     fs = FakeSet(tmp_path / "in")
