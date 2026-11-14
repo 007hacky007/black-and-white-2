@@ -645,6 +645,179 @@ def test_boot_load_game(saved_game, tmp_path):
     assert modules <= MODULE_LINES_BEFORE, sorted(modules - MODULE_LINES_BEFORE)
 
 
+# Plan 12 Task 2: the creature choice, measured on the port, not verified on Windows (docs/research/land1.md). After
+# the load (LOAD_STEPS) the game opens the save's files, Creature0.sav last (LOAD_ANCHOR); the land takes the mouse
+# about 2.5 s after that lookup (three runs, one with the suite running), so the script waits CHOICE_FIRST s, hovers
+# the lion for 2 s and clicks it. That click selects it (a beam over it; the game asks for four art files no install
+# holds, OFFCENTRE first, about 0.4 s after the up); CHOICE_GAP s later a second click confirms (every gap from 1 to
+# 15 s picked), and about 26 s later, as the advisors offer the tutorials on two scrolls, the game asks for the
+# scroll models (SCROLL first). Both clicks go through the same action binding (its pressed and released polls).
+# Each click is a down and an up 4 reads later; the clicks are spaced by wall time so that two downs never fall
+# within the 500 ms double-click time. Places are 1024x768 client pixels of the game's own cursor (LAND), reached
+# through the top left corner as in step_blocks.
+LION = (440, 330)
+LOAD_ANCHOR = "Creature0.sav"
+CHOICE_FIRST = 5
+CHOICE_GAP = 5
+OFFER_WAIT = 23
+SKIP_NO = (598, 409)
+CHOSEN_ROW = (390, 280)
+OFFCENTRE = "M_OFFCENTREPOINT.bwm"
+SCROLL = "M_SCROLL_BRONZE.bwm"
+SCROLL_MODELS = ("M_SCROLL_BRONZE.bwm", "M_SCROLL_SILVER.bwm")
+CHOICE_TEST_WAIT = 5
+# a save after the choice holds one creature, the chosen one: 7 files, not plan 11's 15; the load opens all but
+# SaveGame.inf after the OK, Creature0.sav last
+CHOSEN_SAVE_FILES = sorted(["Creature0.sav", "Creature0.sav.meta", "Game.sav", "Game.sav.meta", "SaveGame.inf",
+                            "Script.sav", "ter.sav"])
+CHOSEN_READS = [f for f in CHOSEN_SAVE_FILES if f != "SaveGame.inf"]
+
+
+def choice_lines(start):
+    """Script lines from the load's OK to the scroll models' lookup, and the running point after them. `start`,
+    the running point before them, does not change them: the first move puts the cursor in the corner."""
+    dx, dy = (math.ceil(v / LAND) for v in LION)
+    lines = [f"after file {LOAD_ANCHOR}", f"after seconds {CHOICE_FIRST - 0.5:g}", "0 move -4000 -4000",
+             "after seconds 0.5", f"0 move {dx} {dy}", "after seconds 2", "0 down 0", "4 up 0",
+             f"after file {OFFCENTRE}", f"after seconds {CHOICE_GAP:g}", "0 down 0", "4 up 0",
+             f"after file {SCROLL}"]
+    return lines, (min(dx, CLIENT[0] - 1), min(dy, CLIENT[1] - 1))
+
+
+def chosen_load_lines():
+    """Script lines that load chosen_game's save from a boot's start, ending with the anchor on the save's last
+    file, and the running point after them."""
+    lines, point = step_blocks((0, 0), [(LOAD_FIRST, LOAD_BUTTON), (2, CHOSEN_ROW), (2, LOAD_OK)])
+    return lines + [f"after file {LOAD_ANCHOR}"], point
+
+
+def asks_for(line, name):
+    """Whether a file trace line is a CreateFileA of a guest path whose last component is `name` (any case)."""
+    m = re.match(r'^\[file\] CreateFileA "([^"]*)" -> ', line)
+    return bool(m) and re.split(r"[\\/]", m.group(1))[-1].lower() == name.lower()
+
+
+_load_lines, _load_point = step_blocks((0, 0), LOAD_STEPS)
+_choice, _choice_point = choice_lines(_load_point)
+CHOICE_SCRIPT = "\n".join(_load_lines + _choice + [f"after seconds {CHOICE_TEST_WAIT}", "0 quit"]) + "\n"
+CHOICE_ANCHORS = [ln for ln in CHOICE_SCRIPT.splitlines() if ln.startswith("after ")]
+# the second click's anchor, counted from 1: the sixth of the choice's seven
+SECOND_CLICK_ANCHOR = anchors_in(_load_lines) + 6
+# chosen_game: the choice, then OFFER_WAIT s after the scroll lookups (the advisors finish about 13 s after them,
+# three runs), a held Escape. At the offer Escape pauses the game and asks whether to skip the land (yes
+# (424, 409) skips to the second land); its no (SKIP_NO) leaves the pause bar open over the offer. Then plan 11's
+# save, and the quit, whose own save replaces the quit save in Saved Games/1. The chosen save is the third
+# folder and the load dialog's second row (CHOSEN_ROW): the rows run newest first.
+_offer, _point12 = step_blocks(_choice_point, [(OFFER_WAIT, ESCAPE, 0.5), (2, LAND, SKIP_NO)])
+# plan 11's save steps with the keys swapped: the name "ab" is saved_game's, and the game asks before it
+# overwrites a save of the same name
+CHOSEN_SAVE_STEPS = SAVE_STEPS[:4] + [(2, (0x42, 0x30), 0.2), (0.5, (0x41, 0x1E), 0.2)] + SAVE_STEPS[6:]
+_csave, _point12 = step_blocks(_point12, CHOSEN_SAVE_STEPS)
+_cquit, _ = step_blocks(_point12, QUIT_STEPS)
+CHOSEN_SCRIPT = "\n".join(_load_lines + _choice + _offer + _csave + _cquit) + "\n"
+CHOSEN_ANCHORS = [ln for ln in CHOSEN_SCRIPT.splitlines() if ln.startswith("after ")]
+CHOSEN_SAVE_ANCHOR = 1 + anchors_in(_load_lines + _choice + _offer)
+CHOSEN_QUIT_ANCHOR = 1 + anchors_in(_load_lines + _choice + _offer + _csave)
+CHOSEN_WAIT = 30
+
+
+def copy_support(saved, tmp_path):
+    support = tmp_path / "support"
+    shutil.copytree(saved, support)
+    return support
+
+
+@pytest.mark.gamefiles
+def test_boot_creature_choice(saved_game, tmp_path):
+    # Plan 12 Task 2: the loaded save's creature choice takes two clicks on the lion; the first alone picks
+    # nothing, the second makes the game ask for the scroll models.
+    support = copy_support(saved_game[2], tmp_path)
+    r, lines, _ = run_boot(tmp_path, CHOICE_SCRIPT, 600, support=support, HLE_FILETRACE="1", BW2_FRAME_LOG="1",
+                           BW2_BINK_LOG="1")
+    tail = r.stderr[-4000:]
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    quits = [ln for ln in lines if re.fullmatch(r"\[bw2\] script: quit at read \d+", ln)]
+    assert len(quits) == 1, tail
+    anchor_at = [i for i, ln in enumerate(lines) if SCRIPT_ANCHOR.match(ln)]
+    anchors = [SCRIPT_ANCHOR.match(lines[i]).group(1) for i in anchor_at]
+    assert anchors == CHOICE_ANCHORS, (anchors, tail)
+    # the first click alone picked nothing: no scroll model asked for before the second click's anchor
+    second = anchor_at[SECOND_CLICK_ANCHOR - 1]
+    early = [ln for ln in lines[:second] if any(asks_for(ln, n) for n in SCROLL_MODELS)]
+    assert not early, early
+    assert not [ln for ln in lines if ln.startswith(BINK_OPEN)], tail
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
+    assert not game_files_made(support), game_files_made(support)
+    modules = {ln for ln in lines if ln.startswith("[module] ")}
+    assert modules <= MODULE_LINES_BEFORE, sorted(modules - MODULE_LINES_BEFORE)
+
+
+@pytest.fixture(scope="module")
+def chosen_game(saved_game, tmp_path_factory):
+    """One scripted save taken after the creature choice, at the tutorial offer (plan 12 Task 2), from a copy of
+    saved_game's support folder: (result, lines, support, new_save), new_save being the one folder under Saved
+    Games that appeared between the save button's first anchor and the pause bar quit's first anchor (None if
+    not exactly one)."""
+    tmp = tmp_path_factory.mktemp("chosen")
+    support = copy_support(saved_game[2], tmp)
+    seen, listed = [0], {}
+
+    def on_line(line, support):
+        if SCRIPT_ANCHOR.match(line):
+            seen[0] += 1
+            if seen[0] in (CHOSEN_SAVE_ANCHOR, CHOSEN_QUIT_ANCHOR):
+                listed[seen[0]] = folder_names(saved_games(support))
+    r, lines, support = run_boot(tmp, CHOSEN_SCRIPT, 900, support=support, on_line=on_line, HLE_FILETRACE="1",
+                                 BW2_FRAME_LOG="1", BW2_BINK_LOG="1")
+    before, at_quit = listed.get(CHOSEN_SAVE_ANCHOR), listed.get(CHOSEN_QUIT_ANCHOR)
+    new = sorted(set(at_quit) - set(before)) if before is not None and at_quit is not None else []
+    return r, lines, support, new[0] if len(new) == 1 and set(before) <= set(at_quit) else None
+
+
+@pytest.mark.gamefiles
+def test_boot_chosen_game_loads(chosen_game, tmp_path):
+    # Plan 12 Task 2: the save taken at the tutorial offer loads back to it: the game asks for the scroll models.
+    r, lines, saved, new_save = chosen_game
+    tail = r.stderr[-4000:]
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    assert EXIT_LINE in lines, tail
+    assert not any("BW2_QUIT_AFTER" in ln or ln.startswith("[bw2] script: quit") for ln in lines), tail
+    anchors = [m.group(1) for m in map(SCRIPT_ANCHOR.match, lines) if m]
+    assert anchors == CHOSEN_ANCHORS, (anchors, tail)
+    assert new_save is not None, folder_names(saved_games(saved))
+    assert save_files(saved_games(saved) / new_save) == CHOSEN_SAVE_FILES, save_files(saved_games(saved) / new_save)
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
+    assert not game_files_made(saved), game_files_made(saved)
+
+    support = copy_support(saved, tmp_path)
+    save = saved_games(support) / new_save
+    load, _ = chosen_load_lines()
+    script = "\n".join(load + [f"after seconds {CHOSEN_WAIT}", "0 quit"]) + "\n"
+    r, lines, _ = run_boot(tmp_path, script, 600, support=support, HLE_FILETRACE="1", BW2_FRAME_LOG="1",
+                           BW2_BINK_LOG="1")
+    tail = r.stderr[-4000:]
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    quits = [i for i, ln in enumerate(lines) if re.fullmatch(r"\[bw2\] script: quit at read \d+", ln)]
+    assert len(quits) == 1, tail
+    anchor_at = [i for i, ln in enumerate(lines) if SCRIPT_ANCHOR.match(ln)]
+    anchors = [SCRIPT_ANCHOR.match(lines[i]).group(1) for i in anchor_at]
+    assert anchors == [ln for ln in load if ln.startswith("after ")] + [f"after seconds {CHOSEN_WAIT}"], anchors
+    # after the OK the game opens the chosen save's 6 files, and asks for the scroll models
+    ok_at = anchor_at[anchors_in(load) - 2]
+    opened = [ln for ln in lines[ok_at:quits[0]] if ln.startswith("[file] CreateFileA ") and ln.endswith(" ok")]
+    for f in CHOSEN_READS:
+        assert any(ln.endswith(f" -> {save / f} ok") for ln in opened), (f, [ln for ln in opened if ".sav" in ln])
+    others = [ln for ln in opened if f" -> {saved_games(support)}/" in ln and f" -> {save}/" not in ln]
+    assert not others, others
+    assert any(asks_for(ln, SCROLL) for ln in lines[ok_at:quits[0]]), tail
+    assert not [ln for ln in lines if ln.startswith(BINK_OPEN)], tail
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
+    assert not game_files_made(support), game_files_made(support)
+
+
 @pytest.mark.gamefiles
 def test_boot_close_quits(tmp_path):
     # Plan 6: Cmd-Q and the close button push CLOSE, which reaches the game as Windows delivers its close
