@@ -293,11 +293,19 @@ The suite ran once more after Task 6's fix (33 min 24 s). The 1-minute load
 stayed between 0.9 and 5.5, but another session's hashcat jobs held the GPU at
 99% utilization (`ioreg`, "Device Utilization %") and a browser process used
 80 to 110% CPU for most of the run. The same five tests failed the same way:
-`saved_game` fired all 63 anchors and then had no exit in 900 s, after the
-game asked for the creature scrolls (the pause-bar clicks picked the creature
-again), and the run logged one Metal command buffer failure ("Impacting
-Interactivity"), the system's sign of a GPU shared with other work. The
-binary was unchanged (sha1 34591cf7). The load average and the top CPU
+`saved_game` fired all 63 anchors and then had no exit in 900 s. The saved
+suite log (`task6-fix0.log`) keeps only the last 4000 characters of the
+boot's stderr, which are all frame-log lines; they show the boot at frame
+8535 when the 900 s ran out, about 9.5 frames a second averaged over the
+whole boot (loads included, so not a frame-rate measurement, but far below an
+unloaded boot). The boot's full stderr, kept by pytest in the run's
+temporary folder and copied to the ledger folder as
+`task6-fix0-saved_game-stderr.txt` (not committed), also shows that after
+the last anchor the game asked for `M_SCROLL_BRONZE.bwm` and
+`M_SCROLL_SILVER.bwm` (the pause-bar clicks picked the creature again) and
+one Metal command buffer failure ("Impacting Interactivity"), the system's
+sign of a GPU shared with other work. The binary was unchanged (sha1
+34591cf7). The load average and the top CPU
 processes do not show a busy GPU, so a quiet-Mac check for these boots
 should also read the GPU's utilization. Under the user's rule the suite was
 not run a third time.
