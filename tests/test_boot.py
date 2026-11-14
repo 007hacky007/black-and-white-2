@@ -101,6 +101,28 @@ def test_boot_to_front_end(tmp_path):
     assert not made, made
 
 
+# Plan 12 Task 1: a file the front end asks for after its first read, and only once in the run (the front-end
+# music; picked from an HLE_FILETRACE=1 boot to the 300th read, where it is the only CreateFile after that read).
+FRONT_FILE = "MENUMUSIC.OGG"
+
+
+@pytest.mark.gamefiles
+def test_boot_file_anchor(tmp_path):
+    # A script block anchored on a file lookup: the game's own CreateFileA, through guard.c's wrapper, reaches
+    # the script's recorder, the block fires and its quit ends the run.
+    r, lines, _ = run_boot(tmp_path, f"after file {FRONT_FILE}\n0 quit\n", 300)
+    tail = r.stderr[-4000:]
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    script = [ln for ln in lines if ln.startswith("[bw2] script: ")]
+    assert len(script) == 2, script
+    m = re.fullmatch(rf"\[bw2\] script: after file {re.escape(FRONT_FILE)} at read (\d+)", script[0])
+    assert m and int(m.group(1)) >= 1 and lines.index(FIRST_READ) < lines.index(script[0]), script
+    assert re.fullmatch(r"\[bw2\] script: quit at read \d+", script[1]) and lines.index(script[0]) < lines.index(script[1])
+    assert int(script[1].rsplit(" ", 1)[1]) >= int(m.group(1)), script
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
+
+
 # Plan 6: the front end's first dialog, driven through the host input queue at DirectInput read counts
 # (docs/research/input.md): click the name field, six Backspaces clear the default name, type "ab" (A, B),
 # then move to the confirm button and click it. Coordinates and key codes only.

@@ -30,6 +30,8 @@ static int fails;
 #define CHECKEQ(a, b) do { uint64_t _a = (uint64_t)(a), _b = (uint64_t)(b); if (_a != _b) { \
     printf("FAIL %s:%d %s == %s: 0x%llX != 0x%llX\n", __FILE__, __LINE__, #a, #b, \
            (unsigned long long)_a, (unsigned long long)_b); fails++; } } while (0)
+#define CHECKSTR(a, b) do { const char *_a = (a), *_b = (b); if (strcmp(_a, _b)) { \
+    printf("FAIL %s:%d %s: '%s' != '%s'\n", __FILE__, __LINE__, #a, _a, _b); fails++; } } while (0)
 
 static uint32_t run(recomp_func_t f, const char *name, int n, const uint32_t *a) {
     uint32_t esp0 = g_esp;
@@ -2422,14 +2424,38 @@ static void group_script_after(const char *which, const char *path) {
         { "holds", "after seconds 0.5\n0 key 0x1B 0x01 down\nafter seconds 0.5\n0 key 0x1B 0x01 up\n" },
         { "holds_slow", "after seconds 0.5\n0 key 0x1B 0x01 down\nafter seconds 0.5\n0 key 0x1B 0x01 up\n" },
         { "quit", "5 quit\n" },
+        /* plan 12 Task 1: file anchors */
+        { "file", "1 down 0\nafter file M_SCROLL_BRONZE.bwm\n0 up 0\n" },
+        { "file_stale", "1 down 0\nafter file M_SCROLL_BRONZE.bwm\n0 up 0\n" },
+        { "file_window", "1 move 1 1\nafter file A.bwm\n0 down 0\n4 up 0\nafter file B.bwm\n0 down 1\n" },
+        { "file_window_early", "1 move 1 1\nafter file A.bwm\n0 down 0\n4 up 0\nafter file B.bwm\n0 down 1\n" },
+        { "file_same_frame", "after file A.bwm\nafter file B.bwm\n0 down 0\n" },
+        { "file_slash", "after file Game.sav\n0 down 0\n" },
+        { "file_max", "" },                              /* built below: a 259-character name */
+        { "file_seen", "1 down 0\n" },
+        { "file_overflow", "after seconds 1\nafter file A.bwm\n" },   /* the clock stays put: A never arms */
     };
+    char maxname[260], maxtext[320];
+    memset(maxname, 'F', 255);
+    strcpy(maxname + 255, ".bwm");                      /* 259 characters, as tests/test_input.py builds it */
+    snprintf(maxtext, sizeof maxtext, "after file %s\n0 down 0\n", maxname);
     const char *text = NULL;
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++)
         if (!strcmp(cases[i].name, which)) text = cases[i].text;
+    if (!strcmp(which, "file_max")) text = maxtext;
     if (!text) { printf("FAIL no script_after case %s\n", which); fails++; return; }
     write_text(path, text);
     setenv("BW2_INPUT_SCRIPT", path, 1);
     bw2_script_set_clock(fake_now);
+    char seen[260];
+    if (!strcmp(which, "file_seen")) {                  /* before the load: counted, never an event */
+        bw2_script_file(NULL);
+        CHECKEQ(bw2_script_files_seen(seen, sizeof seen), 0);
+        bw2_script_file("x\\y.dds");
+        CHECKEQ(bw2_script_files_seen(seen, sizeof seen), 1);
+        CHECKSTR(seen, "y.dds");
+    }
+    if (!strcmp(which, "file_stale")) bw2_script_file("data\\art\\models\\M_SCROLL_BRONZE.bwm");   /* no window yet */
     uint32_t di = new_di(), dev = game_mouse(di, 512);
     bw2_in_set_window(HWND);
     hle_proc_hook = recorder;
@@ -2439,7 +2465,8 @@ static void group_script_after(const char *which, const char *path) {
     uint32_t buf = gmem(20 * 512);
     char errpath[1024];
     snprintf(errpath, sizeof errpath, "%s.stderr", path);
-    if (strcmp(which, "quit")) capture_stderr(errpath);   /* the quit never returns to pass it on */
+    if (strcmp(which, "quit") && strcmp(which, "file_overflow"))
+        capture_stderr(errpath);                         /* the quit and the overflow never return to pass it on */
     struct after_read a;
     if (!strcmp(which, "anchor")) {
         for (int r = 1; r <= 12; r++) {
@@ -2493,6 +2520,99 @@ static void group_script_after(const char *which, const char *path) {
             else if (r == up_at) EXPECT_READ(r, &a, 0, 0, 1, ul);
             else EXPECT_READ(r, &a, 0, 0, 0, "");
         }
+    } else if (!strcmp(which, "file")) {
+        for (int r = 1; r <= 6; r++) {
+            a = after_read(dev, buf, r);
+            if (r == 1) EXPECT_READ(r, &a, 1, 0, 0, "");
+            else if (r == 4) EXPECT_READ(r, &a, 1, 0, 0, "[bw2] script: after file M_SCROLL_BRONZE.bwm at read 3\n");
+            else EXPECT_READ(r, &a, 0, 0, 0, "");
+            if (r == 2) bw2_script_file("data\\art\\models\\M_OTHER.bwm");           /* another name: nothing */
+            if (r == 3) bw2_script_file("data\\art\\models\\m_scroll_bronze.BWM");   /* any case */
+        }
+        CHECKEQ(g_nss, 2);
+        EXPECT_SUNK(1, BW2_IN_BUTTON, 0, 0, 0, 0);
+    } else if (!strcmp(which, "file_stale")) {
+        for (int r = 1; r <= 4; r++) {
+            a = after_read(dev, buf, r);
+            if (r == 1) EXPECT_READ(r, &a, 1, 0, 0, "");
+            else if (r == 3) EXPECT_READ(r, &a, 1, 0, 0, "[bw2] script: after file M_SCROLL_BRONZE.bwm at read 2\n");
+            else EXPECT_READ(r, &a, 0, 0, 0, "");
+            if (r == 2) bw2_script_file("data\\art\\models\\M_SCROLL_BRONZE.bwm");
+        }
+        CHECKEQ(g_nss, 2);
+    } else if (!strcmp(which, "file_window")) {
+        for (int r = 1; r <= 7; r++) {
+            a = after_read(dev, buf, r);
+            if (r == 1) EXPECT_READ(r, &a, 1, 0, 0, "");
+            else if (r == 3) EXPECT_READ(r, &a, 1, 0, 0, "[bw2] script: after file A.bwm at read 2\n");
+            else if (r == 6) EXPECT_READ(r, &a, 2, 0, 0, "[bw2] script: after file B.bwm at read 4\n");
+            else EXPECT_READ(r, &a, 0, 0, 0, "");
+            if (r == 2) bw2_script_file("A.bwm");
+            if (r == 4) bw2_script_file("B.bwm");       /* after the down, before its up: the B block is not armed */
+        }
+        CHECKEQ(g_nss, 4);
+        EXPECT_SUNK(0, BW2_IN_MOVE, 1, 1, 1, 1);
+        EXPECT_SUNK(1, BW2_IN_BUTTON, 1, 1, 0, 1);
+        EXPECT_SUNK(2, BW2_IN_BUTTON, 1, 1, 0, 0);
+        EXPECT_SUNK(3, BW2_IN_BUTTON, 1, 1, 1, 1);
+    } else if (!strcmp(which, "file_window_early")) {
+        for (int r = 1; r <= 9; r++) {
+            a = after_read(dev, buf, r);
+            if (r == 1 || r == 6) EXPECT_READ(r, &a, 1, 0, 0, "");
+            else if (r == 3) EXPECT_READ(r, &a, 1, 0, 0, "[bw2] script: after file A.bwm at read 2\n");
+            else if (r == 8) EXPECT_READ(r, &a, 1, 0, 0, "[bw2] script: after file B.bwm at read 7\n");
+            else EXPECT_READ(r, &a, 0, 0, 0, "");
+            if (r == 1) bw2_script_file("B.bwm");       /* before the A block's anchor read: outside B's window */
+            if (r == 2) bw2_script_file("A.bwm");
+            if (r == 7) bw2_script_file("B.bwm");
+        }
+        CHECKEQ(g_nss, 4);
+        EXPECT_SUNK(3, BW2_IN_BUTTON, 1, 1, 1, 1);
+    } else if (!strcmp(which, "file_same_frame")) {
+        for (int r = 1; r <= 4; r++) {
+            a = after_read(dev, buf, r);
+            if (r == 3)
+                EXPECT_READ(r, &a, 1, 0, 0,
+                            "[bw2] script: after file A.bwm at read 2\n[bw2] script: after file B.bwm at read 2\n");
+            else EXPECT_READ(r, &a, 0, 0, 0, "");
+            if (r == 2) bw2_script_file("A.bwm"), bw2_script_file("B.bwm");
+        }
+        CHECKEQ(g_nss, 1);
+    } else if (!strcmp(which, "file_slash") || !strcmp(which, "file_max")) {
+        int max = which[5] == 'm';
+        char want[400], path2[300];
+        snprintf(want, sizeof want, "[bw2] script: after file %s at read 1\n", max ? maxname : "Game.sav");
+        snprintf(path2, sizeof path2, "%s", max ? "data\\" : "a/b/Game.sav");
+        if (max) strcat(path2, maxname);
+        for (int r = 1; r <= 3; r++) {
+            a = after_read(dev, buf, r);
+            if (r == 2) EXPECT_READ(r, &a, 1, 0, 0, want);
+            else EXPECT_READ(r, &a, 0, 0, 0, "");
+            if (r == 1) bw2_script_file(path2);
+        }
+        CHECKEQ(g_nss, 1);
+        CHECKEQ(bw2_script_files_seen(seen, sizeof seen), 1);
+        CHECKSTR(seen, max ? maxname : "Game.sav");
+    } else if (!strcmp(which, "file_seen")) {
+        a = after_read(dev, buf, 1);
+        EXPECT_READ(1, &a, 1, 0, 0, "");
+        bw2_script_file(NULL);                          /* after the load too: not counted */
+        CHECKEQ(bw2_script_files_seen(seen, sizeof seen), 1);
+        bw2_script_file("dir\\");                      /* an empty name: counted, no event */
+        CHECKEQ(bw2_script_files_seen(seen, sizeof seen), 2);
+        CHECKSTR(seen, "");
+        bw2_script_file("a/b\\c.bin");
+        CHECKEQ(bw2_script_files_seen(NULL, 0), 3);
+        CHECKEQ(bw2_script_files_seen(seen, sizeof seen), 3);
+        CHECKSTR(seen, "c.bin");
+    } else if (!strcmp(which, "file_overflow")) {
+        g_fake_now = 0;
+        for (int r = 1; r <= 257; r++) {                /* one lookup per read: 256 are kept, the 257th stops */
+            a = after_read(dev, buf, r);
+            bw2_script_file("A.bwm");
+            bw2_script_file("a.BWM");                   /* the same name at the same read: kept once */
+        }
+        printf("script_after: returned\n");
     } else if (!strcmp(which, "quit")) {
         for (int r = 1; r <= 8; r++) {
             a = after_read(dev, buf, r);

@@ -166,9 +166,13 @@ static void k_mciSendCommandA(void) {
     unanswered("mciSendCommandA");
 }
 
+/* script.c (input.h): records the name for BW2_INPUT_SCRIPT's file anchors (plan 12 Task 1); changes nothing. */
+extern void bw2_script_file(const char *guest_path);
+
 static void k_CreateFileA(void) {
     const char *p = str_or(A32(0), NULL);
     if (device_path(p)) trip("CreateFileA", p);
+    bw2_script_file(p);
     bw2_hle_shim("CreateFileA")();
 }
 /* CreateFileW: win32hle answers only the A form, so the name is narrowed into
@@ -177,6 +181,7 @@ static void k_CreateFileW(void) {
     char p[1024];
     narrow(A32(0), p, sizeof p);
     if (device_path(p)) trip("CreateFileW", p);
+    bw2_script_file(p);                                 /* "" for a NULL name: ignored */
     uint32_t mark = hle_scratch_mark();
     if (A32(0)) MEM32(g_esp + 4) = hle_scratch_copy(p, (uint32_t)strlen(p) + 1);
     bw2_hle_shim("CreateFileA")();

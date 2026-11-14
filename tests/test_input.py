@@ -242,12 +242,23 @@ def test_script_bad(selftest, tmp_path, text, words):
 
 # ---- plan 11 Task 1: script blocks anchored on movies and wall time ----
 
+MAX_NAME = "F" * 255 + ".bwm"                            # 259 characters, the longest file anchor (input_selftest.c)
+
 AFTER_LINES = {
     "anchor": ["[bw2] script: after open 1798 at read 3"],
     "stale": ["[bw2] script: after last 1798 at read 6"],
     "empty_block": ["[bw2] script: after open 1798 at read 5", "[bw2] script: after seconds 0.5 at read 8"],
     "holds": ["[bw2] script: after seconds 0.5 at read 513", "[bw2] script: after seconds 0.5 at read 1025"],
     "holds_slow": ["[bw2] script: after seconds 0.5 at read 2", "[bw2] script: after seconds 0.5 at read 3"],
+    # plan 12 Task 1: file anchors (bw2_script_file, fed from guard.c's CreateFileA and CreateFileW)
+    "file": ["[bw2] script: after file M_SCROLL_BRONZE.bwm at read 3"],
+    "file_stale": ["[bw2] script: after file M_SCROLL_BRONZE.bwm at read 2"],
+    "file_window": ["[bw2] script: after file A.bwm at read 2", "[bw2] script: after file B.bwm at read 4"],
+    "file_window_early": ["[bw2] script: after file A.bwm at read 2", "[bw2] script: after file B.bwm at read 7"],
+    "file_same_frame": ["[bw2] script: after file A.bwm at read 2", "[bw2] script: after file B.bwm at read 2"],
+    "file_slash": ["[bw2] script: after file Game.sav at read 1"],
+    "file_max": [f"[bw2] script: after file {MAX_NAME} at read 1"],
+    "file_seen": [],
 }
 
 
@@ -272,6 +283,16 @@ def test_script_after_quit(selftest, tmp_path):
     assert "script_after: returned" not in r.stdout, r.stdout[-2000:]
 
 
+def test_script_after_file_overflow(selftest, tmp_path):
+    # a file block waiting behind a block that never fires: 256 lookups of its name are kept (one per read),
+    # the 257th stops the run with its read number
+    r = run_group(selftest, "script_after", tmp_path, "file_overflow", tmp_path / "after.script")
+    assert r.returncode != 0 and "script_after: returned" not in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "script_after: read 257 answered (0 failed so far)" in r.stdout, r.stdout[-2000:]
+    assert "FATAL: d3d9: " in r.stderr and "file lookups wait for a file anchor at read 257" in r.stderr, \
+        r.stderr[-2000:]
+
+
 @pytest.mark.parametrize("text, words", [
     ("1 down 0\nafter soon 3\n", ["BW2_INPUT_SCRIPT line 2:", "soon"]),
     ("after seconds 0\n", ["BW2_INPUT_SCRIPT line 1:", "seconds"]),
@@ -287,6 +308,11 @@ def test_script_after_quit(selftest, tmp_path):
     ("after open 1798\n-1 down 0\n", ["BW2_INPUT_SCRIPT line 2:", "read"]),
     ("1 quit 1\n", ["BW2_INPUT_SCRIPT line 1:", "quit"]),
     ("2 move 1 1\nquit\n", ["BW2_INPUT_SCRIPT line 2:", "quit"]),
+    ("after file\n", ["BW2_INPUT_SCRIPT line 1:", "after file"]),
+    ("after file a\\b\n", ["BW2_INPUT_SCRIPT line 1:", "a\\b"]),
+    ("after file a/b\n", ["BW2_INPUT_SCRIPT line 1:", "a/b"]),
+    ("after file a b\n", ["BW2_INPUT_SCRIPT line 1:", "takes 2 fields"]),
+    ("1 down 0\nafter file " + "F" * 256 + ".bwm\n", ["BW2_INPUT_SCRIPT line 2:", "260"]),
 ])
 def test_script_after_bad(selftest, tmp_path, text, words):
     # as test_script_bad: the first read stops the run, naming the line

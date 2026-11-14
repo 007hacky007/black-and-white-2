@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include "win32hle.h"
 #include "bw2.h"
+#include "input.h"
 
 const recomp_dispatch_entry_t recomp_dispatch_table[1] = { { 0, 0 } };
 const uint32_t recomp_dispatch_count = 0;
@@ -636,6 +637,37 @@ int main(void) {
         CHECK(call("ReadFile", 5, h, buf, 8u, got, 0u) == 1 && MEM32(got) == 3 && !memcmp(hle_ptr(buf), "abc", 3));
         CHECK(call("CloseHandle", 1, h) == 1);
         CHECK(stat("support/Game/Audio/a.bin", &st) != 0);                             /* no empty copy made */
+    }
+
+    /* createfile_forward (plan 12 Task 1): guard.c's CreateFileA and CreateFileW, reached as the game's
+       imports reach them, record each name for the script's file anchors and answer exactly as before */
+    {
+        struct stat st;
+        char last[260];
+        unsigned long long seen0 = bw2_script_files_seen(NULL, 0);
+        uint32_t h = WCALL("CreateFileA", 7, gstr("C:\\cf_missing.bin"), 0x80000000u, 1u, 0u, 3u, 0x80u, 0u);
+        CHECK(h == 0xFFFFFFFFu && g_err == 2);                                        /* ERROR_FILE_NOT_FOUND */
+        CHECK(bw2_script_files_seen(last, sizeof last) == seen0 + 1 && !strcmp(last, "cf_missing.bin"));
+        h = WCALL("CreateFileA", 7, gstr("C:\\cf_new.bin"), 0xC0000000u, 0u, 0u, 4u, 0x80u, 0u);   /* OPEN_ALWAYS */
+        CHECK(h != 0xFFFFFFFFu && g_err == 0);
+        CHECK(bw2_script_files_seen(last, sizeof last) == seen0 + 2 && !strcmp(last, "cf_new.bin"));
+        if (h != 0xFFFFFFFFu) call("CloseHandle", 1, h);
+        h = WCALL("CreateFileA", 7, gstr("C:\\cf_new.bin"), 0xC0000000u, 0u, 0u, 4u, 0x80u, 0u);
+        CHECK(h != 0xFFFFFFFFu && g_err == 183);                                      /* ERROR_ALREADY_EXISTS */
+        CHECK(bw2_script_files_seen(last, sizeof last) == seen0 + 3 && !strcmp(last, "cf_new.bin"));
+        if (h != 0xFFFFFFFFu) call("CloseHandle", 1, h);
+        write_file("Audio/cf.bin", "abc", 3);
+        h = WCALL("CreateFileA", 7, gstr("Audio\\cf.bin"), 0x80000000u, 1u, 0u, 3u, 0x80u, 0u);   /* read-only, game tree */
+        CHECK(h != 0xFFFFFFFFu && g_err == 0);
+        CHECK(bw2_script_files_seen(last, sizeof last) == seen0 + 4 && !strcmp(last, "cf.bin"));
+        CHECK(stat("support/Game/Audio/cf.bin", &st) != 0);                            /* opened in place */
+        if (h != 0xFFFFFFFFu) call("CloseHandle", 1, h);
+        static const char wide[] = "C:\\cf_wide.bin";
+        uint32_t w = gmem(2 * sizeof wide);
+        for (size_t i = 0; i < sizeof wide; i++) MEM16(w + 2 * (uint32_t)i) = (uint8_t)wide[i];
+        h = WCALL("CreateFileW", 7, w, 0x80000000u, 1u, 0u, 3u, 0x80u, 0u);
+        CHECK(h == 0xFFFFFFFFu && g_err == 2);
+        CHECK(bw2_script_files_seen(last, sizeof last) == seen0 + 5 && !strcmp(last, "cf_wide.bin"));
     }
 
     /* GetKeyNameTextA and W: Windows' US English names. Bit 24 is extended, bit 25 "don't care" (merges

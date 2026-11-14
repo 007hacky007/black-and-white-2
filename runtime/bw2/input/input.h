@@ -9,6 +9,7 @@
 #ifndef BW2_INPUT_H
 #define BW2_INPUT_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include "win32hle.h"
 
@@ -61,6 +62,15 @@ void bw2_script_at_read(unsigned long long n);
  * copy that shows a movie's last frame. Only records the event and bw2_dinput_reads(); pushes and
  * prints nothing. */
 void bw2_script_movie(int last, uint32_t frames);
+/* Plan 12 Task 1: guard.c's CreateFileA and CreateFileW, before forwarding, pass the guest path. Takes its
+ * last component (after the last '\' or '/'); ignores NULL and an empty component, and records nothing
+ * before the script is loaded; after the load records the component and bw2_dinput_reads() only when it
+ * equals (ASCII case-insensitively) the name of a file block not yet fired. Prints and pushes nothing; a log
+ * that would pass 256 lookups stops the run (d3d_fail). Any thread. */
+void bw2_script_file(const char *guest_path);
+/* Calls of bw2_script_file with a non-NULL argument so far, and (last, n: may be NULL, 0) a copy of the last
+ * one's component. For the selftests. */
+unsigned long long bw2_script_files_seen(char *last, size_t n);
 /* The script's wall clock in seconds: NULL (the start) is CLOCK_MONOTONIC; the selftest sets its own. */
 void bw2_script_set_clock(double (*now)(void));
 /* dinput8.c: the read counter's current value (GetDeviceData and GetDeviceState reads so far). */

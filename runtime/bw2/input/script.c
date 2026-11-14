@@ -24,6 +24,7 @@
  *   after open <frames>     a movie of that many frames opened (_BinkOpen@8)
  *   after last <frames>     a movie of that many frames showed its last frame
  *   after seconds <s>       s wall seconds (0 < s <= 3600, strtod)
+ *   after file <name>       the game asked for a file of that name (plan 12 Task 1)
  * The first block is armed at the first read at which every line before it
  * was pushed; each later block at the first read at which the block before
  * it fired and all its events were pushed. A movie anchor counts only events
@@ -32,11 +33,27 @@
  * the arming read (A: that read). Event k of a block is pushed at the first
  * read at or after the firing whose number is at least A + k. Each firing
  * prints "[bw2] script: after <anchor words> at read <A>".
+ *
+ * File anchors (plan 12 Task 1). guard.c's CreateFileA and CreateFileW (the
+ * shims the game's imports reach) pass every name to bw2_script_file before
+ * forwarding the call untouched. <name> is one token of 1 to 259 characters
+ * with no '\' or '/', matched ASCII case-insensitively against the guest
+ * path's last component. A lookup is recorded (with the read counter's value)
+ * only once the script is loaded and only when its name is that of a file
+ * block not yet fired. A file block's window opens at the anchor read of the
+ * block before it (block 0: the first read), not at its own arming read, so a
+ * lookup that the previous block's own events cause counts; the block fires at
+ * the first read, once armed, at which a recorded lookup in its window has its
+ * name (A: that lookup's read). The log holds at most 256 lookups (one per
+ * name and read); a firing drops those before A and those no unfired block
+ * names, and a log that would grow past 256 stops the run.
  */
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include "bw2.h"
 #include "d3d_com.h"
@@ -49,12 +66,14 @@ struct script_ev {
     struct bw2_in_event e;               /* a MOVE's and a BUTTON's or WHEEL's point is set when pushed */
 };
 
-enum anchor { A_NONE, A_OPEN, A_LAST, A_SECONDS };
+enum anchor { A_NONE, A_OPEN, A_LAST, A_SECONDS, A_FILE };
+#define FILE_NAME_MAX 259                /* a file anchor's longest name (MAX_PATH less its NUL) */
 struct block {
     enum anchor kind;                    /* block 0, the lines before the first `after`: A_NONE */
     uint32_t frames;
     double seconds;
-    char words[64];                      /* "after ...", single-spaced, as written */
+    char words[272];                     /* "after ...", single-spaced, as written ("after file " + 259) */
+    char name[FILE_NAME_MAX + 1];        /* A_FILE: the name, as written */
     size_t first;                        /* its first event's index (g_n if it has none) */
     int armed, fired;
     size_t arm_movie;                    /* movie events before this index were recorded before arming */
@@ -73,6 +92,18 @@ static int g_px, g_py;                   /* the running client point */
 struct movie_ev { int last; uint32_t frames; unsigned long long read; };
 static struct movie_ev *g_mv;
 static size_t g_nmv, g_mvcap;
+
+/* The file lookups bw2_script_file records (plan 12 Task 1): only names an unfired file block has, at most
+ * FILE_LOG_MAX. Guarded by g_file_mu (any guest thread may open a file); g_file_ready is set, under it, once
+ * the script is loaded. */
+#define FILE_LOG_MAX 256
+struct file_ev { char name[FILE_NAME_MAX + 1]; unsigned long long read; };
+static struct file_ev g_fev[FILE_LOG_MAX];
+static size_t g_nfev;
+static int g_file_ready;
+static unsigned long long g_files_seen;
+static char g_file_last[FILE_NAME_MAX + 1];
+static pthread_mutex_t g_file_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static double mono_now(void) {
     struct timespec ts;
@@ -153,8 +184,18 @@ static void parse_after(int line, char **f, int nf, unsigned long long *last) {
         if (!*f[1] || !end || *end || errno) bad(line, "'%s' is not a number", f[1]);
         if (!(v > 0 && v <= 3600)) bad(line, "after seconds %s is not more than 0 and at most 3600", f[1]);
         nb.kind = A_SECONDS, nb.seconds = v;
+    } else if (!strcmp(f[0], "file")) {
+        size_t len = strlen(f[1]);
+        if (len > FILE_NAME_MAX) {
+            char s[96];
+            snprintf(s, sizeof s, "after file name of %zu characters is longer than %d", len, FILE_NAME_MAX);
+            bad(line, "%s", s);
+        }
+        if (strpbrk(f[1], "\\/")) bad(line, "after file name '%s' is a path (no \\ or / allowed)", f[1]);
+        nb.kind = A_FILE;
+        memcpy(nb.name, f[1], len + 1);
     } else
-        bad(line, "unknown anchor 'after %s' (open, last or seconds)", f[0]);
+        bad(line, "unknown anchor 'after %s' (open, last, seconds or file)", f[0]);
     if (strlen(f[0]) + strlen(f[1]) + 8 > sizeof nb.words) bad(line, "anchor value '%s' is too long", f[1]);
     snprintf(nb.words, sizeof nb.words, "after %s %s", f[0], f[1]);
     struct block *b = add_block();
@@ -254,6 +295,9 @@ static void load(void) {
     if (ferror(fp)) d3d_fail("BW2_INPUT_SCRIPT '%s' cannot be read: %s", path, strerror(errno));
     free(buf);
     fclose(fp);
+    pthread_mutex_lock(&g_file_mu);
+    g_file_ready = 1;                    /* lookups are recorded from here on */
+    pthread_mutex_unlock(&g_file_mu);
 }
 
 /* The running point moved by a delta, clamped to the game window's client rect (win32hle windows have
@@ -288,6 +332,75 @@ void bw2_script_movie(int last, uint32_t frames) {
 
 void bw2_script_set_clock(double (*now)(void)) { g_now = now ? now : mono_now; }
 
+/* 1 if an unfired file block (g_cur on; every block before g_cur fired) has this name. g_file_mu held. */
+static int unfired_file_name(const char *name) {
+    for (size_t i = g_cur; i < g_nblk; i++)
+        if (g_blk[i].kind == A_FILE && !g_blk[i].fired && !strcasecmp(g_blk[i].name, name)) return 1;
+    return 0;
+}
+
+void bw2_script_file(const char *guest_path) {
+    if (!guest_path) return;
+    const char *c = guest_path;
+    for (const char *p = guest_path; *p; p++)
+        if (*p == '\\' || *p == '/') c = p + 1;
+    size_t len = strlen(c);
+    pthread_mutex_lock(&g_file_mu);
+    g_files_seen++;
+    snprintf(g_file_last, sizeof g_file_last, "%s", c);
+    if (g_file_ready && len && len <= FILE_NAME_MAX && unfired_file_name(c)) {
+        unsigned long long n = bw2_dinput_reads();
+        int dup = 0;
+        for (size_t i = 0; i < g_nfev && !dup; i++) dup = g_fev[i].read == n && !strcasecmp(g_fev[i].name, c);
+        if (!dup) {
+            if (g_nfev == FILE_LOG_MAX)
+                d3d_fail("BW2_INPUT_SCRIPT: more than %d file lookups wait for a file anchor at read %llu "
+                         "(the last '%s')", FILE_LOG_MAX, n, c);
+            memcpy(g_fev[g_nfev].name, c, len + 1);
+            g_fev[g_nfev++].read = n;
+        }
+    }
+    pthread_mutex_unlock(&g_file_mu);
+}
+
+unsigned long long bw2_script_files_seen(char *last, size_t n) {
+    pthread_mutex_lock(&g_file_mu);
+    unsigned long long seen = g_files_seen;
+    if (last && n) snprintf(last, n, "%s", g_file_last);
+    pthread_mutex_unlock(&g_file_mu);
+    return seen;
+}
+
+/* File block b (armed, block g_cur): the read of its first recorded lookup in its window (at or after the
+ * anchor read of the block before it; block 0 counts as fired at the first read, before which nothing is
+ * recorded). 1 if there is one. */
+static int file_found(const struct block *b, unsigned long long *a) {
+    unsigned long long from = g_cur > 1 ? g_blk[g_cur - 1].a : 0;
+    int found = 0;
+    pthread_mutex_lock(&g_file_mu);
+    for (size_t k = 0; k < g_nfev && !found; k++)
+        if (g_fev[k].read >= from && !strcasecmp(g_fev[k].name, b->name)) *a = g_fev[k].read, found = 1;
+    pthread_mutex_unlock(&g_file_mu);
+    return found;
+}
+
+/* Block g_cur fires with anchor read a: the file log keeps only lookups a later window can still use (at or
+ * after a, with a name an unfired block has). Under g_file_mu, since bw2_script_file reads g_cur and the
+ * fired flags from any thread. */
+static void fire(struct block *b, unsigned long long a) {
+    pthread_mutex_lock(&g_file_mu);
+    b->a = a;
+    b->fired = 1;
+    g_cur++;
+    size_t o = 0;
+    for (size_t j = 0; j < g_nfev; j++)
+        if (g_fev[j].read >= a && unfired_file_name(g_fev[j].name)) g_fev[o++] = g_fev[j];
+    g_nfev = o;
+    pthread_mutex_unlock(&g_file_mu);
+    fprintf(stderr, "[bw2] script: %s at read %llu\n", b->words, a);
+    fflush(stderr);
+}
+
 /* Block g_cur: armed once the block before it fired and its events are all pushed; then fired when its
  * anchor is seen. 1 if it fired at this read. */
 static int try_block(unsigned long long n) {
@@ -297,20 +410,20 @@ static int try_block(unsigned long long n) {
         b->armed = 1, b->arm_movie = g_nmv;
         if (b->kind == A_SECONDS) b->arm_clock = g_now();
     }
-    if (b->kind == A_SECONDS) {
+    unsigned long long a;
+    if (b->kind == A_FILE) {
+        if (!file_found(b, &a)) return 0;
+    } else if (b->kind == A_SECONDS) {
         if (g_now() - b->arm_clock < b->seconds) return 0;
-        b->a = n;
+        a = n;
     } else {
         size_t i = b->arm_movie;
         int want_last = b->kind == A_LAST;
         while (i < g_nmv && !(g_mv[i].last == want_last && g_mv[i].frames == b->frames)) i++;
         if (i == g_nmv) return 0;
-        b->a = g_mv[i].read;
+        a = g_mv[i].read;
     }
-    b->fired = 1;
-    g_cur++;
-    fprintf(stderr, "[bw2] script: %s at read %llu\n", b->words, b->a);
-    fflush(stderr);
+    fire(b, a);
     return 1;
 }
 
