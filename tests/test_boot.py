@@ -948,6 +948,97 @@ def test_land_move_tutorial(chosen_game, tmp_path):
     assert modules <= MODULE_LINES_BEFORE, sorted(modules - MODULE_LINES_BEFORE)
 
 
+# Plan 12 Task 4: from the loaded offer to the first land's end and the second land's load, measured on the port
+# (docs/research/land1.md). The path with the fewest steps: SKIP_FIRST s after the load's last lookup a click on
+# the offer's other scroll (SKIP_SCROLL) skips the tutorials, and the scene after them starts at once (the game
+# asks for TUTORIAL_END, as at the movement tutorial's end). It ends about 31 s later (the letterbox opened 29.5
+# to 30.8 s after that lookup in six runs) with the land's objective: the gold scroll on the mountain, out of
+# view. So the script waits SCENE_WAIT s, zooms out ZOOM_OUT notches, puts the cursor on the scroll's foot
+# (ZOOM_POINT) and zooms in ZOOM_IN notches, which brings the camera to the scroll and shows it large; a click on
+# the scroll (GOLD_SCROLL; its click area lies below the glow) makes the game ask whether to leave the land, and a
+# second click CONFIRM_GAP s later confirms. The game writes the creature's mind under Persistant Data, opens the
+# second land's files (LAND_TWO_TERRAIN about 3.4 s after the confirm) and reads input again about 15 s later.
+# Places are 1024x768 client pixels of the game's own cursor (LAND), reached through the top left corner.
+SKIP_SCROLL = (480, 360)
+SKIP_FIRST = 8
+SCENE_WAIT = 40
+ZOOM_OUT, ZOOM_IN = -3, 4
+ZOOM_POINT = (771, 259)
+GOLD_SCROLL = (540, 342)
+GOLD_FIRST = 6
+CONFIRM_GAP = 2.5
+LAND_TWO_TERRAIN = "Land2.ter"
+LAND_TWO_DIR = ("Data", "landscape", "BW2")
+CREATURE_MIND = ("Persistant Data", "Creature Mind")
+LAND_ONE_TAIL = 30
+_skip_click, _ = step_blocks((0, 0), [(SKIP_FIRST, LAND, SKIP_SCROLL)])
+_gold_click, _ = step_blocks((0, 0), [(GOLD_FIRST, LAND, GOLD_SCROLL)])
+_zx, _zy = (math.ceil(v / LAND) for v in ZOOM_POINT)
+LAND_ONE_STEPS = (
+    _skip_click
+    + [f"after file {TUTORIAL_END}", f"after seconds {SCENE_WAIT}"] + wheel_blocks(ZOOM_OUT, 1.2)
+    + ["after seconds 4", "0 move -4000 -4000", "after seconds 0.5", f"0 move {_zx} {_zy}", "after seconds 2"]
+    + wheel_blocks(ZOOM_IN, 1.6)
+    + _gold_click
+    + [f"after seconds {CONFIRM_GAP:g}", "0 down 0", "4 up 0"]
+    + [f"after file {LAND_TWO_TERRAIN}"])
+
+
+def creature_minds(support):
+    folder = support.joinpath(*DOCS, *CREATURE_MIND)
+    return sorted(str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file()) if folder.is_dir() else []
+
+
+@pytest.mark.gamefiles
+@pytest.mark.long
+def test_land_one_to_two(chosen_game, tmp_path):
+    # Plan 12 Task 4: from the loaded offer the script plays the first land to its end; the game carries the
+    # creature over and loads the second land, whose terrain file it opens.
+    _, _, saved, new_save = chosen_game
+    assert new_save is not None, folder_names(saved_games(saved))
+    support = copy_support(saved, tmp_path)
+    assert creature_minds(support) == [], creature_minds(support)
+    load, _ = chosen_load_lines()
+    script = "\n".join(load + LAND_ONE_STEPS + [f"after seconds {LAND_ONE_TAIL}", "0 quit"]) + "\n"
+    r, lines, _ = run_boot(tmp_path, script, 1800, support=support, HLE_FILETRACE="1", BW2_FRAME_LOG="1",
+                           BW2_BINK_LOG="1")
+    tail = r.stderr[-4000:]
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    quits = [i for i, ln in enumerate(lines) if re.fullmatch(r"\[bw2\] script: quit at read \d+", ln)]
+    assert len(quits) == 1, tail
+    quit_at = quits[0]
+    anchor_at = [i for i, ln in enumerate(lines) if SCRIPT_ANCHOR.match(ln)]
+    anchors = [SCRIPT_ANCHOR.match(lines[i]).group(1) for i in anchor_at]
+    expected = [ln for ln in load + LAND_ONE_STEPS if ln.startswith("after ")]
+    assert anchors == expected + [f"after seconds {LAND_ONE_TAIL}"], (anchors, tail)
+    assert expected[-1] == f"after file {LAND_TWO_TERRAIN}", expected[-1]
+    # the second land's terrain opens from the install tree, and only after the confirming click: the first click
+    # on the gold scroll alone left nothing
+    end_step = anchor_at[len(expected) - 2]
+    terrain = "/".join(LAND_TWO_DIR + (LAND_TWO_TERRAIN,))
+    asked = [i for i, ln in enumerate(lines) if asks_for(ln, LAND_TWO_TERRAIN)]
+    assert asked and asked[0] > end_step, (end_step, asked)
+    assert lines[asked[0]].endswith(f" -> {terrain} ok"), lines[asked[0]]
+    # the land's end carries the creature over: its mind is written under Persistant Data (one file and its .meta)
+    minds = creature_minds(support)
+    assert len(minds) == 2 and minds[0] + ".meta" == minds[1] and minds[0].endswith(".erc"), minds
+    # the second land is drawn: the last 100 frames before the quit are each at least half not black
+    window = lines[asked[0]:quit_at]
+    aborted = aborted_frames(window)
+    land = frames_of(window)
+    assert len(land) >= 100, len(land)
+    last = [f for f in land[-100:] if f[0] not in aborted]
+    assert len(last) * 2 > 100, len(last)
+    dark = [f for f in last if 2 * f[6] < f[7]]
+    assert not dark, dark
+    assert not [ln for ln in lines if ln.startswith(BINK_OPEN)], tail
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
+    assert not game_files_made(support), game_files_made(support)
+    modules = {ln for ln in lines if ln.startswith("[module] ")}
+    assert modules <= MODULE_LINES_BEFORE, sorted(modules - MODULE_LINES_BEFORE)
+
+
 @pytest.mark.gamefiles
 def test_boot_close_quits(tmp_path):
     # Plan 6: Cmd-Q and the close button push CLOSE, which reaches the game as Windows delivers its close

@@ -8,12 +8,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def pytest_collection_modifyitems(config, items):
-    if os.environ.get("BW2_GAMEFILES") == "1":
-        return
-    skip = pytest.mark.skip(reason="needs real game files: set BW2_GAMEFILES=1")
+    gamefiles = os.environ.get("BW2_GAMEFILES") == "1"
+    long = os.environ.get("BW2_LONG") == "1"
+    skip_files = pytest.mark.skip(reason="needs real game files: set BW2_GAMEFILES=1")
+    skip_long = pytest.mark.skip(reason="a long test: set BW2_LONG=1")
     for item in items:
-        if "gamefiles" in item.keywords:
-            item.add_marker(skip)
+        if "gamefiles" in item.keywords and not gamefiles:
+            item.add_marker(skip_files)
+        elif "long" in item.keywords and not long:
+            item.add_marker(skip_long)
 
 
 REPO = Path(__file__).resolve().parents[1]
