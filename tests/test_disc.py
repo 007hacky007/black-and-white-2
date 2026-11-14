@@ -172,3 +172,33 @@ def test_whole_set_space_checked_before_any_unpack(iso, tmp_path, gamefiles, mon
         identify_discs(zips, releases=[])
     assert f"need {sum(sizes)} bytes" in str(ei.value)
     assert not gamefiles.exists() or not any(p.is_file() for p in gamefiles.rglob("*"))
+
+
+@pytest.mark.gamefiles
+def test_iso_is_known(tmp_path):
+    from bw2.releases import identify
+    b = disc.unpacked_bin(_real_zip(4))
+    iso = tmp_path / "disc4.iso"
+    with open(b, "rb") as src, open(iso, "wb") as dst:
+        while buf := src.read(disc.RAW * 4096):
+            assert len(buf) % disc.RAW == 0
+            for i in range(0, len(buf), disc.RAW):
+                dst.write(buf[i + disc.RAW_DATA_OFFSET:i + disc.RAW_DATA_OFFSET + disc.COOKED])
+    rel = identify(iso, kind="disc")
+    assert rel is not None and rel.name == "Black & White 2 (USA) (Disc 4)"
+    assert rel.note == "iso: 2048-byte user data of the redump bin"
+    with open_disc(iso) as a, open_disc(b) as c:
+        assert list_files(a) == list_files(c)
+
+
+@pytest.mark.gamefiles
+def test_zip_table():
+    import zipfile
+    from bw2.builder_cli import load_zip_table
+    rows = load_zip_table()
+    assert sorted(rows) == [1, 2, 3, 4]
+    for n in range(1, 5):
+        with zipfile.ZipFile(_real_zip(n)) as zf:
+            bins = [i for i in zf.infolist() if i.filename.lower().endswith(".bin")]
+        assert len(bins) == 1
+        assert rows[n] == (bins[0].filename, bins[0].file_size, bins[0].CRC)

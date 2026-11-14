@@ -10,13 +10,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 def pytest_collection_modifyitems(config, items):
     gamefiles = os.environ.get("BW2_GAMEFILES") == "1"
     long = os.environ.get("BW2_LONG") == "1"
+    e2e = os.environ.get("BW2_BUILDER_E2E") == "1"
     skip_files = pytest.mark.skip(reason="needs real game files: set BW2_GAMEFILES=1")
     skip_long = pytest.mark.skip(reason="a long test: set BW2_LONG=1")
+    skip_e2e = pytest.mark.skip(reason="the whole Builder build: set BW2_BUILDER_E2E=1")
     for item in items:
         if "gamefiles" in item.keywords and not gamefiles:
             item.add_marker(skip_files)
         elif "long" in item.keywords and not long:
             item.add_marker(skip_long)
+        elif "builder_e2e" in item.keywords and not e2e:
+            item.add_marker(skip_e2e)
 
 
 REPO = Path(__file__).resolve().parents[1]

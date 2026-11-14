@@ -45,3 +45,21 @@ def test_bundled_tsv_has_fan_patch():
     assert [(r.name, r.size, r.sha256) for r in exe] == [
         ("white.exe 1.42", 20828160,
          "ca745211ac9c63c439493ff14fa27507c4b99d199af4fd2b48577bccfd851db2")]
+
+
+def test_bundled_tsv_rows():
+    rel = load_releases()
+    kinds = {}
+    for r in rel:
+        kinds[r.kind] = kinds.get(r.kind, 0) + 1
+    assert len(rel) == 17
+    assert kinds["disc"] == 8
+    iso = {r.name: (r.size, r.sha256) for r in rel
+           if r.kind == "disc" and r.note == "iso: 2048-byte user data of the redump bin"}
+    assert iso == {  # "Measured" item 8
+        "Black & White 2 (USA) (Disc 1)": (686921728, "47f9bea2e839867ae241761da872e5bd82a7b018f8dd4749f93ec1244b14fa17"),
+        "Black & White 2 (USA) (Disc 2)": (681406464, "65e33e5e681be91ed4040805a67daa193db5e12d0aad00b9a37db510fd9489ad"),
+        "Black & White 2 (USA) (Disc 3)": (681406464, "b5731d13f45a914fc98d736a6f60be98250d98ba2ccf33f60b3162e6856c30c0"),
+        "Black & White 2 (USA) (Disc 4)": (568465408, "dc1652305a24bb65fc2635b7620c1aba970fb4b033233070f06b26457858979e"),
+    }
+    assert len({(r.size, r.sha256) for r in rel}) == len(rel)
