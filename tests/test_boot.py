@@ -12,7 +12,12 @@ Plan 11's scripts follow the game, not the frame rate: blocks anchored on the mo
 keys and a quit verb. With them the front end's options change the resolution and a restart keeps it; Escape
 skips the intro and the land's scenes to the creature choice, where a save is made from the pause bar; the
 game's own quit (which writes the profile) ends those runs; and the front end's load dialog loads the save back
-into the land, at the creature choice, where a New Game still waits for the player (docs/research/saves.md)."""
+into the land, at the creature choice, where a New Game still waits for the player (docs/research/saves.md).
+Plan 12's scripts also anchor on the files the game asks for (after file). From a loaded save two clicks on the
+lion pick it (select, then confirm; measured on the port, not verified on Windows), and a save is taken at the
+tutorial offer that follows; loaded back, the script takes the first land's tutorial on moving and looking
+around with drags spread over wall time, and (behind BW2_LONG) plays the land to its end and the second land's
+load (docs/research/land1.md)."""
 import math
 import os
 import re

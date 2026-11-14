@@ -490,3 +490,8 @@ choice in about 6 s, so a later test can start from a loaded save instead of
 New Game and the skips.
 Bink audio tracks stay a later plan's stop until a scene opens a movie that
 has one.
+
+Plan 12 measured the choice (two clicks on a creature, select then confirm,
+measured on the port), a save at the tutorial offer after it, the first land's
+movement tutorial, the land's end and the second land's load; where its tests
+end now is in `land1.md` (its "For the next plan").

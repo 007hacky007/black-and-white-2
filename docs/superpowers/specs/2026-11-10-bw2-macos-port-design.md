@@ -320,6 +320,19 @@ Metal directly; whether SDL2 stays for anything is the builder's call.
   time (a down, an `after seconds` block, the up); and a `quit` verb that exits 0 at a
   read the script names. Each firing prints one line, and the tests assert them all
   (`docs/research/saves.md`).
+  **Plan 12:** script blocks anchored on the files the game asks for (`after file
+  <name>`): guard.c's `CreateFileA` and `CreateFileW` wrappers record each name and
+  forward the call untouched, and a file block counts the lookups made at or after
+  the anchor read of the block before it, so a lookup caused by that block's own
+  events counts and an older one does not. The creature choice is two clicks on a
+  creature, select then confirm, measured on the port and not verified on Windows
+  (the VM cannot run the game): each click's down and up go through the same action
+  binding (`sub_0064B590` pressed, `sub_0064B640` released) in the read they arrive,
+  the double-click bit is never set, and the first click leaves a selected state (a
+  beam over the creature and four art lookups on its release). Drags (the Movement
+  button is the right one; turning and pitching hold the middle one) are moves
+  spread over wall time, so a drag lasts the same at any frame rate
+  (`docs/research/land1.md`).
 - **Video:** Bink through pcrecomp's ffmpeg-backed `bink.c`, adapted to D3D9
   surfaces (`_BinkDX9SurfaceType@4`, `_BinkCopyToBuffer@28`).
   **Plan 10:** the six `binkw32.dll` imports the game calls are answered from
@@ -734,6 +747,12 @@ Decided by the user:
 - Build on pcrecomp's MIT pieces where they fit.
 - Done = campaign playable start to finish, settings, save, load.
 - Mouse and trackpad both supported. Windowed and full screen both supported.
+- No long play sessions by agents (2026-11-14): the user tests longer gameplay;
+  scripted runs stay under about 5 minutes, tests marked `long` run only with
+  `BW2_LONG=1`, and the order after plan 12 is the Builder app and packaging,
+  then performance. Frame-rate and performance numbers are taken only on a quiet
+  Mac (1-minute load below 25% of the core count, no other process above 50%
+  CPU), and the default suite has no frame-rate assertions.
 
 My calls (the user may override):
 
@@ -758,4 +777,6 @@ Left to the builder:
 - Bink decoder (plan 10, Ruling 2: FFmpeg's, as separate LGPL dynamic libraries).
 - Nothing new from plan 11: its mingw-w64 (Ruling 6, Homebrew) builds the Windows
   probe on this Mac and is a development tool only, not part of the Builder.
+- Nothing new from plan 12: its rulings are test scripts and measured places
+  (`docs/research/land1.md`), and its `long` marker is a test switch.
 - Exact phasing after phase 0.
