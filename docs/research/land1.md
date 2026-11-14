@@ -257,6 +257,7 @@ and the choice, chosen-load and tutorial boots:
 | Task 3 | 597 passed, 4 skipped | 29 min 41 s | a tutorial run beside it |
 | Task 4 (fourth run) | 597 passed, 5 skipped | 31 min 6 s | about 5 to 12 |
 | Task 6 | 592 passed, 5 skipped, 5 errors | 33 min 46 s | 3.5 at the start, up to 218 while `saved_game` ran, 88 at the end |
+| Task 6 fix | 592 passed, 5 skipped, 5 errors | 33 min 24 s | 0.9 to 5.5, but the GPU at 99% (another session's hashcat) and a browser process at 80 to 110% CPU |
 
 The long tests (`BW2_LONG=1`) were not run in Task 6: agents run no long play
 sessions (user, 2026-11-14). `test_land_one_to_two` is the only one; its
@@ -288,10 +289,24 @@ documents and a docstring. Under the user's rule (2026-11-14), the test and the
 engine were not changed and the suite was not run again. Whether this drag
 needs more wall time per step can only be decided on a quiet Mac.
 
+The suite ran once more after Task 6's fix (33 min 24 s). The 1-minute load
+stayed between 0.9 and 5.5, but another session's hashcat jobs held the GPU at
+99% utilization (`ioreg`, "Device Utilization %") and a browser process used
+80 to 110% CPU for most of the run. The same five tests failed the same way:
+`saved_game` fired all 63 anchors and then had no exit in 900 s, after the
+game asked for the creature scrolls (the pause-bar clicks picked the creature
+again), and the run logged one Metal command buffer failure ("Impacting
+Interactivity"), the system's sign of a GPU shared with other work. The
+binary was unchanged (sha1 34591cf7). The load average and the top CPU
+processes do not show a busy GPU, so a quiet-Mac check for these boots
+should also read the GPU's utilization. Under the user's rule the suite was
+not run a third time.
+
 Open risk for the merge: the default suite has not been shown green on this
 branch since Task 4's fourth run. `test_land_move_tutorial` should be run
 alone once on a quiet Mac (1-minute load below 25% of `hw.ncpu`, no process
-above 50% CPU). If it fails there too, the pan-right step needs more time:
+above 50% CPU, and the GPU not held by other work), and so should the
+`saved_game` group. If the tutorial fails there too, the pan-right step needs more time:
 more wall time per drag block, or a longer wait than 14 s before the first
 pan-right drag (Task 4's note).
 
