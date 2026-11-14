@@ -721,6 +721,31 @@ CHOSEN_QUIT_ANCHOR = 1 + anchors_in(_load_lines + _choice + _offer + _csave)
 CHOSEN_WAIT = 30
 
 
+def drag_blocks(button, start, delta, seconds, steps=20):
+    """Script lines for a drag of the game's own cursor (LAND) and its place after it. The lines first put the
+    cursor in the top left corner and then at `start` (as step_blocks does; the first line is an event of the
+    caller's block), press `button` 4 reads later, then spread the move of `delta` land pixels over `steps`
+    blocks of `seconds / steps` wall seconds, so a drag lasts the same at any frame rate; the DirectInput deltas
+    add up to delta / LAND exactly. The up comes with the last move. The place is start + delta, kept in the
+    client rect."""
+    sx, sy = (math.ceil(v / LAND) for v in start)
+    out = ["0 move -4000 -4000", "after seconds 0.5", f"0 move {sx} {sy}", f"4 down {button}"]
+    done = (0, 0)
+    for k in range(1, steps + 1):
+        at = tuple(math.floor(d / LAND * k / steps + 0.5) for d in delta)
+        out += [f"after seconds {seconds / steps:g}", f"0 move {at[0] - done[0]} {at[1] - done[1]}"]
+        done = at
+    out.append(f"0 up {button}")
+    end = tuple(min(max(math.floor(s + d * LAND + 0.5), 0), c - 1) for s, d, c in zip(start, done, CLIENT))
+    return out, end
+
+
+def wheel_blocks(notches, seconds):
+    """`abs(notches)` wheel notches (120 each, negative turns the other way) spread over `seconds` wall seconds."""
+    step = 120 if notches > 0 else -120
+    return [f"after seconds {seconds / abs(notches):g}", f"0 wheel {step}"] * abs(notches)
+
+
 def copy_support(saved, tmp_path):
     support = tmp_path / "support"
     shutil.copytree(saved, support)
@@ -816,6 +841,111 @@ def test_boot_chosen_game_loads(chosen_game, tmp_path):
     assert not loud_lines(lines), loud_lines(lines)
     assert "owned by a later plan" not in r.stderr, tail
     assert not game_files_made(support), game_files_made(support)
+
+
+def test_drag_blocks_lines():
+    # a drag: the corner, the move to the start, the down 4 reads later, then one move per wall-time block whose
+    # DirectInput deltas add up to delta / LAND exactly, and the up with the last move
+    lines, end = drag_blocks(1, (300, 600), (200, -10), 2, steps=4)
+    assert lines == ["0 move -4000 -4000", "after seconds 0.5", "0 move 400 800", "4 down 1",
+                     "after seconds 0.5", "0 move 67 -3", "after seconds 0.5", "0 move 66 -4",
+                     "after seconds 0.5", "0 move 67 -3", "after seconds 0.5", "0 move 67 -3", "0 up 1"]
+    assert end == (500, 590)
+    # the end stays in the client rect
+    assert drag_blocks(0, (900, 20), (400, -100), 1, steps=1)[1] == (CLIENT[0] - 1, 0)
+    # every step's moves add up to the total for any step count
+    for steps in (1, 3, 7, 20, 41):
+        lines, _ = drag_blocks(0, (500, 400), (-333, 101), 3, steps=steps)
+        moves = [tuple(map(int, ln.split()[2:])) for ln in lines[4:] if " move " in ln]
+        assert len(moves) == steps
+        assert (sum(m[0] for m in moves), sum(m[1] for m in moves)) == (-444, 135)
+
+
+def test_wheel_blocks_lines():
+    assert wheel_blocks(3, 1.5) == ["after seconds 0.5", "0 wheel 120"] * 3
+    assert wheel_blocks(-2, 1) == ["after seconds 0.5", "0 wheel -120"] * 2
+
+
+# Plan 12 Task 3: the first land's tutorial on moving and looking around, measured on the port
+# (docs/research/land1.md). TUTORIAL_FIRST s after the load's last lookup a click on the silver scroll starts it.
+# It has four parts, each opened by a hand demo whose file the game asks for as the demo starts (HAND_DEMOS);
+# the game reads no input while a demo plays and shows the part's instruction when it ends, so a part's first
+# step starts HAND_DEMO_WAIT s after the first read that follows the lookup. The parts: pan left and then right,
+# forward and then back (each a drag with the Movement button, MOVEMENT, twice); turn the view (a hold of the
+# middle button on the highlighted spot, moved left); pitch it up and then down (the same hold moved down, then
+# up); then zoom out and in with the wheel. A part's second step waits on wall time from the first step's last
+# drag (the advisors talk in between), and the tutorial's end asks for TUTORIAL_END as the next scene starts.
+# The Movement drags follow the cursor, which stops at the screen's edge, so a pan is two screen-wide drags; the
+# middle-button holds and the wheel do not move the cursor. Places are 1024x768 client pixels of the game's own
+# cursor (LAND); every drag spreads its moves over wall time (drag_blocks).
+SILVER_SCROLL = (830, 540)
+TUTORIAL_FIRST = 8
+HAND_DEMO_WAIT = 8
+TUTORIAL_END = "M_SCROLL_GOLD.bwm"
+HAND_DEMOS = ("PanLandscapeLeftRight.hnd", "PanLandscapeForwardBack.hnd", "RotateCamera.hnd", "PitchCamera.hnd")
+TUTORIAL_TAIL = 10
+MOVEMENT, MIDDLE = 1, 2
+_tut_click, _ = step_blocks((0, 0), [(TUTORIAL_FIRST, LAND, SILVER_SCROLL)])
+
+
+def _twice(drag):
+    return drag + ["after seconds 1"] + drag
+
+
+MOVE_TUTORIAL_STEPS = (
+    _tut_click
+    + ["after file PanLandscapeLeftRight.hnd", f"after seconds {HAND_DEMO_WAIT}"]
+    + _twice(drag_blocks(MOVEMENT, (20, 500), (1000, 0), 3, steps=15)[0])
+    + ["after seconds 14"] + _twice(drag_blocks(MOVEMENT, (1000, 500), (-980, 0), 3, steps=15)[0])
+    + ["after file PanLandscapeForwardBack.hnd", f"after seconds {HAND_DEMO_WAIT}"]
+    + _twice(drag_blocks(MOVEMENT, (500, 20), (0, 740), 3, steps=15)[0])
+    + ["after seconds 14"] + _twice(drag_blocks(MOVEMENT, (500, 750), (0, -730), 3, steps=15)[0])
+    + ["after file RotateCamera.hnd", f"after seconds {HAND_DEMO_WAIT}"]
+    + drag_blocks(MIDDLE, (510, 398), (-3600, 0), 10, steps=50)[0]
+    + ["after file PitchCamera.hnd", f"after seconds {HAND_DEMO_WAIT}"]
+    + drag_blocks(MIDDLE, (484, 337), (0, 2000), 8, steps=40)[0]
+    + ["after seconds 12"] + drag_blocks(MIDDLE, (480, 330), (0, -2000), 8, steps=40)[0]
+    + ["after seconds 20"] + wheel_blocks(-10, 5)
+    + ["after seconds 10"] + wheel_blocks(20, 6)
+    + [f"after file {TUTORIAL_END}"])
+
+
+@pytest.mark.gamefiles
+def test_land_move_tutorial(chosen_game, tmp_path):
+    # Plan 12 Task 3: from the loaded offer, a click on the silver scroll starts the tutorial on moving and
+    # looking around; the script takes each of its steps, and its end makes the game ask for TUTORIAL_END.
+    _, _, saved, new_save = chosen_game
+    assert new_save is not None, folder_names(saved_games(saved))
+    support = copy_support(saved, tmp_path)
+    load, _ = chosen_load_lines()
+    script = "\n".join(load + MOVE_TUTORIAL_STEPS + [f"after seconds {TUTORIAL_TAIL}", "0 quit"]) + "\n"
+    r, lines, _ = run_boot(tmp_path, script, 900, support=support, HLE_FILETRACE="1", BW2_FRAME_LOG="1",
+                           BW2_BINK_LOG="1")
+    tail = r.stderr[-4000:]
+    assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
+    quits = [i for i, ln in enumerate(lines) if re.fullmatch(r"\[bw2\] script: quit at read \d+", ln)]
+    assert len(quits) == 1, tail
+    anchor_at = [i for i, ln in enumerate(lines) if SCRIPT_ANCHOR.match(ln)]
+    anchors = [SCRIPT_ANCHOR.match(lines[i]).group(1) for i in anchor_at]
+    expected = [ln for ln in load + MOVE_TUTORIAL_STEPS if ln.startswith("after ")]
+    assert anchors == expected + [f"after seconds {TUTORIAL_TAIL}"], (anchors, tail)
+    assert expected[-1] == f"after file {TUTORIAL_END}", expected[-1]
+    # the end's lookup comes from the tutorial's end: no step before the last one made the game ask for it
+    last_step = anchor_at[len(expected) - 2]
+    early = [ln for ln in lines[:last_step] if asks_for(ln, TUTORIAL_END)]
+    assert not early, early
+    # the hand demos open in the tutorial's order, each once, after the scroll's click
+    click = anchor_at[anchors_in(load)]
+    demos = [i for i, ln in enumerate(lines) if any(asks_for(ln, d) for d in HAND_DEMOS)]
+    asked = [d for i in demos for d in HAND_DEMOS if asks_for(lines[i], d)]
+    assert asked == list(HAND_DEMOS), asked
+    assert all(click < i < anchor_at[-2] for i in demos), (click, demos)
+    assert not [ln for ln in lines if ln.startswith(BINK_OPEN)], tail
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr, tail
+    assert not game_files_made(support), game_files_made(support)
+    modules = {ln for ln in lines if ln.startswith("[module] ")}
+    assert modules <= MODULE_LINES_BEFORE, sorted(modules - MODULE_LINES_BEFORE)
 
 
 @pytest.mark.gamefiles
