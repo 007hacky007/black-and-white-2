@@ -190,3 +190,42 @@ def test_engine_ffmpeg_links(record_property):
         assert Path(name).exists(), (f"{name} (linked into out/bw2) is missing: a brew upgrade ffmpeg "
                                      "needs a rebuild of out/bw2 (python -m bw2.pipeline --build-only)")
         record_property(Path(name).name, f"compatibility {compat}, current {current}")
+
+
+# ---- plan 13 Task 3: the LGPL-only FFmpeg and the app's rpath ----
+
+def test_engine_libs_rpath_only_for_rpath_names(fake_ffmpeg_prefix, monkeypatch):
+    from bw2.build import engine_libs
+    rpath = "-Wl,-rpath,@executable_path/../Frameworks"
+    fake = fake_ffmpeg_prefix()
+    for h in ("libavformat/avformat.h", "libavcodec/avcodec.h", "libavutil/avutil.h"):
+        (fake / "include" / h).parent.mkdir(parents=True, exist_ok=True)
+        (fake / "include" / h).write_text("")
+    monkeypatch.setenv("BW2_FFMPEG_PREFIX", str(fake))
+    libs = engine_libs()
+    assert [a for a in libs if a.startswith("-Wl,-rpath")] == [rpath], libs
+    absolute = fake_ffmpeg_prefix(install_name=lambda n: f"/opt/homebrew/lib/{n}")
+    for h in ("libavformat/avformat.h", "libavcodec/avcodec.h", "libavutil/avutil.h"):
+        (absolute / "include" / h).parent.mkdir(parents=True, exist_ok=True)
+        (absolute / "include" / h).write_text("")
+    monkeypatch.setenv("BW2_FFMPEG_PREFIX", str(absolute))
+    assert not [a for a in engine_libs() if a.startswith("-Wl,-rpath")]
+    monkeypatch.delenv("BW2_FFMPEG_PREFIX")
+    assert not [a for a in engine_libs() if a.startswith("-Wl,-rpath")]   # Homebrew's default
+
+
+@pytest.mark.gamefiles
+def test_engine_rpath_for_lgpl(lgpl_engine):
+    otool = check_tools().parent / "otool"
+    r = subprocess.run([str(otool), "-L", str(lgpl_engine)], capture_output=True, text=True, check=True)
+    names = [l.strip().split(" ")[0] for l in r.stdout.splitlines()[1:] if l.strip()]
+    ours = [n for n in names if any(f"/{lib}." in n for lib in FFMPEG_LIBS)]
+    assert sorted(ours) == ["@rpath/libavcodec.63.dylib", "@rpath/libavformat.63.dylib",
+                            "@rpath/libavutil.61.dylib"], names
+    assert not [n for n in names if any(f"/{lib}." in n for lib in FFMPEG_NOT)], names
+    assert not [n for n in names if n.startswith("/opt/homebrew")], names
+    load = subprocess.run([str(otool), "-l", str(lgpl_engine)], capture_output=True, text=True,
+                          check=True).stdout
+    rpaths = re.findall(r"cmd LC_RPATH\n\s+cmdsize \d+\n\s+path (\S+) \(offset", load)
+    assert rpaths == ["@executable_path/../Frameworks"], rpaths
+    assert (lgpl_engine.parent / "d3dx9_25.dll").is_file()

@@ -192,3 +192,29 @@ def test_binkw32_quit_malformed(selftest, tmp_path, value):
     assert r.returncode == -6, f"exit {r.returncode}\n{r.stderr[-3000:]}"
     line = next((ln for ln in r.stderr.splitlines() if "[bw2] FATAL: bink: " in ln), "")
     assert f"BW2_QUIT_AFTER_MOVIE='{value}'" in line, r.stderr[-3000:]
+
+
+# ---- plan 13 Task 3: the same decoder on the LGPL-only FFmpeg the app ships ----
+
+@pytest.mark.gamefiles
+def test_bink_archive_lgpl(tmp_path, monkeypatch):
+    from bw2.ffmpeg import build_ffmpeg
+    prefix = build_ffmpeg()
+    monkeypatch.setenv("BW2_FFMPEG_PREFIX", str(prefix))
+    monkeypatch.delenv("DYLD_LIBRARY_PATH", raising=False)
+    exe = tmp_path / "video_selftest_lgpl"
+    srcs = [s for s in engine_sources() if s.name != "main.c"] + [BW2RT / "video" / "video_selftest.c"]
+    # The absolute rpath is this test's alone: engine_libs() never adds one (a shipped engine must
+    # find FFmpeg only in its own Frameworks folder).
+    libs = engine_libs()
+    assert [a for a in libs if a.startswith("-Wl,-rpath")] == ["-Wl,-rpath,@executable_path/../Frameworks"]
+    r = subprocess.run([str(check_tools()), "-O1", "-g", *FLAGS, "-fobjc-arc", "-isysroot", str(sdk_path()),
+                        "-I", str(RECOMP32), "-I", str(WIN32HLE), *bw2_includes(), *ffmpeg_cflags(),
+                        *map(str, srcs), *libs, f"-Wl,-rpath,{prefix}/lib", "-o", str(exe)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-4000:]
+    otool = check_tools().parent / "otool"
+    linked = subprocess.run([str(otool), "-L", str(exe)], capture_output=True, text=True, check=True).stdout
+    assert "@rpath/libavcodec.63.dylib" in linked and "/opt/homebrew" not in linked, linked
+    r = check(exe, "bink_archive", tmp_path, STUFF, hex(ATTRACT[0]), *ATTRACT[1:], timeout=300)
+    assert f"bink_archive: {ATTRACT[4]} frames in " in r.stdout, r.stdout[-2000:]

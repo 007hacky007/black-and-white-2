@@ -68,11 +68,30 @@ def ffmpeg_cflags() -> list[str]:
     return ["-isystem", str(ffmpeg_prefix() / "include")]
 
 
+# Where a packaged app keeps FFmpeg built with @rpath install names (bw2.ffmpeg); never a
+# workspace path, so nothing outside the bundle can be found through it.
+APP_RPATH = "@executable_path/../Frameworks"
+
+
+def install_name(lib: Path) -> str | None:
+    """A dynamic library's install name (otool -D), or None when lib is not one."""
+    otool = check_tools().parent / "otool"
+    r = subprocess.run([str(otool), "-D", str(lib)], capture_output=True, text=True)
+    lines = r.stdout.splitlines()
+    if r.returncode != 0 or len(lines) < 2 or "not an object file" in r.stdout + r.stderr:
+        return None
+    return lines[1].strip()
+
+
 def engine_libs() -> list[str]:
     libs = ["-lpthread", "-lm"]
     for f in FRAMEWORKS:
         libs += ["-framework", f]
-    return libs + [f"-L{ffmpeg_prefix()}/lib", *(f"-l{n}" for n in FFMPEG_LIBS)]
+    prefix = ffmpeg_prefix()
+    libs += [f"-L{prefix}/lib", *(f"-l{n}" for n in FFMPEG_LIBS)]
+    if (install_name(prefix / "lib" / "libavcodec.dylib") or "").startswith("@rpath/"):
+        libs.append(f"-Wl,-rpath,{APP_RPATH}")
+    return libs
 
 
 HOSTS = {"linkcheck": lambda: [BW2RT / "linkcheck.c"], "engine": engine_sources}
