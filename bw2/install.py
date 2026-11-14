@@ -2,13 +2,13 @@
 
 The discs carry one InstallShield 9 set split over five cabinets
 (data1.hdr + data1..5.cab). unshield (MIT) extracts it with every file's MD5
-checked; pcrecomp's isextract.py fails on files that span two cabinets.
+checked (built from vendored source, bw2/tools.py); pcrecomp's isextract.py fails on files that span two cabinets.
 """
 import shutil
 import subprocess
 from pathlib import Path
 
-from . import disc
+from . import disc, tools
 from .diskspace import ensure_free
 from .paths import GAMEFILES, REPO
 from .releases import sha256_file
@@ -116,7 +116,7 @@ def extract_install(discs: dict[int, Path], out: Path | None = None) -> Path:
     part = out.with_name(out.name + ".part")
     shutil.rmtree(part, ignore_errors=True)
     raw = part / "_groups"
-    r = subprocess.run(["unshield", "-d", str(is_dir), "-D", "2", "x", "-d", str(raw),
+    r = subprocess.run([str(tools.unshield()), "-d", str(is_dir), "-D", "2", "x", "-d", str(raw),
                         str(is_dir / "data1.hdr")], capture_output=True, text=True)
     bad = [l for l in (r.stdout + r.stderr).splitlines()
            if not l.lstrip().startswith("extracting:")

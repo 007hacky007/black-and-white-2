@@ -72,3 +72,53 @@ def test_extract_install_checks_space_before_writing(tmp_path, monkeypatch):
         extract_install({1: iso}, g / "install")
     assert "need" in str(ei.value)
     assert not g.exists() or not any(p.is_file() for p in g.rglob("*"))
+
+
+FIXED_PATH = "/usr/bin:/bin"
+
+
+@pytest.mark.gamefiles
+def test_install_cabs_fixed_path(monkeypatch):
+    # The built unshield's test mode checks every file's MD5 (the CommonCrypto shim)
+    # over the whole install set without writing anything.
+    import subprocess
+    from bw2 import tools
+    from bw2.disc import unpacked_bin
+    monkeypatch.setenv("PATH", FIXED_PATH)
+    exe = tools.unshield()
+    discs = {n: unpacked_bin(paths.discs_dir() / f"Black & White 2 (USA) (Disc {n}).zip")
+             for n in range(1, 5)}
+    is_dir = install.gather(discs, paths.GAMEFILES / "is")
+    r = subprocess.run([str(exe), "-d", str(is_dir), "t", str(is_dir / "data1.hdr")],
+                       capture_output=True, text=True, env={"PATH": FIXED_PATH})
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out[-2000:]
+    tested = [l for l in out.splitlines() if l.lstrip().startswith("testing:")]
+    assert len(tested) >= len(read_manifest(MANIFEST)), out[-2000:]   # every installed file and more
+    bad = [l for l in out.splitlines() if not l.lstrip().startswith("testing:")
+           and ("fail" in l.lower() or "error" in l.lower())]
+    assert bad == []
+
+
+def test_extract_install_runs_built_unshield(tmp_path, monkeypatch):
+    import subprocess
+    from bw2 import tools
+    built = tmp_path / "tools" / "unshield"
+    monkeypatch.setattr(tools, "unshield", lambda out_dir=None: built)
+    monkeypatch.setattr(install, "GAMEFILES", tmp_path / "g")
+    monkeypatch.setattr(install, "ensure_free", lambda root, need: None)
+    monkeypatch.setattr(install, "needed_bytes", lambda d, o, i: 0)
+    monkeypatch.setattr(install, "gather", lambda d, dest: dest)
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        raw = argv[argv.index("x") + 2]
+        from pathlib import Path
+        (Path(raw) / "White").mkdir(parents=True)
+        (Path(raw) / "White" / "white.exe").write_bytes(b"x")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(install.subprocess, "run", fake_run)
+    out = extract_install({}, tmp_path / "install")
+    assert calls and calls[0][0] == str(built)
+    assert (out / "white.exe").is_file()

@@ -53,3 +53,33 @@ def test_patch_inputs_reextracts_without_completion_marker(tmp_path, monkeypatch
     assert calls == ["patch-1.1"]                       # no marker: extracted again
     pm.patch_inputs(tmp_path / "p.exe", "patch-1.1", out)
     assert calls == ["patch-1.1"]                       # marker written: reused
+
+
+@pytest.mark.gamefiles
+def test_patch_groups_fixed_path(monkeypatch, tmp_path):
+    from bw2 import tools
+    from bw2.patches import extract_patch_groups
+    tools.unshield()                       # built before PATH loses everything but the system
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    groups = extract_patch_groups(paths.GAMEFILES / "patches" / "BW2Patch1_2.exe", "patch-1.2",
+                                  tmp_path / "p12")
+    dll = groups / "ScriptDLL" / "ScriptLibraryR.dll"
+    assert identify(dll, kind="script-dll") is not None
+
+
+def test_patch_groups_run_built_unshield(monkeypatch, tmp_path):
+    import subprocess
+    import bw2.patches as pm
+    from bw2 import tools
+    built = tmp_path / "tools" / "unshield"
+    monkeypatch.setattr(tools, "unshield", lambda out_dir=None: built)
+    monkeypatch.setattr(pm, "_check", lambda p, k: None)
+    monkeypatch.setattr(pm, "split_overlay", lambda exe, setup: None)
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(pm.subprocess, "run", fake_run)
+    pm.extract_patch_groups(tmp_path / "p.exe", "patch-1.2", tmp_path / "out")
+    assert calls and calls[0][0] == str(built)

@@ -1,0 +1,24 @@
+# unshield 1.6.2 (MIT, LICENSE), vendored unchanged from the release tag archive.
+# url: https://github.com/twogood/unshield/archive/refs/tags/1.6.2.tar.gz
+# size: 42833
+# sha256: a937ef596ad94d16e7ed2c8553ad7be305798dcdcfd65ae60210b1e54ab51a2f
+# Kept: LICENSE, README.md, ChangeLog, lib/*.c, lib/*.h, src/unshield.c (paths below are
+# relative to third_party/unshield and to the archive's unshield-1.6.2/ folder). Left out:
+# lib/md5/, the CMake files, win32_msvc/, the scripts. Our build files: tools/unshield/.
+b1a42785fea2135378e675490ab0cd0f432c484b6421be80a2f335d63a2bdb9c  ChangeLog
+3aaecd6f4440a1456c7d6fee4fe82a4d47af55646ae3daa1c806c717a9385bba  LICENSE
+3bd818684da61efe53de0f64006e91c146983b26a5177fba6754d67747453ce1  README.md
+0d91b0da1329177af3ae1c8f39b8c70fbad29f0fe1a2b3b5ffdac4a69e6e24b3  lib/cabfile.h
+af32acce5365591c42ba1485edbb2dad1e086c4fcf628a6df0f5a85a35326d1a  lib/component.c
+5d10f0a0e4f0a51274c9957cbfd0eab5d00da9259576fef035bd89d85ec09e4a  lib/converter.c
+2ea4a6074d3da4587e6be02c9a68524aa975554e53aab8145fb4f08c5e472cb9  lib/converter.h
+e9f194f75d98013e2909707376ac125ec74bf740559d80d4f9c3844bb91d122d  lib/directory.c
+b95859dc09f43864b2028e9fc0580e1f910a9906057c9a4bef9cea8a6f9eb0e1  lib/file.c
+29718576640b75b890aa40a3fbcc9cdebac6e2cad0e314522dff48a81364dd77  lib/file_group.c
+412a6072f7a1f9427fba9a4c5d54ccacebfac3058e945aa4adc8b6f7af8e57e5  lib/helper.c
+1505db3334130a309cadfc25177f330d15b2b9fc9e4c2086e9a53ff625c7f5a3  lib/internal.h
+6d5d7a54388debb17c09f79d3cbe30b9b2873922fd55cec587133f697ecb5899  lib/libunshield.c
+69376260c3c5dd8c4a6973f3a531317bde572c1cd1dca2745353cdff808013d5  lib/libunshield.h
+a1e9f58b3efee93cb2e3afbbf7eb853f23107c2cae11a2ce69f0d6fc2e76616b  lib/log.c
+9a51cceef48f0680aa0ca1f293cf65015dda447d699bb956210e43a03be14673  lib/log.h
+4e295648b8105ee5bca3750d6401ca16fcaec494936245547740d264c34c57bc  src/unshield.c

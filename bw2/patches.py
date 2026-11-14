@@ -4,6 +4,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import tools
 from .download import FingerprintMismatch
 from .is11 import split_overlay
 from .releases import identify, load_releases
@@ -23,7 +24,7 @@ def extract_patch_groups(patch_exe: Path, kind: str, out: Path) -> Path:
     shutil.rmtree(out, ignore_errors=True)
     split_overlay(patch_exe, setup)
     disk = setup / "Disk1"
-    r = subprocess.run(["unshield", "-d", str(disk), "x", "-d", str(groups),
+    r = subprocess.run([str(tools.unshield()), "-d", str(disk), "x", "-d", str(groups),
                         str(disk / "data1.hdr")], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"unshield failed on {Path(patch_exe).name}: {r.stderr[-1000:]}")
