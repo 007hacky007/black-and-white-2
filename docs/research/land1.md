@@ -273,13 +273,27 @@ choice and the chosen load passed and `test_land_move_tutorial` timed out.
 Run alone once more at a load of 4 to 6.5, with a dotnet build at 100 to 200%
 CPU and a browser and WindowServer each above 50% (19 min 34 s), it timed out
 again. Both times it was at the same step as in Task 4: the pan-right drags
-were not taken (one drag's 15 blocks spanned 33 to 37 reads, against about
-150 for the pan-left drag in the same run), so the
-`PanLandscapeForwardBack.hnd` anchor never fired. The engine binary was the one
+were not taken, so the `PanLandscapeForwardBack.hnd` anchor never fired.
+Counted from a drag's first line (the cursor's placing, 4 reads before the
+press) to its 15th move block, the first pan-right drag spanned 31 and 27
+reads in the two runs and the second 43 and 95, against 67 and 73 (rerun) and
+118 and 100 (the run alone) for the two pan-left drags, which were taken. So
+in the run alone the second pan-right drag got about as many reads as a
+pan-left drag and the step was still not taken, and in the rerun pan-left was
+taken with fewer reads than that. Load alone does not explain it: the first
+pan-right drag, which starts 14 s after the last pan-left block with no file
+anchor, got the fewest reads in both runs, so this step looks marginal. The engine binary was the one
 that passed in Tasks 3 and 4 (sha1 34591cf7), and Task 6 changed only
 documents and a docstring. Under the user's rule (2026-11-14), the test and the
 engine were not changed and the suite was not run again. Whether this drag
 needs more wall time per step can only be decided on a quiet Mac.
+
+Open risk for the merge: the default suite has not been shown green on this
+branch since Task 4's fourth run. `test_land_move_tutorial` should be run
+alone once on a quiet Mac (1-minute load below 25% of `hw.ncpu`, no process
+above 50% CPU). If it fails there too, the pan-right step needs more time:
+more wall time per drag block, or a longer wait than 14 s before the first
+pan-right drag (Task 4's note).
 
 Frame rates: not measured in Task 6, because the Mac was under load (load 3.5
 to 218 during the suite; a GPU hashcat job, dotnet builds and a browser ran
