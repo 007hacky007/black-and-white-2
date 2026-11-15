@@ -237,6 +237,36 @@ def test_build_refuses_without_space(tmp_path, monkeypatch, capsys, cli_env):
     assert not (tmp_path / "ws").exists()
 
 
+def test_build_again_removes_an_earlier_builds_files_first(tmp_path, monkeypatch, capsys, cli_env):
+    """A cancelled or failed build leaves gigabytes in the workspace; the next build removes them (as clean does,
+    out/tools kept) before its space check, so they never count against it. A development tree is not touched."""
+    from bw2.diskspace import NotEnoughSpace
+    fs = FakeSet(tmp_path / "in")
+    inputs = Inputs(discs={1: fs.zip1, 2: fs.cue2, 3: fs.bin3, 4: fs.iso4}, patch11=fs.p11, patch12=fs.p12, fan=fs.fan)
+    monkeypatch.setattr(builder_cli, "classify", lambda paths: inputs)
+    monkeypatch.setattr(builder_cli, "STEP_FUNCS", {})
+    seen = []
+
+    def check(root, need=None):
+        seen.append(sorted(str(p.relative_to(root)) for p in Path(root).rglob("*") if p.is_file()))
+        raise NotEnoughSpace("stop here")
+
+    monkeypatch.setattr(builder_cli, "check_space", check)
+    left = ["gamefiles/install/data.bin", "gamefiles/discs/d1/d1.bin", "gen/white.c", "out/bw2",
+            "out/Black & White 2.app.part/Contents/x", "out/tools/unshield/unshield"]
+    for root, sources in ((tmp_path / "ws", True), (tmp_path / "dev", False)):
+        for rel in left:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(b"left")
+        if sources:
+            (root / "SOURCES.txt").write_text("bw2\n")
+        monkeypatch.setattr(builder_cli, "ROOT", root)
+        assert builder_cli.main(["build", "--input", "x", "--builder-version", "0.1.0", "--app-version", "9"]) == 1
+        assert _events(capsys.readouterr().out) == [{"error": "stop here"}]
+    assert seen[0] == ["SOURCES.txt", "out/tools/unshield/unshield"]
+    assert seen[1] == sorted(left)
+
+
 # ---- linking and cleaning ------------------------------------------------------------------------------------------
 
 def test_link_inputs(tmp_path):

@@ -138,7 +138,7 @@ final class BuilderModel: ObservableObject {
 
     private func refreshPlaces() {
         states[.destination] = destinationCheck(destination)
-        states[.diskSpace] = diskSpaceState(paths: paths)
+        states[.diskSpace] = diskSpaceState(paths: paths, version: version)
         objectWillChange.send()
     }
 

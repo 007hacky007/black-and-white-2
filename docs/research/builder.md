@@ -125,6 +125,12 @@ to 85 at the end):
   first the `du` peak plus 20%, 20,100,000,000; the final review found that
   `du` counts the APFS clones, install to game and game to app, in full, and
   the workspace is always on the APFS home volume.)
+- A cancelled or failed build leaves its files in the workspace (discs
+  unpacked 2.9 GB, `is/` 2.4 GB, install 3.1 GB, then the game, `gen/` and
+  more). `build` removes them first, as `clean` does (`out/tools/` kept), and
+  the free-space row counts them as free (`reclaimableBuildBytes`: regular
+  files with one link, by allocated size, without the clones `gamefiles/game`
+  and an app in `out/`), so one Cancel cannot block the next build.
 
 ## The disc fingerprints
 

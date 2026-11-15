@@ -439,8 +439,13 @@ def cmd_build(a) -> int:
         return _fail(str(e))
     try:
         app_version = a.app_version or app.version()
+        if (ROOT / SOURCES).is_file():
+            # A cancelled or failed build's files are not reused: removing them first means they never count
+            # against the space check, which then measures what REQUIRED_BYTES was measured for (Builder row 4).
+            print("[builder] removing an earlier build's files (gamefiles, gen, out but out/tools)", flush=True)
+            clean(ROOT)
         check_space(ROOT)
-    except (app.PackageError, NotEnoughSpace, OSError, ValueError) as e:
+    except (app.PackageError, NotEnoughSpace, CleanError, OSError, ValueError) as e:
         return _fail(str(e))
     os.environ["BW2_FFMPEG_PREFIX"] = str(ffmpeg.LGPL_PREFIX)
     ctx = Context(root=ROOT, inputs=inputs, app_version=app_version, builder_version=a.builder_version)

@@ -111,12 +111,14 @@ public struct InputTables {
 /// What a row says when the Builder's bundled sources are missing or damaged.
 public let incompleteBuilderText = "This copy of BW2 Builder is incomplete. Make it again."
 
-/// The free-space row: the workspace's volume against `requiredBuildBytes`.
-public func diskSpaceState(paths: BuilderPaths) -> CheckState {
+/// The free-space row: the workspace's volume against `requiredBuildBytes`, counting what an earlier build left in
+/// this version's workspace as free (`build` removes it first).
+public func diskSpaceState(paths: BuilderPaths, version: String, required: Int64 = requiredBuildBytes) -> CheckState {
     guard let available = availableBytes(at: paths.support) else {
         return .blocked("Could not read the free space on this disk")
     }
-    return diskSpaceCheck(available: available, disk: volumeName(of: paths.support))
+    return diskSpaceCheck(available: available, reclaimable: reclaimableBuildBytes(workspace: paths.workspace(version: version)),
+                          required: required, disk: volumeName(of: paths.support))
 }
 
 /// Every row once, in order, synchronously: what `--print-checks` prints. The window runs the same checks, the
@@ -138,7 +140,7 @@ public func evaluateChecks(paths: BuilderPaths, version: String, sources: URL?, 
         for id in [CheckID.buildTools, .discs] + CheckID.patchRows { states[id] = .blocked(incompleteBuilderText) }
     }
     states[.destination] = destinationCheck(choices.destinationURL)
-    states[.diskSpace] = diskSpaceState(paths: paths)
+    states[.diskSpace] = diskSpaceState(paths: paths, version: version)
     return states
 }
 

@@ -69,13 +69,55 @@ public let requiredBuildBytes: Int64 = 13_100_000_000
 /// it is often local snapshots (plan 13 Task 8: 19.4 GB free by statfs, 220 GB "for important usage").
 public let snapshotNote = ". Time Machine's local snapshots may be holding some of this disk's space."
 
-public func diskSpaceCheck(available: Int64, required: Int64 = requiredBuildBytes, disk: String? = nil) -> CheckState {
+/// `reclaimable` is what an earlier build left in the workspace (reclaimableBuildBytes), which `build` removes
+/// before its own space check, so it counts as free.
+public func diskSpaceCheck(available: Int64, reclaimable: Int64 = 0, required: Int64 = requiredBuildBytes,
+                           disk: String? = nil) -> CheckState {
     let gb = { (b: Int64) in String(format: "%.1f GB", Double(b) / 1_000_000_000) }
-    if available >= required {
-        return .ready("\(gb(available)) free")
+    let earlier = "an earlier build's files"
+    if available + reclaimable >= required {
+        let plus = reclaimable > 0 ? ", and \(gb(reclaimable)) of \(earlier) that the build removes first" : ""
+        return .ready("\(gb(available)) free\(plus)")
     }
     let on = disk.map { " on \($0)" } ?? ""
-    return .blocked("Only \(gb(available)) free\(on), \(gb(required)) needed" + snapshotNote)
+    let with = reclaimable > 0 ? " (\(gb(available + reclaimable)) with \(earlier))" : ""
+    return .blocked("Only \(gb(available)) free\(on)\(with), \(gb(required)) needed" + snapshotNote)
+}
+
+/// The bytes bw2/builder_cli.py clean would give back in a workspace (a folder with SOURCES.txt): gamefiles/, gen/
+/// and out/ but out/tools/, which `build` removes before its space check. Only a regular file whose only link is
+/// this one counts (links are never followed; a hard link's blocks stay with its other name), by allocated size;
+/// gamefiles/game and an app in out/ are left out, since they are APFS clones of gamefiles/install and of the game
+/// and their shared blocks would be counted twice (what they hold alone, the patched files and the engine, is
+/// left uncounted: the row may say too little, never too much).
+public func reclaimableBuildBytes(workspace ws: URL) -> Int64 {
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: ws.appendingPathComponent("SOURCES.txt").path) else { return 0 }
+    let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .linkCountKey, .totalFileAllocatedSizeKey]
+    func size(_ url: URL) -> Int64 {
+        guard let v = try? url.resourceValues(forKeys: Set(keys)), v.isSymbolicLink != true else { return 0 }
+        if v.isRegularFile == true { return v.linkCount == 1 ? Int64(v.totalFileAllocatedSize ?? 0) : 0 }
+        guard let walk = fm.enumerator(at: url, includingPropertiesForKeys: keys, options: [],
+                                       errorHandler: { _, _ in true }) else { return 0 }
+        var total: Int64 = 0
+        for case let f as URL in walk {
+            guard let v = try? f.resourceValues(forKeys: Set(keys)), v.isRegularFile == true, v.isSymbolicLink != true,
+                  v.linkCount == 1 else { continue }
+            total += Int64(v.totalFileAllocatedSize ?? 0)
+        }
+        return total
+    }
+    func children(_ dir: String, except skip: (String) -> Bool) -> [URL] {
+        let url = ws.appendingPathComponent(dir)
+        guard (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink != true else { return [] }
+        return ((try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: keys)) ?? [])
+            .filter { !skip($0.lastPathComponent) }
+    }
+    let clones = { (name: String) in name == "game" || name == "game.part" }
+    let apps = { (name: String) in name == "tools" || name.hasSuffix(".app") || name.hasSuffix(".app.part") }
+    let items = children("gamefiles", except: clones) + children("gen", except: { _ in false })
+        + children("out", except: apps)
+    return items.reduce(0) { $0 + size($1) }
 }
 
 /// The space free on the volume `url` is on (its nearest existing folder), or nil: statfs's blocks available to
