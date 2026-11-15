@@ -189,6 +189,13 @@ def lift_module(name: str, exe: Path, catalog: Path, out_dir: Path,
         if resume:
             add_continuations(dis, iat, f, resume)
         code = lifter.lift_function(f)
+        if name == "white" and va == 0x5FDC10:
+            # Fan 1.42 skips the retained interactive logo along with the EA movie.
+            # Call the game's scene, then keep the movie skip (startup.md).
+            site = "    goto L_005FDC51; /* 0x005FDC39: jmp 0x5fdc51 */"
+            if code.count(site) != 1:
+                raise LiftError("white: unexpected 1.42 logo skip at 0x5FDC39")
+            code = code.replace(site, "    RECOMP_CALL(sub_00526770);\n    RECOMP_FLAGS_IN();\n" + site)
         if runtime_push:
             code = _runtime_pushes(code, runtime_push, pushes_done)
         if resume:

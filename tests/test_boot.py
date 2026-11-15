@@ -1,7 +1,7 @@
 """Where the boot gets to today: the lifted game boots on the patched tree through Direct3D, its DirectInput
 mouse setup, its shaders and effects (plan 5), its sprite and fonts and its loading screen (plan 7) and its
-DirectSound audio (plan 8) to the front end, where it first reads input (docs/research/frontend.md). With no
-input the front end waits, so that run ends at a fixed read count (BW2_QUIT_AFTER_READS). With scripted input
+DirectSound audio (plan 8) through the interactive Lionhead logo to the front end. Scripts wait for the
+front-end music before entering the menus (docs/research/startup.md). With scripted input
 (plan 6, BW2_INPUT_SCRIPT) the game takes a new profile in its first dialog, compiles its first HLSL effect
 (its tone-mapping filter) through Microsoft's own compiler, lifted from disc 1's d3dx9_25.dll (plan 9), and
 draws its front end until its idle timer opens the attract video, which plan 10 plays (Bink through FFmpeg).
@@ -56,18 +56,13 @@ def test_boot_to_front_end(tmp_path):
     # Plan 8: the game makes its sprite and its fonts (the 48 Arial Narrow ones from the face it adds with
     # AddFontMemResourceEx), loads its script plugin, shows its loading screen, starts its audio (one
     # streaming DirectSound buffer, played by the mixer), and reaches its front end, where it reads the
-    # mouse once per frame. BW2_QUIT_AFTER_READS ends the run at the 300th read (docs/research/frontend.md).
+    # mouse once per frame. End 300 reads after the front-end music lookup.
     assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
-    support = tmp_path / "support"
-    env = dict(os.environ, BW2_SUPPORT=str(support), BW2_HEADLESS="1", BW2_FRAME_LOG="1", BW2_FONT_LOG="1",
-               BW2_AUDIO_LOG="1", BW2_QUIT_AFTER_READS=str(READS))
-    r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
-                       timeout=180, env=env)
-    (tmp_path / "stderr.txt").write_text(r.stderr)
+    r, lines, support = run_boot(tmp_path, f"after file {FRONT_FILE}\n{READS} quit\n", 180,
+                                 BW2_FRAME_LOG="1", BW2_FONT_LOG="1", BW2_AUDIO_LOG="1")
     tail = r.stderr[-4000:]
-    lines = engine_lines(r.stderr)
     assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
-    assert f"[bw2] quit after {READS} input reads (BW2_QUIT_AFTER_READS)" in lines, tail
+    assert any(ln.startswith("[bw2] script: quit at read ") for ln in lines), tail
     # the loader's own counts ("bound 412 imports, 0 unresolved", "0 unresolved imports") are not stops
     err = "\n".join(ln for ln in lines if not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln))
     for word in LOUD + ("unresolved", "unimplemented", "uncaught", "trap"):
@@ -90,7 +85,7 @@ def test_boot_to_front_end(tmp_path):
     assert bufs == ["[bw2] audio buffer 1: 2 ch, 44100 Hz, 16 bit, 21504 bytes, flags 0x18000"], bufs
     seconds = [tuple(map(int, m.groups())) for m in map(AUDIO_SECOND.match, lines) if m]
     assert any(s[3] > 0 for s in seconds), seconds
-    # the front end reads the mouse: the first-read marker comes once, at the first read
+    # The logo reads the mouse first; the front-end anchor follows its natural completion.
     assert lines.count(FIRST_READ) == 1, tail
     first_read = lines.index(FIRST_READ)
     # the frames: numbered from 1, at least one per read, and the front end (to the last frame) is mostly
@@ -109,6 +104,25 @@ def test_boot_to_front_end(tmp_path):
 # Plan 12 Task 1: a file the front end asks for after its first read, and only once in the run (the front-end
 # music; picked from an HLE_FILETRACE=1 boot to the 300th read, where it is the only CreateFile after that read).
 FRONT_FILE = "MENUMUSIC.OGG"
+FRONT_ANCHOR = f"after file {FRONT_FILE}"
+
+
+@pytest.mark.gamefiles
+def test_boot_lionhead_logo(tmp_path):
+    # The game's interactive logo must run before the front-end music starts.
+    r, lines, support = run_boot(tmp_path, "1 move 510 382\nafter seconds 2\n0 down 0\n0 move 100 50\n"
+                           "after seconds 1\n0 up 0\n"
+                           f"after file {FRONT_FILE}\n0 quit\n", 180, HLE_FILETRACE="1")
+    assert r.returncode == 0, r.stderr[-4000:]
+    logo = [i for i, ln in enumerate(lines) if asks_for(ln, "logo.png") and ln.endswith(" ok")]
+    assert logo, r.stderr[-4000:]
+    front = [i for i, ln in enumerate(lines) if asks_for(ln, FRONT_FILE)]
+    assert front and logo[0] < lines.index(FIRST_READ) < front[0]
+    anchors = [m.group(1) for m in map(SCRIPT_ANCHOR.match, lines) if m]
+    assert anchors == ["after seconds 2", "after seconds 1", FRONT_ANCHOR], anchors
+    assert not loud_lines(lines), loud_lines(lines)
+    assert "owned by a later plan" not in r.stderr
+    assert not game_files_made(support), game_files_made(support)
 
 
 @pytest.mark.gamefiles
@@ -131,7 +145,7 @@ def test_boot_file_anchor(tmp_path):
 # Plan 6: the front end's first dialog, driven through the host input queue at DirectInput read counts
 # (docs/research/input.md): click the name field, six Backspaces clear the default name, type "ab" (A, B),
 # then move to the confirm button and click it. Coordinates and key codes only.
-PROFILE_SCRIPT = "\n".join(
+PROFILE_SCRIPT = FRONT_ANCHOR + "\n" + "\n".join(
     ["10 move 510 382", "14 down 0", "16 up 0"]
     + [f"{22 + 2 * i + j} key 8 0x0E {'up' if j else 'down'}" for i in range(6) for j in (0, 1)]
     + ["40 key 0x41 0x1E down", "41 key 0x41 0x1E up", "42 key 0x42 0x30 down", "43 key 0x42 0x30 up",
@@ -282,8 +296,9 @@ def test_boot_profile_to_attract(tmp_path):
     first_read = lines.index(FIRST_READ)
     assert first_read < effect < opened < quit_at, (first_read, effect, opened, quit_at)
     assert any(FRAME.match(ln) for ln in lines[effect:opened]), tail
-    # the front end's picture, from the first read to the open, is mostly not black in every frame
-    window = lines[first_read:opened]
+    # The front end's picture, after the logo, is mostly not black in every frame.
+    front_start = next(i for i, ln in enumerate(lines) if ln.startswith(f"[bw2] script: {FRONT_ANCHOR} "))
+    window = lines[front_start:opened]
     front = frames_of(window)
     aborted = aborted_frames(window)
     assert front and len(aborted) * 2 < len(front), (len(aborted), len(front))
@@ -369,7 +384,7 @@ def click_blocks(start, waits_and_places):
 SETTINGS_STEPS = ([(SETTINGS_WAIT, SETTINGS_CLICKS[0])] + [(2, p) for p in SETTINGS_CLICKS[1:]]
                   + [(2, SETTINGS_KEEP), (3, SETTINGS_QUIT[0]), (2, SETTINGS_QUIT[1])])
 SETTINGS_SCRIPT = PROFILE_SCRIPT + "\n".join(click_blocks(PROFILE_POINT, SETTINGS_STEPS)) + "\n"
-RESTART_SCRIPT = "after seconds 10\n0 quit\n"
+RESTART_SCRIPT = FRONT_ANCHOR + "\nafter seconds 10\n0 quit\n"
 
 
 def game_files_made(support):
@@ -386,7 +401,7 @@ def test_boot_settings_persist(tmp_path):
     assert EXIT_LINE in lines, tail
     assert not any("BW2_QUIT_AFTER" in ln or ln.startswith("[bw2] script: quit") for ln in lines), tail
     anchors = [m.group(1) for m in map(SCRIPT_ANCHOR.match, lines) if m]
-    assert anchors == [f"after seconds {w}" for w, _ in SETTINGS_STEPS], (anchors, tail)
+    assert anchors == [FRONT_ANCHOR] + [f"after seconds {w}" for w, _ in SETTINGS_STEPS], (anchors, tail)
     assert not loud_lines(lines), loud_lines(lines)
     assert "owned by a later plan" not in r.stderr, tail
     # the device goes from 1024x768 to 800x600 once and stays there to the quit
@@ -406,14 +421,14 @@ def test_boot_settings_persist(tmp_path):
     tail = r.stderr[-4000:]
     assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
     anchors = [m.group(1) for m in map(SCRIPT_ANCHOR.match, lines) if m]
-    assert anchors == ["after seconds 10"], (anchors, tail)
+    assert anchors == [FRONT_ANCHOR, "after seconds 10"], (anchors, tail)
     quits = [ln for ln in lines if re.fullmatch(r"\[bw2\] script: quit at read \d+", ln)]
     assert len(quits) == 1, tail
     assert not loud_lines(lines), loud_lines(lines)
     assert "owned by a later plan" not in r.stderr, tail
     # the front end starts at 800x600: the first frame after the first read and every one after it
     assert lines.count(FIRST_READ) == 1, tail
-    first_read = lines.index(FIRST_READ)
+    first_read = next(i for i, ln in enumerate(lines) if ln.startswith(f"[bw2] script: {FRONT_ANCHOR} "))
     after = frames_of(lines[first_read:])
     assert after and all((f[1], f[2]) == (800, 600) for f in after), sorted({(f[1], f[2]) for f in after})
     # no profile dialog: a reused folder compiles the one HLSL effect before the first read
@@ -498,8 +513,8 @@ SAVE_SCRIPT = NEW_GAME_SCRIPT + SKIP_TO_CHOICE + "\n".join(_save + _quit) + "\n"
 # the anchors the save script prints, in order, and three of them counted from 1: the save button's first (after
 # the intro's open and the skip's), the name OK's click (the save's last block), and the pause bar quit's first
 SAVE_ANCHORS = [ln for ln in SAVE_SCRIPT.splitlines() if ln.startswith("after ")]
-SAVE_BUTTON_ANCHOR = 2 + anchors_in(_skip)
-NAME_OK_ANCHOR = 1 + anchors_in(_skip) + anchors_in(_save)
+SAVE_BUTTON_ANCHOR = 3 + anchors_in(_skip)
+NAME_OK_ANCHOR = 2 + anchors_in(_skip) + anchors_in(_save)
 PAUSE_QUIT_ANCHOR = NAME_OK_ANCHOR + 1
 
 
@@ -591,6 +606,7 @@ LOAD_OK = (409, 547)
 LOAD_WAIT = 60
 LOAD_STEPS = [(LOAD_FIRST, LOAD_BUTTON), (2, LOAD_ROW), (2, LOAD_OK)]
 _load, _ = step_blocks((0, 0), LOAD_STEPS)
+_load = [FRONT_ANCHOR] + _load
 LOAD_SCRIPT = "\n".join(_load + [f"after seconds {LOAD_WAIT}", "0 quit"]) + "\n"
 LOAD_ANCHORS = [ln for ln in LOAD_SCRIPT.splitlines() if ln.startswith("after ")]
 # the anchor of the dialog's OK, counted from 1
@@ -693,7 +709,7 @@ def chosen_load_lines():
     """Script lines that load chosen_game's save from a boot's start, ending with the anchor on the save's last
     file, and the running point after them."""
     lines, point = step_blocks((0, 0), [(LOAD_FIRST, LOAD_BUTTON), (2, CHOSEN_ROW), (2, LOAD_OK)])
-    return lines + [f"after file {LOAD_ANCHOR}"], point
+    return [FRONT_ANCHOR] + lines + [f"after file {LOAD_ANCHOR}"], point
 
 
 def asks_for(line, name):
@@ -703,6 +719,7 @@ def asks_for(line, name):
 
 
 _load_lines, _load_point = step_blocks((0, 0), LOAD_STEPS)
+_load_lines = [FRONT_ANCHOR] + _load_lines
 _choice, _choice_point = choice_lines(_load_point)
 CHOICE_SCRIPT = "\n".join(_load_lines + _choice + [f"after seconds {CHOICE_TEST_WAIT}", "0 quit"]) + "\n"
 CHOICE_ANCHORS = [ln for ln in CHOICE_SCRIPT.splitlines() if ln.startswith("after ")]
@@ -1051,20 +1068,13 @@ def test_land_one_to_two(chosen_game, tmp_path):
 def test_boot_close_quits(tmp_path):
     # Plan 6: Cmd-Q and the close button push CLOSE, which reaches the game as Windows delivers its close
     # button and Alt+F4 (WM_SYSCOMMAND SC_CLOSE). The game's own quit path takes it and the game exits 0 by
-    # itself, well before the safety stop at read 600 (BW2_QUIT_AFTER_READS).
-    assert ENGINE.exists(), "build it first: python -m bw2.pipeline"
-    support = tmp_path / "support"
-    script = tmp_path / "close.script"
-    script.write_text("20 close\n")
-    env = dict(os.environ, BW2_SUPPORT=str(support), BW2_HEADLESS="1", BW2_INPUT_SCRIPT=str(script),
-               BW2_QUIT_AFTER_READS="600")
-    r = subprocess.run([str(ENGINE), "--game", str(paths.GAMEFILES / "game")], capture_output=True, text=True,
-                       timeout=180, env=env)
-    (tmp_path / "stderr.txt").write_text(r.stderr)
+    # itself, before the scripted safety quit. Wait through the logo first.
+    r, lines, _ = run_boot(tmp_path, FRONT_ANCHOR + "\n20 close\nafter seconds 10\n0 quit\n", 180)
     tail = r.stderr[-4000:]
     lines = engine_lines(r.stderr)
     assert r.returncode == 0, f"exit {r.returncode}\n{tail}"
     assert not any("BW2_QUIT_AFTER_READS" in ln for ln in lines), tail
+    assert not any(ln.startswith("[bw2] script: quit") for ln in lines), tail
     assert lines.count(FIRST_READ) == 1, tail
     err = "\n".join(ln for ln in lines if not (ln.startswith(("[pe] ", "[host] ")) and "0 unresolved" in ln))
     for word in LOUD:

@@ -1,5 +1,67 @@
 # The boot through the loading screen to audio (plan 7)
 
+## Interactive Lionhead logo (2026-11-15)
+
+The earlier measurements below used the fan patch 1.42 executable's startup
+skips. A fresh headless boot with `HLE_FILETRACE=1` reached the front-end music
+without opening `logo.png`. This was independent of saved settings: the
+support folder was empty.
+
+The retained interactive scene starts at `0x526770`. Its constructor
+`0x526CF0` opens `Data/Art/textures/logo.png` and starts the `LOGOMUSIC` and
+`BEADLOOP` audio events. Its loop reads DirectInput through `0x9AFD20`, draws
+through `0x527380`, presents through `0x936850`, and updates audio through
+`0x5F7160`. The scene's simulation and drawing are game code. The nearby
+`0x5211B0` is the end-credits routine: its `bw2logo.bin` lookup is unrelated
+to the startup logo.
+
+The installed executable and the executable extracted from the pinned fan
+installer both have an unconditional jump at `0x5FDC39` to `0x5FDC51` in
+the splash routine `0x5FDC10`. It bypasses the block before the static loading
+image, including the EA movie call at `0x5FDC4C`. Another unconditional jump
+at `0x5FDC64` bypasses the vendor splash images. No direct call or stored
+pointer to `0x526770` remains in this executable. Windows executing these
+same instructions also takes the skips; no registry, command line, profile,
+file mapping, caps or timer answer can change an unconditional jump.
+
+The lift explicitly calls the retained scene at `0x5FDC39`, then follows the
+existing EA-movie skip. This is a compatibility choice to restore the
+interactive logo in the 1.42 startup sequence, not an emulation of a missing
+Windows API. The extra-start catalog names its real entry, which discovery
+missed because nothing references it. The old catalog entry at `0x52678C`
+starts inside an instruction and is not the callable scene entry.
+
+The scene queries held mouse buttons with `GetAsyncKeyState`, whose signed
+16-bit result has its high bit set for a held physical button
+([Microsoft documentation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate)).
+The existing input path supplies that state and the DirectInput deltas.
+
+Headless verification after the change:
+
+- A fresh support folder opens `logo.png` successfully before the first
+  DirectInput read. The frame captures show the falling cubes, logo frame,
+  lettering, light background and reflection. A held left-button drag tilts
+  the frame and moves the cubes through the game's own update routine.
+- The logo regression holds and moves the mouse, releases it, and waits for
+  the front-end music lookup. Both measured runs reached that lookup at read
+  1,794, then exited through the script. No game files were written to the
+  support folder's install overlay. This is startup/transition smoke coverage;
+  interaction was checked separately against captures without mouse input at
+  the same input-read counts, not asserted from the file lookup alone.
+- The update routine queries the left button and navigation keys, not
+  Escape. Its exit condition at `0x529AC3` follows its own completion counter;
+  a mouse click manipulates the scene rather than immediately skipping it.
+- The traced drag made no disc, volume or driver query and triggered no
+  protection tripwire. No protection code or answers were changed.
+
+The profile, New Game, settings, save and load scripts now wait for the
+front-end music lookup before entering menu input. The front-end boot test
+ends 300 reads after that lookup, rather than ending inside the logo at
+absolute read 300. The close test also waits for the front end: the logo
+loop does not dispatch the posted close message before its own completion.
+
+## Earlier measurements (plan 7)
+
 Measured 2026-11-12 on an Apple M1 Pro (macOS 27.0.1), with `out/bw2` relinked by
 `python -m bw2.pipeline --build-only` (114,768,072 bytes), on the patched tree, headless:
 
