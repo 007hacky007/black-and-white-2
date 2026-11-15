@@ -28,6 +28,7 @@ IDA exports. The public repos ship those (gta 7 files, crimsonskies 5). The
 line is between facts about the binary and a copy of it.
 """
 import argparse
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -110,18 +111,53 @@ def human(n):
     return f"{n:.0f}TB"
 
 
+def original_images(repo, tracked):
+    """Only exact, reviewed originals named by the repo's tracked checksum manifest are exempt.
+    Changing an image requires reviewing its source and recording a new checksum, never a directory exemption."""
+    manifest = ".original-art.sha256"
+    if manifest not in tracked:
+        return set()
+    approved = set()
+    try:
+        with open(os.path.join(repo, manifest), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return approved
+    for line in lines:
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split(None, 1)
+        if len(fields) != 2:
+            continue
+        digest, path = fields
+        if path not in tracked or os.path.splitext(path)[1].lower() not in IMAGE:
+            continue
+        full = os.path.join(repo, path)
+        try:
+            if os.path.islink(full):
+                continue
+            with open(full, "rb") as f:
+                actual = hashlib.sha256(f.read()).hexdigest()
+            if actual == digest:
+                approved.add(path)
+        except OSError:
+            continue
+    return approved
+
+
 def audit(repo):
     files = [f for f in git(repo, "ls-files").splitlines() if f]
     if not files:
         return None
     game, lifted, review = [], [], []
+    originals = original_images(repo, files)
     for f in files:
         ext = os.path.splitext(f)[1].lower()
         full = os.path.join(repo, f)
         size = os.path.getsize(full) if os.path.exists(full) else 0
         if ext in GAME_BIN or ext in GAME_ASSET:
             game.append((f, size))
-        elif ext in IMAGE:
+        elif ext in IMAGE and f not in originals:
             (review if f.lower().startswith("docs/") else game).append((f, size))
         elif looks_lifted(repo, f):
             lifted.append((f, size))

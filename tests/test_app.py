@@ -8,6 +8,7 @@ import plistlib
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -260,7 +261,7 @@ def test_install_app_restores_old_on_failed_rename(tmp_path, monkeypatch):
     real_rename = os.rename
 
     def rename(src, dst):
-        if Path(src) == built:
+        if Path(dst) == old and Path(src).name == APP_NAME:
             raise OSError(5, "Input/output error", str(dst))
         return real_rename(src, dst)
     monkeypatch.setattr(app_mod.os, "rename", rename)
@@ -272,7 +273,7 @@ def test_install_app_restores_old_on_failed_rename(tmp_path, monkeypatch):
 
 
 def test_install_app_other_volume(tmp_path, monkeypatch):
-    # beyond the plan: an app built on another volume is copied to <dest>/<APP_NAME>.part, verified, then renamed
+    # An app on another volume is copied with its final bundle name, verified, then renamed.
     old = _small_app(tmp_path, "dest", "0.0.1")
     built = _small_app(tmp_path, "build", "0.2.0")
     monkeypatch.setattr(app_mod, "_same_volume", lambda a, b: False)
@@ -285,7 +286,13 @@ def test_install_app_other_volume(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod.subprocess, "run", run)
     app = install_app(built, old.parent)
     assert app == old
-    assert ["/bin/cp", "-c", "-R", str(built), str(old.parent / (APP_NAME + ".part"))] in calls
+    copies = [c for c in calls if c[:3] == ["/bin/cp", "-c", "-R"]]
+    assert len(copies) == 1 and copies[0][3] == str(built)
+    staged = Path(copies[0][4])
+    assert staged.name == APP_NAME
+    assert staged.parent.parent == old.parent
+    assert staged.parent.name.startswith(".bw2-install-")
+    assert not staged.parent.exists()
     assert os.listdir(old.parent) == [APP_NAME]
     verify_app(app)
     assert plistlib.loads((app / "Contents" / "Info.plist").read_bytes())["CFBundleVersion"] == "0.2.0"
@@ -354,3 +361,146 @@ def test_packaged_app_new_game(lgpl_engine, tmp_path):
     assert not [ln for ln in r.stdout.decode(errors="replace").splitlines() if ln.startswith("[bw2] alert: ")]
     assert "owned by a later plan" not in "\n".join(lines)
     verify_app(app)
+
+
+def test_package_keeps_bundle_name_during_signing(tmp_path, monkeypatch):
+    game, manifest = _game(tmp_path)
+    dest = _dest(tmp_path)
+    real_sign = app_mod.sign_app
+    signed = []
+
+    def sign(bundle):
+        signed.append(bundle)
+        assert bundle.name == APP_NAME
+        assert bundle.parent.name.startswith(".bw2-install-")
+        return real_sign(bundle)
+
+    monkeypatch.setattr(app_mod, "sign_app", sign)
+    package_app(_engine(tmp_path), _dll(tmp_path), None, game, dest, "1", "1", manifest=manifest)
+    assert len(signed) == 1
+    assert list(dest.iterdir()) == [dest / APP_NAME]
+
+
+def test_install_registers_and_refreshes_bundle(tmp_path, monkeypatch):
+    built = _small_app(tmp_path, "build", "1")
+    os.utime(built, (1, 1))
+    calls = []
+    real_run = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if str(cmd[0]).endswith("/lsregister"):
+            calls.append(cmd)
+            assert Path(cmd[-1]).is_dir()
+            return subprocess.CompletedProcess(cmd, 0)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(app_mod.subprocess, "run", run)
+    target = install_app(built, tmp_path / "dest")
+    assert calls == [[app_mod.LSREGISTER, "-f", str(target)]]
+    assert target.stat().st_mtime > time.time() - 10
+    verify_app(target)
+
+
+def test_install_sweeps_leftovers_without_following_symlinks(tmp_path):
+    built = _small_app(tmp_path, "build", "1")
+    dest = _dest(tmp_path)
+    outside = tmp_path / "keep"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    (dest / f".bw2-install-{uuid.uuid4()}").mkdir()
+    (dest / f".bw2-install-{uuid.uuid4()}").symlink_to(outside, target_is_directory=True)
+    target = install_app(built, dest)
+    assert list(dest.iterdir()) == [target]
+    assert (outside / "keep.txt").read_text() == "keep"
+
+
+def test_install_copy_failure_keeps_old_and_source(tmp_path, monkeypatch):
+    old = _small_app(tmp_path, "dest", "1")
+    built = _small_app(tmp_path, "build", "2")
+    monkeypatch.setattr(app_mod, "_same_volume", lambda a, b: False)
+    real_verify = app_mod.verify_app
+
+    def verify(bundle):
+        if bundle.parent.name.startswith(".bw2-install-"):
+            raise PackageError("bad copy")
+        real_verify(bundle)
+
+    monkeypatch.setattr(app_mod, "verify_app", verify)
+    with pytest.raises(PackageError, match="bad copy"):
+        install_app(built, old.parent)
+    assert built.is_dir()
+    assert plistlib.loads((old / "Contents/Info.plist").read_bytes())["CFBundleVersion"] == "1"
+    assert list(old.parent.iterdir()) == [old]
+
+
+def test_package_adds_game_icon_before_signing(tmp_path, monkeypatch):
+    from bw2 import appicon
+    game, manifest = _game(tmp_path)
+    dest = _dest(tmp_path)
+    icon = b"icns" + (8).to_bytes(4, "big")
+
+    def make_icon(exe, target):
+        assert exe == game / "white.exe"
+        target.write_bytes(icon)
+        return True
+
+    monkeypatch.setattr(appicon, "make_game_icon", make_icon)
+    real_sign = app_mod.sign_app
+
+    def sign(bundle):
+        info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+        assert info["CFBundleIconFile"] == "AppIcon.icns"
+        assert (bundle / "Contents/Resources/AppIcon.icns").read_bytes() == icon
+        real_sign(bundle)
+
+    monkeypatch.setattr(app_mod, "sign_app", sign)
+    target = package_app(_engine(tmp_path), _dll(tmp_path), None, game, dest, "1", "1", manifest=manifest)
+    verify_app(target)
+
+
+def test_package_logs_unusable_game_icon(tmp_path, capsys):
+    game, manifest = _game(tmp_path)
+    package_app(_engine(tmp_path), _dll(tmp_path), None, game, _dest(tmp_path), "1", "1", manifest=manifest)
+    assert "no usable icon" in capsys.readouterr().out.lower()
+
+
+def test_install_recovers_known_backup_before_failed_retry(tmp_path, monkeypatch):
+    old = _small_app(tmp_path, "dest", "1")
+    built = _small_app(tmp_path, "build", "2")
+    backup = old.parent / f".trash-{uuid.uuid4()}"
+    old.rename(backup)
+    unrelated = old.parent / ".trash-other-app"
+    unrelated.mkdir()
+    (unrelated / "keep").write_text("kept")
+
+    def verify(bundle):
+        raise PackageError("new build is damaged")
+
+    monkeypatch.setattr(app_mod, "verify_app", verify)
+    with pytest.raises(PackageError, match="new build is damaged"):
+        install_app(built, old.parent)
+    assert old.is_dir()
+    assert plistlib.loads((old / "Contents/Info.plist").read_bytes())["CFBundleVersion"] == "1"
+    assert built.is_dir()
+    assert (unrelated / "keep").read_text() == "kept"
+
+
+def test_install_sweep_keeps_backup_beside_unrelated_target(tmp_path):
+    old = _small_app(tmp_path, "dest", "1")
+    backup = old.parent / f".trash-{uuid.uuid4()}"
+    old.rename(backup)
+    old.mkdir()
+    (old / "unrelated").write_text("kept")
+    app_mod._sweep_installs(old.parent)
+    assert (backup / "Contents/Info.plist").is_file()
+    assert (old / "unrelated").read_text() == "kept"
+
+
+@pytest.mark.parametrize("info", [[], "unrelated plist"])
+def test_install_sweep_ignores_non_dictionary_plists(tmp_path, info):
+    trash = tmp_path / f".trash-{uuid.uuid4()}"
+    (trash / "Contents").mkdir(parents=True)
+    plist = trash / "Contents/Info.plist"
+    plist.write_bytes(plistlib.dumps(info))
+    app_mod._sweep_installs(tmp_path)
+    assert plistlib.loads(plist.read_bytes()) == info

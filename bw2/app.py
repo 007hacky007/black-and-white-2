@@ -11,8 +11,9 @@ The bundle is laid out as the engine expects it when it runs as an app's executa
 Before anything is written, the engine must link nothing but the system (/usr/lib/, /System/) and the FFmpeg
 libraries of the given prefix by @rpath, with no LC_RPATH but @executable_path/../Frameworks: otherwise dyld would
 stop the app before main, before its log exists, and from Finder it would just vanish. The bundle is built under a
-.part name, its quarantine attributes removed, ad-hoc signed and verified (codesign --verify --deep --strict), and
-only then moved into place, so a half-built app never looks finished and an old app is replaced only by a good one.
+hidden staging folder under its final .app name, its quarantine attributes removed, ad-hoc signed and verified
+(codesign --verify --deep --strict), and only then moved into place, so a half-built app never looks finished and
+an old app is replaced only by a good one.
 
     python -m bw2.app --engine E --ffmpeg P --out DIR [--app-version V] [--builder-version B]
 """
@@ -26,7 +27,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import gametree
+from . import appicon, gametree
 from .build import APP_RPATH, BuildError, check_tools
 from .ffmpeg import ffmpeg_dylibs
 from .paths import GAMEFILES, REPO
@@ -38,6 +39,7 @@ DLL = "d3dx9_25.dll"
 SYSTEM_PREFIXES = ("/usr/lib/", "/System/")
 CODESIGN = "/usr/bin/codesign"
 XATTR = "/usr/bin/xattr"
+LSREGISTER = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 
 class PackageError(Exception):
@@ -174,53 +176,124 @@ def _same_volume(a: Path, b: Path) -> bool:
     return os.stat(a).st_dev == os.stat(b).st_dev
 
 
+def _known_app(bundle: Path) -> bool:
+    contents = bundle / "Contents"
+    info = contents / "Info.plist"
+    if bundle.is_symlink() or contents.is_symlink() or info.is_symlink():
+        return False
+    try:
+        value = plistlib.loads(info.read_bytes())
+        return isinstance(value, dict) and value.get("CFBundleIdentifier") == BUNDLE_ID
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return False
+
+
+def _sweep_installs(dest_dir: Path, keeping: Path | None = None) -> None:
+    """Sweep owned staging folders; recover a known game backup before deleting old installs."""
+    target = dest_dir / APP_NAME
+    for item in sorted(dest_dir.iterdir()):
+        if item == keeping:
+            continue
+        prefix = next((p for p in (".bw2-install-", ".trash-") if item.name.startswith(p)), None)
+        if prefix is None:
+            if item.name == APP_NAME + ".part":
+                _remove(item)
+            continue
+        try:
+            uuid.UUID(item.name[len(prefix):])
+        except ValueError:
+            continue
+        try:
+            if prefix == ".trash-":
+                if not _known_app(item):
+                    continue
+                if not os.path.lexists(target):
+                    os.rename(item, target)
+                    continue
+                if not _known_app(target):
+                    continue
+            _remove(item)
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            pass
+
+
+def _refresh_bundle(target: Path) -> None:
+    # Registration is a Finder refresh hint; failure must not undo a completed, verified install.
+    try:
+        if Path(LSREGISTER).is_file():
+            r = subprocess.run([LSREGISTER, "-f", str(target)], capture_output=True, text=True)
+            if r.returncode:
+                print(f"bw2.app: LaunchServices registration failed: {r.stderr.strip()}", file=sys.stderr)
+    except OSError as e:
+        print(f"bw2.app: LaunchServices registration failed: {e}", file=sys.stderr)
+    try:
+        target.touch()
+    except OSError as e:
+        print(f"bw2.app: could not refresh the bundle date: {e}", file=sys.stderr)
+
+
 def install_app(built: Path, dest_dir: Path) -> Path:
-    """Moves a signed and verified bundle to <dest_dir>/<APP_NAME>, replacing an old one only once the new one is
-    there. A bundle on another volume is first copied to <dest_dir>/<APP_NAME>.part and verified; the source of such
-    a copy is left where it was."""
+    """Stage a verified bundle under its final .app name next to the destination, then replace atomically.
+    Cross-volume sources are copied and retained. A failed install restores the old app and any moved source."""
     built, dest_dir = Path(built), Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
+    in_staging = built.parent.parent == dest_dir and built.parent.name.startswith(".bw2-install-")
+    _sweep_installs(dest_dir, keeping=built.parent if in_staging else None)
+    staging_dir = built.parent if in_staging else dest_dir / f".bw2-install-{uuid.uuid4()}"
+    if not in_staging:
+        staging_dir.mkdir()
+    staged = staging_dir / APP_NAME
     target = dest_dir / APP_NAME
-    copied = None
-    if not _same_volume(built, dest_dir):
-        copied = dest_dir / (APP_NAME + ".part")
-        _remove(copied)
-        try:
-            r = subprocess.run(["/bin/cp", "-c", "-R", str(built), str(copied)], capture_output=True, text=True)
-            if r.returncode != 0:
-                raise PackageError(f"copying {built} to {copied} failed (exit {r.returncode}): {r.stderr.strip()}")
-            verify_app(copied)
-        except BaseException:
-            _remove(copied)
-            raise
-        built = copied
-    old = None
-    if os.path.lexists(target):
-        old = dest_dir / f".trash-{uuid.uuid4().hex}"
-        try:
-            os.rename(target, old)
-        except OSError as e:
-            if copied is not None:
-                _remove(copied)
-            raise PackageError(f"cannot move the old app {target} aside: {e}") from e
+    moved = copied = False
     try:
-        os.rename(built, target)
-    except OSError as e:
+        if not in_staging:
+            if _same_volume(built, dest_dir):
+                os.rename(built, staged)
+                moved = True
+            else:
+                copied = True
+                r = subprocess.run(["/bin/cp", "-c", "-R", str(built), str(staged)], capture_output=True, text=True)
+                if r.returncode != 0:
+                    raise PackageError(f"copying {built} to {staged} failed (exit {r.returncode}): {r.stderr.strip()}")
+        verify_app(staged)
+        old = None
+        if os.path.lexists(target):
+            old = dest_dir / f".trash-{uuid.uuid4()}"
+            try:
+                os.rename(target, old)
+            except OSError as e:
+                raise PackageError(f"cannot move the old app {target} aside: {e}") from e
+        try:
+            os.rename(staged, target)
+        except OSError as e:
+            if old is not None:
+                try:
+                    os.rename(old, target)
+                except OSError as e2:
+                    raise PackageError(f"cannot move {staged} to {target}: {e}; and the old app could not be put back "
+                                       f"from {old}: {e2}") from e
+            raise PackageError(f"cannot move {staged} to {target}: {e}") from e
+        _refresh_bundle(target)
         if old is not None:
             try:
-                os.rename(old, target)
-            except OSError as e2:
-                raise PackageError(f"cannot move {built} to {target}: {e}; and the old app could not be put back "
-                                   f"from {old}: {e2}") from e
-        if copied is not None:
-            _remove(copied)
-        raise PackageError(f"cannot move {built} to {target}: {e}") from e
-    if old is not None:
+                _remove(old)
+            except OSError as e:
+                raise PackageError(f"installed {target}, but the old app left at {old} could not be deleted: {e}") from e
+        return target
+    except BaseException:
+        if moved and os.path.lexists(staged) and not os.path.lexists(built):
+            try:
+                os.rename(staged, built)
+            except OSError as e:
+                raise PackageError(f"could not restore the build to {built}; it remains at {staged}: {e}") from e
+        elif copied:
+            _remove(staged)
+        raise
+    finally:
         try:
-            shutil.rmtree(old)
-        except OSError as e:
-            raise PackageError(f"installed {target}, but the old app left at {old} could not be deleted: {e}") from e
-    return target
+            staging_dir.rmdir()
+        except OSError:
+            pass
 
 
 def package_app(engine: Path, d3dx_dll: Path, ffmpeg_prefix: Path | None, game: Path, dest_dir: Path,
@@ -233,8 +306,9 @@ def package_app(engine: Path, d3dx_dll: Path, ffmpeg_prefix: Path | None, game: 
         raise PackageError(f"no lifted DLL at {d3dx_dll}: build it first (python -m bw2.pipeline)")
     gametree.verify_manifest(game, Path(manifest))
     dest_dir.mkdir(parents=True, exist_ok=True)
-    part = dest_dir / (APP_NAME + ".part")
-    _remove(part)
+    _sweep_installs(dest_dir)
+    staging_dir = dest_dir / f".bw2-install-{uuid.uuid4()}"
+    part = staging_dir / APP_NAME
     try:
         contents = part / "Contents"
         (contents / "MacOS").mkdir(parents=True)
@@ -250,17 +324,21 @@ def package_app(engine: Path, d3dx_dll: Path, ffmpeg_prefix: Path | None, game: 
             for name, real in dylibs:          # named as dyld asks for it, never by the file it resolves to
                 shutil.copyfile(real, fw / name)
                 os.chmod(fw / name, 0o755)
-        (contents / "Info.plist").write_bytes(plistlib.dumps(info_plist(app_version, builder_version)))
+        info = info_plist(app_version, builder_version)
+        if appicon.make_game_icon(game / "white.exe", res / "AppIcon.icns"):
+            info["CFBundleIconFile"] = "AppIcon.icns"
+        else:
+            print("bw2.app: white.exe has no usable icon; continuing without an app icon", flush=True)
+        (contents / "Info.plist").write_bytes(plistlib.dumps(info))
         r = subprocess.run([XATTR, "-dr", "com.apple.quarantine", str(part)], capture_output=True, text=True)
         if r.returncode != 0:
             raise PackageError(f"xattr -dr com.apple.quarantine {part} failed (exit {r.returncode}): "
                                f"{r.stderr.strip()}")
         sign_app(part)
         verify_app(part)
-    except BaseException:
-        _remove(part)
-        raise
-    return install_app(part, dest_dir)
+        return install_app(part, dest_dir)
+    finally:
+        _remove(staging_dir)
 
 
 def main(argv=None) -> int:

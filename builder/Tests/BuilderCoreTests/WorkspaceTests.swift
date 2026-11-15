@@ -84,7 +84,7 @@ final class WorkspaceTests: XCTestCase {
 
     func testSweepRemovesOnlyLeftovers() throws {
         let paths = BuilderPaths(support: tmp)
-        for name in [".trash-1/bw2/a.py", ".0.1.0.tmp-2/VERSION", ".python.tmp-3/python/bin/python3",
+        for name in [".trash-1/bw2/a.py", ".bw2-install-4/Black & White 2.app/Contents/Info.plist", ".0.1.0.tmp-2/VERSION", ".python.tmp-3/python/bin/python3",
                      "python/bin/python3", "0.1.0/.builder-version", "inputs/BW2Patch1_2.exe"] {
             try writeText("x", to: tmp.appendingPathComponent(name))
         }

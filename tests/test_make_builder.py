@@ -52,7 +52,8 @@ def _real_support() -> Path:
 def _snapshot(p: Path):
     if not p.exists():
         return None
-    return (p.stat().st_mtime_ns, sorted((c.name, c.lstat().st_mtime_ns) for c in os.scandir(p)))
+    return (p.stat().st_mtime_ns, sorted((c.name, c.stat(follow_symlinks=False).st_mtime_ns)
+                                      for c in os.scandir(p)))
 
 
 # ---- pieces that need no swift -----------------------------------------------------------------------------------
@@ -63,6 +64,7 @@ def test_info_plist():
         "CFBundleIdentifier": "local.bw2-port.builder",
         "CFBundleName": "BW2 Builder",
         "CFBundleDisplayName": "BW2 Builder",
+        "CFBundleIconFile": "AppIcon.icns",
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": "1.2.3",
         "CFBundleVersion": "1.2.3",
@@ -112,6 +114,27 @@ def test_make_builder_names_a_failed_build(tmp_path, monkeypatch):
     assert not out.exists() or list(out.iterdir()) == []
 
 
+def test_make_builder_names_failed_icon_and_keeps_existing_app(tmp_path, monkeypatch):
+    exe = tmp_path / "BW2Builder"
+    exe.write_bytes(b"test executable")
+    out = tmp_path / "out"
+    old = out / mb.APP
+    old.mkdir(parents=True)
+    (old / "keep").write_text("existing app")
+    monkeypatch.setattr(mb, "find_swift", lambda: exe)
+    monkeypatch.setattr(mb, "swift_build", lambda swift: exe)
+    monkeypatch.setattr(mb, "copy_sources", lambda dest, **kw: dest.mkdir(parents=True))
+
+    def fail_icon(png, destination):
+        raise subprocess.CalledProcessError(1, ["iconutil"], stderr=b"invalid iconset")
+
+    monkeypatch.setattr(mb, "make_icns", fail_icon)
+    with pytest.raises(mb.MakeError, match="icon.*invalid iconset"):
+        mb.make_builder(out=out)
+    assert (old / "keep").read_text() == "existing app"
+    assert sorted(p.name for p in out.iterdir()) == [mb.APP]
+
+
 # ---- the made app ------------------------------------------------------------------------------------------------
 
 def test_make_builder(builder_app):
@@ -141,6 +164,10 @@ def test_make_builder(builder_app):
     assert bad == []
     info = plistlib.loads((contents / "Info.plist").read_bytes())
     assert info == mb.info_plist(version())
+    icon = contents / "Resources" / info["CFBundleIconFile"]
+    data = icon.read_bytes()
+    assert data[:4] == b"icns"
+    assert int.from_bytes(data[4:8], "big") == len(data)
     assert info["BW2BuilderVersion"] == (REPO / "VERSION").read_text().strip()
 
 

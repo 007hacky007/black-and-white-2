@@ -35,7 +35,15 @@ for about 10 to 15 minutes, puts `Black & White 2.app` into `/Applications`
 (or the folder you chose), removes its build files and offers Play. Its work
 folder is `~/Library/Application Support/BW2 Builder`; saves, settings and the
 game's log live in `~/Library/Application Support/Black & White 2`, which a
-rebuild never touches.
+rebuild never touches. On Ready, Delete temporary files removes this version's
+workspace and the Builder's downloaded patches and staged disc inputs. The
+optional build-tools toggle also removes its private Python and packages.
+Your own disc images outside the work folder and your saved choices stay.
+
+The Builder's original icon lives in `builder/Resources/AppIcon.svg`; regenerate
+its committed PNG with `builder/Resources/render_icon.sh` (needs librsvg).
+The game app's icon is decoded from your own `white.exe` during packaging and
+is never included in the repository.
 
 Without the window, the same build is
 `python -m bw2.builder_cli build --input <discs and patches> --builder-version <v>`

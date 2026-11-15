@@ -47,8 +47,33 @@ struct ResultView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
+            if model.buildFilesRemoved {
+                Text("Temporary files deleted, \(sizeText(model.freedBytes ?? 0)) freed.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                VStack(spacing: 6) {
+                    Button(model.removingBuildFiles ? "Deleting temporary files..."
+                           : "Delete temporary files\(model.buildFilesBytes.map { " (\(sizeText($0)))" } ?? "")",
+                           action: model.removeBuildFiles)
+                        .disabled(model.removingBuildFiles || model.buildFilesBytes == nil)
+                    Text("Deletes \(abbreviated(model.paths.workspace(version: model.version))) and \(abbreviated(model.paths.inputs)). The game app, your own disc images, saves and settings stay.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle("Also delete the build tools (Python and its packages\(model.buildToolsBytes.map { ", \(sizeText($0))" } ?? ""))",
+                           isOn: $model.removeToolsToo)
+                        .font(.caption)
+                        .disabled(model.removingBuildFiles)
+                    Text("Keep the tools to avoid downloading them again for the next build.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
             Button("Back to the checklist", action: model.backToChecklist)
                 .controlSize(.small)
+                .disabled(model.removingBuildFiles)
         }
         .frame(maxWidth: .infinity, minHeight: 500)
     }

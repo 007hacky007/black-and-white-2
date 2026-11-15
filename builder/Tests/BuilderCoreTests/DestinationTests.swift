@@ -55,6 +55,25 @@ final class DestinationTests: XCTestCase {
         XCTAssertEqual(marker(result), "new")
     }
 
+    func testStagesWithTheAppExtensionAndRefreshesTheInstalledDate() throws {
+        let dest = root.appendingPathComponent("Applications")
+        let built = root.appendingPathComponent("ws/out/Black & White 2.app")
+        try makeApp(at: built, marker: "new")
+        try fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: built.path)
+        var staged: URL?
+        let before = Date()
+        let result = try installApp(built: built, into: dest, isRunning: { _ in false }, move: { from, to in
+            if from == built { staged = to }
+            try self.fm.moveItem(at: from, to: to)
+        })
+        XCTAssertEqual(staged?.lastPathComponent, gameAppName)
+        XCTAssertTrue(staged?.deletingLastPathComponent().lastPathComponent.hasPrefix(".bw2-install-") == true)
+        XCTAssertEqual(staged?.deletingLastPathComponent().deletingLastPathComponent().path, dest.path)
+        let date = try XCTUnwrap(try fm.attributesOfItem(atPath: result.path)[.modificationDate] as? Date)
+        XCTAssertGreaterThanOrEqual(date, before)
+        XCTAssertEqual(listing(dest), [gameAppName])
+    }
+
     /// The saves live outside the app; a folder beside it (or anything else there) is never touched.
     func testReplaceAnOlderAppKeepingASiblingSavesFolder() throws {
         let dest = root.appendingPathComponent("Applications")
@@ -85,6 +104,40 @@ final class DestinationTests: XCTestCase {
         XCTAssertEqual(marker(dest.appendingPathComponent("Black & White 2.app")), "old")
         XCTAssertEqual(marker(built), "new", "the build stays for another try")
         XCTAssertEqual(listing(dest), ["Black & White 2.app"])
+    }
+
+    func testDestinationSweepRecoversTheOldGameAndKeepsUnrelatedTrash() throws {
+        let dest = root.appendingPathComponent("Applications")
+        let old = dest.appendingPathComponent(".trash-\(UUID().uuidString)")
+        try makeApp(at: old, marker: "old")
+        let stage = dest.appendingPathComponent(".bw2-install-\(UUID().uuidString)")
+        try makeApp(at: stage.appendingPathComponent(gameAppName), marker: "interrupted")
+        let unrelated = try writeText("kept", to: dest.appendingPathComponent(".trash-\(UUID().uuidString)/notes"))
+        let outside = try writeText("kept", to: root.appendingPathComponent("outside/file"))
+        let link = dest.appendingPathComponent(".bw2-install-\(UUID().uuidString)")
+        try fm.createSymbolicLink(at: link, withDestinationURL: outside.deletingLastPathComponent())
+        try writeText("kept", to: dest.appendingPathComponent(".bw2-install-not-ours/file"))
+        sweepInstallLeftovers(in: dest)
+        XCTAssertEqual(marker(dest.appendingPathComponent(gameAppName)), "old")
+        XCTAssertFalse(fm.fileExists(atPath: old.path))
+        XCTAssertFalse(fm.fileExists(atPath: stage.path))
+        XCTAssertThrowsError(try fm.destinationOfSymbolicLink(atPath: link.path))
+        XCTAssertEqual(readText(outside), "kept")
+        XCTAssertEqual(readText(unrelated), "kept")
+        XCTAssertEqual(readText(dest.appendingPathComponent(".bw2-install-not-ours/file")), "kept")
+    }
+
+    func testIncompleteFirstInstallStageIsSwept() throws {
+        let dest = root.appendingPathComponent("Applications")
+        let stage = dest.appendingPathComponent(".bw2-install-\(UUID().uuidString)")
+        try makeApp(at: stage.appendingPathComponent(gameAppName), marker: "interrupted")
+        sweepInstallLeftovers(in: dest)
+        XCTAssertFalse(fm.fileExists(atPath: stage.path))
+        let built = root.appendingPathComponent("ws/out/Black & White 2.app")
+        try makeApp(at: built, marker: "new")
+        let app = try installApp(built: built, into: dest, isRunning: { _ in false })
+        XCTAssertEqual(marker(app), "new")
+        XCTAssertEqual(listing(dest), [gameAppName])
     }
 
     /// The old app is renamed aside, then the new one is moved in; when that move fails, the old one goes back.

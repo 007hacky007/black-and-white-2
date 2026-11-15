@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import Foundation
 
 /// bw2/app.py BUNDLE_ID and APP_NAME: the built game's bundle identifier and folder name.
@@ -71,12 +72,45 @@ public func volumeID(_ url: URL) -> UInt64? {
     return UInt64(UInt32(bitPattern: info.st_dev))
 }
 
+/// Recover an interrupted replacement before discarding old game apps. Unrelated hidden files stay put.
+public func sweepInstallLeftovers(in directory: URL) {
+    let fm = FileManager.default
+    func kind(_ url: URL) -> mode_t? {
+        var info = stat()
+        return lstat(url.path, &info) == 0 ? info.st_mode & S_IFMT : nil
+    }
+    func knownApp(_ url: URL) -> Bool {
+        let contents = url.appendingPathComponent("Contents")
+        let plist = contents.appendingPathComponent("Info.plist")
+        guard kind(url) == S_IFDIR, kind(contents) == S_IFDIR, kind(plist) == S_IFREG else { return false }
+        return NSDictionary(contentsOf: plist)?["CFBundleIdentifier"] as? String == gameBundleID
+    }
+    func owned(_ name: String, prefix: String) -> Bool {
+        name.hasPrefix(prefix) && UUID(uuidString: String(name.dropFirst(prefix.count))) != nil
+    }
+    guard kind(directory) == S_IFDIR else { return }
+    let names = ((try? fm.contentsOfDirectory(atPath: directory.path)) ?? []).sorted()
+    let target = directory.appendingPathComponent(gameAppName)
+    for name in names where owned(name, prefix: ".trash-") {
+        let old = directory.appendingPathComponent(name)
+        guard knownApp(old) else { continue }
+        if kind(target) == nil {
+            try? fm.moveItem(at: old, to: target)
+        } else if knownApp(target) {
+            try? fm.removeItem(at: old)
+        }
+    }
+    for name in names where owned(name, prefix: ".bw2-install-") {
+        try? fm.removeItem(at: directory.appendingPathComponent(name))
+    }
+}
+
 /// Puts `built` (the app the build made in the workspace's out/) into `into` as Black & White 2.app and returns
 /// where it is. Refused while the game runs. The new app is made complete next to the final place first, as
-/// `Black & White 2.app.part` (moved there on the same volume; copied otherwise, and the build left where it is), and loses quarantine; then the
+/// `.bw2-install-<uuid>/Black & White 2.app` (moved on the same volume; copied otherwise), and loses quarantine; then the
 /// old app is renamed to a hidden `.trash-<uuid>`, the new one is moved in and the old one deleted. When moving
 /// the new one in fails, the old one is put back; when anything fails, a moved build goes back to `built` for
-/// another try. Nothing beside the app (the saves live in ~/Library/Application Support/Black & White 2) is
+/// another try. Nothing beside the app and our interrupted install leftovers (the saves live in ~/Library/Application Support/Black & White 2) is
 /// touched.
 public func installApp(built: URL, into directory: URL, isRunning: (String) -> Bool) throws -> URL {
     try installApp(built: built, into: directory, isRunning: isRunning,
@@ -91,15 +125,15 @@ func installApp(built: URL, into directory: URL, isRunning: (String) -> Bool,
         throw InstallError(message: "The built app is incomplete: \(built.path) has no Contents/Info.plist")
     }
     let target = directory.appendingPathComponent(gameAppName)
-    let staging = directory.appendingPathComponent(gameAppName + ".part")
+    let stagingDirectory = directory.appendingPathComponent(".bw2-install-\(UUID().uuidString)")
+    let staging = stagingDirectory.appendingPathComponent(gameAppName)
     var moved = false
     do {
         if !fm.fileExists(atPath: directory.path) {
             try fm.createDirectory(at: directory, withIntermediateDirectories: false)
         }
-        if fm.fileExists(atPath: staging.path) || (try? fm.destinationOfSymbolicLink(atPath: staging.path)) != nil {
-            try fm.removeItem(at: staging)
-        }
+        sweepInstallLeftovers(in: directory)
+        try fm.createDirectory(at: stagingDirectory, withIntermediateDirectories: false)
         if let a = volumeID(built), a == volumeID(directory) {
             try move(built, staging)
             moved = true
@@ -119,13 +153,17 @@ func installApp(built: URL, into directory: URL, isRunning: (String) -> Bool,
             if let trash = trash { try? move(trash, target) }
             throw error
         }
+        try? fm.removeItem(at: stagingDirectory)
+        _ = LSRegisterURL(target as CFURL, true)
+        try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: target.path)
         if let trash = trash { try? fm.removeItem(at: trash) }
         return target
     } catch {
         if moved, fm.fileExists(atPath: staging.path), !fm.fileExists(atPath: built.path) {
             try? move(staging, built)
         }
-        if fm.fileExists(atPath: staging.path) { try? fm.removeItem(at: staging) }
+        // Keep the staged app for recovery if restoring a moved build also failed.
+        if !moved || !fm.fileExists(atPath: staging.path) { try? fm.removeItem(at: stagingDirectory) }
         throw InstallError(
             message: "Could not install Black & White 2 into \(directory.lastPathComponent). Choose another folder and try again.",
             details: String(describing: error))

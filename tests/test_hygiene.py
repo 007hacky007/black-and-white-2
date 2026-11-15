@@ -21,3 +21,18 @@ def test_no_windows_binary_is_tracked():
     tracked = [n for n in r.stdout.split("\0") if n.lower().endswith((".exe", ".dll"))]
     assert tracked == []
     assert subprocess.run(["git", "check-ignore", "-q", "out/winprobe/saveprobe.exe"], cwd=paths.REPO).returncode == 0
+
+
+def test_audit_allows_only_reviewed_original_image_hashes(tmp_path):
+    import hashlib
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    image = tmp_path / "original.png"
+    image.write_bytes(b"synthetic original artwork")
+    manifest = tmp_path / ".original-art.sha256"
+    manifest.write_text(hashlib.sha256(image.read_bytes()).hexdigest() + "  original.png\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "original.png", ".original-art.sha256"], check=True)
+    r = pcr.run("tools/audit_repo.py", str(tmp_path), check=False)
+    assert r.returncode == 0 and "CLEAN" in r.stdout, r.stdout
+    image.write_bytes(b"different, unreviewed pixels")
+    r = pcr.run("tools/audit_repo.py", str(tmp_path), check=False)
+    assert r.returncode != 0 and "GAME MATERIAL" in r.stdout, r.stdout

@@ -6,6 +6,7 @@ The bundle:
 
     Contents/MacOS/BW2Builder           `swift build -c release --package-path builder`
     Contents/Resources/source/          bw2.workspace.copy_sources: the git-tracked sources and SOURCES.txt
+    Contents/Resources/AppIcon.icns     original Builder icon, converted from its committed PNG
     Contents/Info.plist                 local.bw2-port.builder; both versions from VERSION
 
 It is built as `BW2 Builder.app.part`, quarantine removed, ad-hoc signed, verified with
@@ -23,6 +24,7 @@ import uuid
 from pathlib import Path
 
 from .app import version
+from .appicon import make_icns
 from .paths import REPO
 from .workspace import copy_sources
 
@@ -65,6 +67,7 @@ def info_plist(builder_version: str) -> dict:
         "CFBundleIdentifier": BUNDLE_ID,
         "CFBundleName": "BW2 Builder",
         "CFBundleDisplayName": "BW2 Builder",
+        "CFBundleIconFile": "AppIcon.icns",
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": builder_version,
         "CFBundleVersion": builder_version,
@@ -125,6 +128,11 @@ def make_builder(out: Path = REPO / "out", root: Path = REPO) -> Path:
         (contents / "MacOS").mkdir(parents=True)
         shutil.copy2(exe, contents / "MacOS" / EXECUTABLE)
         copy_sources(contents / "Resources" / "source", root=root)
+        try:
+            make_icns(PACKAGE / "Resources" / "AppIcon-1024.png", contents / "Resources" / "AppIcon.icns")
+        except subprocess.CalledProcessError as e:
+            detail = (e.stderr or b"").decode(errors="replace").strip()
+            raise MakeError(f"Builder icon failed: {detail or e}") from e
         (contents / "Info.plist").write_bytes(plistlib.dumps(info_plist(builder_version)))
         _run([XATTR, "-dr", "com.apple.quarantine", part], "xattr")
         _run([CODESIGN, "--force", "--sign", "-", part], "codesign")

@@ -1,0 +1,7 @@
+# Reviewed original Builder artwork, never extracted game art.
+# AppIcon-1024.png: builder/Resources/AppIcon.svg via render_icon.sh.
+# Backgrounds: builder/dmg/background.html via render_background.sh.
+# Review source and rendered pixels before updating these exact checksums.
+10b81ce42c1895bb9bf8739b7dbfea325712d012fa9a35f884a7637c12006384  builder/Resources/AppIcon-1024.png
+18bf2650f9ec5efa09427e1d0791e354691b63fd17a7ccc3aaca8aad07ef0923  builder/dmg/background.png
+942661b415f044ee2de4ecc1d5d83fa34640ddf0e1f0a37e8587059b1b6bff05  builder/dmg/background@2x.png

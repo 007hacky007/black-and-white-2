@@ -20,6 +20,12 @@ final class BuilderModel: ObservableObject {
     @Published private(set) var cancelDisabled = false
     /// Set when the app was installed but removing the build files failed.
     @Published private(set) var cleanNote: String?
+    @Published private(set) var buildFilesBytes: Int64?
+    @Published private(set) var buildToolsBytes: Int64?
+    @Published private(set) var buildFilesRemoved = false
+    @Published private(set) var removingBuildFiles = false
+    @Published private(set) var freedBytes: Int64?
+    @Published var removeToolsToo = false
     /// A plain message shown as an alert over the checklist.
     @Published var notice: String?
 
@@ -58,6 +64,7 @@ final class BuilderModel: ObservableObject {
     private var flushScheduled = false
     /// True while installApp runs: a quit waits for it, so the old app is never left moved aside.
     private var installing = false
+    private var measurementToken = UUID()
 
     init(paths: BuilderPaths, version: String, sources: URL?) {
         self.paths = paths
@@ -71,7 +78,7 @@ final class BuilderModel: ObservableObject {
     // MARK: - Rows
 
     var toolsReady: Bool { states[.buildTools]?.isReady == true }
-    var buildEnabled: Bool { phase == .checklist && canBuild(states) && downloads.isEmpty && !installingTools }
+    var buildEnabled: Bool { phase == .checklist && workspaceReady && canBuild(states) && downloads.isEmpty && !installingTools && !removingBuildFiles }
     var destination: URL { choices.destinationURL }
     var existingApp: InstalledApp? { InstalledApp.find(in: destination) }
     func isDownloading(_ id: CheckID) -> Bool { downloads[id] != nil }
@@ -381,6 +388,8 @@ final class BuilderModel: ObservableObject {
         let runner = PipelineRunner.build(paths: paths, version: version, inputs: inputs)
         (log, stepID, stepTitle, stepPart, buildError, built, cleanNote) = ([], "", "Getting ready", 0, nil, nil, nil)
         (userCancelled, cancelDisabled) = (false, false)
+        (buildFilesRemoved, removeToolsToo, freedBytes) = (false, false, nil)
+        measurementToken = UUID()
         phase = .building(title: stepTitle, fraction: 0)
         buildRunner = runner
         appendLog("Building from: " + inputs.map { $0.path }.joined(separator: ", "))
@@ -461,7 +470,51 @@ final class BuilderModel: ObservableObject {
                     + ". They are in \(abbreviated(paths.workspace(version: version)))."
             }
             phase = .finished(app)
+            measureBuildFiles()
         })
+    }
+
+    private func measureBuildFiles() {
+        (buildFilesBytes, buildToolsBytes) = (nil, nil)
+        let token = UUID()
+        measurementToken = token
+        let (paths, version) = (paths, version)
+        DispatchQueue.global(qos: .utility).async {
+            let sizes = BuilderCore.measureBuildFiles(paths: paths, version: version)
+            DispatchQueue.main.async { [self] in
+                guard measurementToken == token else { return }
+                (buildFilesBytes, buildToolsBytes) = (sizes.temporary, sizes.tools)
+            }
+        }
+    }
+
+    /// Cleanup runs to completion before quitting or returning to the checklist can start another build.
+    func removeBuildFiles() {
+        guard case let .finished(app) = phase, !hasRunningWork, !shuttingDown else { return }
+        removingBuildFiles = true
+        workspaceReady = false
+        measurementToken = UUID()
+        let (paths, version, includingTools) = (paths, version, removeToolsToo)
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result {
+                try BuilderCore.removeBuildFiles(paths: paths, version: version, includingTools: includingTools, preservingApp: app)
+            }
+            DispatchQueue.main.async { [self] in
+                removingBuildFiles = false
+                discKey = nil
+                patchKeys = [:]
+                switch result {
+                case let .success(bytes):
+                    buildFilesRemoved = true
+                    freedBytes = bytes
+                    cleanNote = nil
+                case let .failure(error):
+                    notice = "Could not delete all temporary files: \(error.localizedDescription)"
+                    measureBuildFiles()
+                }
+                notifyIfIdle()
+            }
+        }
     }
 
     private func fail(step: String, message: String) {
@@ -470,8 +523,10 @@ final class BuilderModel: ObservableObject {
     }
 
     func backToChecklist() {
+        guard !removingBuildFiles, !shuttingDown else { return }
         phase = .checklist
         refresh()
+        prepare { [self] _ in refreshBuildTools() }
     }
 
     func play(_ app: URL) {
@@ -500,7 +555,7 @@ final class BuilderModel: ObservableObject {
 
     // MARK: - Processes and quitting
 
-    var hasRunningWork: Bool { !live.isEmpty || pythonTask != nil || installing }
+    var hasRunningWork: Bool { !live.isEmpty || pythonTask != nil || installing || removingBuildFiles }
 
     private func run(_ runner: PipelineRunner, onEvent: @escaping (PipelineEvent) -> Void,
                      onExit: @escaping (Int32) -> Void) {
@@ -534,7 +589,7 @@ final class BuilderModel: ObservableObject {
     }
 
     private func notifyIfIdle() {
-        guard live.isEmpty, !installing, !idleHandlers.isEmpty else { return }
+        guard !hasRunningWork, !idleHandlers.isEmpty else { return }
         let handlers = idleHandlers
         idleHandlers = []
         handlers.forEach { $0() }

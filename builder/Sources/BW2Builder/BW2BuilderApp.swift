@@ -122,6 +122,7 @@ struct BW2BuilderApp: App {
         WindowGroup("BW2 Builder") {
             RootView(model: delegate.model)
         }
+        .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(replacing: .appTermination) {
@@ -135,24 +136,26 @@ struct RootView: View {
     @ObservedObject var model: BuilderModel
 
     var body: some View {
-        Group {
-            switch model.phase {
-            case .checklist:
-                ChecklistView(model: model)
-            case let .building(title, fraction):
-                BuildView(model: model, title: title, fraction: fraction)
-            case let .finished(app):
-                ResultView(model: model, outcome: .success(app))
-            case let .failed(step, message):
-                ResultView(model: model, outcome: .failure(step: step, message: message))
+        ScrollView {
+            Group {
+                switch model.phase {
+                case .checklist:
+                    ChecklistView(model: model)
+                case let .building(title, fraction):
+                    BuildView(model: model, title: title, fraction: fraction)
+                case let .finished(app):
+                    ResultView(model: model, outcome: .success(app))
+                case let .failed(step, message):
+                    ResultView(model: model, outcome: .failure(step: step, message: message))
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .padding(20)
         }
         .alert(isPresented: Binding(get: { model.notice != nil }, set: { if !$0 { model.notice = nil } })) {
             Alert(title: Text(model.notice ?? ""))
         }
-        .padding(20)
-        .frame(width: 600)
-        .frame(minHeight: 560, alignment: .top)
+        .frame(width: 600, height: 560)
         .background(Color(NSColor.windowBackgroundColor))
     }
 }

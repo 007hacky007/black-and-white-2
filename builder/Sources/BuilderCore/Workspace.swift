@@ -100,7 +100,8 @@ public func moveToTrash(_ url: URL) throws -> URL {
 public func sweepLeftovers(_ paths: BuilderPaths) {
     let fm = FileManager.default
     for name in (try? fm.contentsOfDirectory(atPath: paths.support.path)) ?? []
-    where name.hasPrefix(".trash-") || (name.hasPrefix(".") && name.contains(".tmp-")) {
+    where name.hasPrefix(".trash-") || name.hasPrefix(".bw2-install-")
+        || (name.hasPrefix(".") && name.contains(".tmp-")) {
         try? fm.removeItem(at: paths.support.appendingPathComponent(name))
     }
 }
@@ -148,14 +149,7 @@ public func buildToolsCheck(paths: BuilderPaths, version: String) -> CheckState 
 /// The disk space the files under `url` take (allocated, so APFS clones and sparse files count
 /// as the space they use). 0 when it is not there.
 public func allocatedSize(of url: URL) -> Int64 {
-    let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .isRegularFileKey]
-    guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys) else { return 0 }
-    var total: Int64 = 0
-    for case let file as URL in walker {
-        guard let values = try? file.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { continue }
-        total += Int64(values.totalFileAllocatedSize ?? 0)
-    }
-    return total
+    allocatedSize(of: [url])
 }
 
 /// "612 MB", "1.4 GB": sizes as Finder shows them.

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#9bdd76"/>
+      <stop offset="1" stop-color="#397b34"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#c9d5db"/>
+    </linearGradient>
+    <clipPath id="disc"><circle cx="488" cy="430" r="270"/></clipPath>
+  </defs>
+  <!-- Original Builder artwork: a split disc and a carpenter's hammer. -->
+  <rect x="56" y="56" width="912" height="912" rx="204" fill="url(#tile)"/>
+  <rect x="65" y="65" width="894" height="894" rx="196" fill="none" stroke="#ffffff" stroke-opacity=".22" stroke-width="5"/>
+  <circle cx="488" cy="446" r="282" fill="#183d25" opacity=".25"/>
+  <g clip-path="url(#disc)">
+    <path d="M218 160h270v540H218z" fill="#19221f"/>
+    <path d="M488 160h270v540H488z" fill="#fbfff7"/>
+  </g>
+  <circle cx="488" cy="430" r="270" fill="none" stroke="#e5f0de" stroke-width="16"/>
+  <circle cx="488" cy="430" r="42" fill="#76b75b" stroke="#c8deb8" stroke-width="12"/>
+  <g transform="rotate(39 647 633)" stroke="#253b32" stroke-width="18" stroke-linejoin="round">
+    <rect x="612" y="556" width="76" height="298" rx="28" fill="#d8a85a"/>
+    <path d="M623 768h54" fill="none" stroke="#aa773d" stroke-width="10"/>
+    <path d="M527 472h189l66 61v57h-65l-32-39h-47v49H527z" fill="url(#metal)"/>
+    <path d="M565 487v94" fill="none" stroke="#91a59c" stroke-width="9"/>
+  </g>
+</svg>
