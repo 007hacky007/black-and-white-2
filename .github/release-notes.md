@@ -1,4 +1,11 @@
-First public build of the Builder for the Black & White 2 macOS port (Apple Silicon, macOS 13 or newer).
+Builder for the Black & White 2 macOS port (Apple Silicon, macOS 13 or newer).
+
+**New in 0.0.2:**
+
+- The built game app opens as an app in Finder (before, Finder could show it as a folder after install).
+- The game app gets the game's own icon, read from your copy and upscaled on your Mac during the build.
+- The Builder has its own icon and a fixed-size window.
+- After a build, the Builder offers to delete its temporary files (and optionally its private Python).
 
 This release contains no game files. `BW2 Builder.app` turns your own copy of the game into `Black & White 2.app`:
 
