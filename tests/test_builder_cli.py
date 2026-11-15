@@ -55,6 +55,13 @@ def test_steps_and_weights():
     assert isinstance(builder_cli.REQUIRED_BYTES, int) and builder_cli.REQUIRED_BYTES > 10 * 2**30
 
 
+def test_required_bytes_is_the_measured_drop():
+    """The need is the largest fall of the volume's free space in a build from the zips (Task 6: 10,604,712 KB),
+    plus 20%, not the workspace's du peak: du counts the APFS clones (install to game, game to app) in full."""
+    drop = 10_604_712 * 1024
+    assert drop * 1.2 <= builder_cli.REQUIRED_BYTES < drop * 1.2 + 100_000_000
+
+
 # ---- classify ------------------------------------------------------------------------------------------------------
 
 class FakeSet:

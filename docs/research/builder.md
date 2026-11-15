@@ -121,7 +121,10 @@ to 85 at the end):
 - Space: the workspace's peak `du -sk` was 16,345,136 KB while the app was
   made (`du` counts the app's clone of the game in full); the volume's free
   space fell by 10,604,712 KB at most, other processes included.
-  `REQUIRED_BYTES` is the `du` peak plus 20%: 20,100,000,000.
+  `REQUIRED_BYTES` is that fall plus 20%, rounded up: 13,100,000,000. (It was
+  first the `du` peak plus 20%, 20,100,000,000; the final review found that
+  `du` counts the APFS clones, install to game and game to app, in full, and
+  the workspace is always on the APFS home volume.)
 
 ## The disc fingerprints
 
@@ -164,7 +167,7 @@ the bins; no ISO from a ripping tool was compared.
   build's own check uses statfs (19.4 GB), so the row was green while the build
   refused at once. The row now uses statfs too.
 - This Mac had 19.4 GB free (statfs; the rest was held by local Time Machine
-  snapshots), short of the measured 20.1 GB, so the run lowered the need with
+  snapshots), short of the 20.1 GB then required, so the run lowered the need with
   the test switch `BW2_REQUIRED_BYTES=12500000000` (Task 6's largest drop of
   free space, 10.6 GB, plus about 18%). Free space fell from 19,139,856 KB to
   12,735,932 KB at its lowest (sampled every 15 s; snapshot thinning moves it

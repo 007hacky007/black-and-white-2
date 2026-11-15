@@ -61,9 +61,13 @@ public func currentMacCheck() -> CheckState {
 }
 
 /// The peak extra bytes a build from the four zips needs in the workspace: bw2/builder_cli.py REQUIRED_BYTES
-/// (the sampled `du -sk` peak of the workspace in plan 13 Task 6's end-to-end build, 16,345,136 KB, plus 20%).
-/// tests/test_builder_swift.py compares the two.
-public let requiredBuildBytes: Int64 = 20_100_000_000
+/// (the largest fall of the volume's free space in plan 13 Task 6's end-to-end build, 10,604,712 KB, plus 20%;
+/// not the workspace's `du` peak, which counts the APFS clones in full). tests/test_builder_swift.py compares the two.
+public let requiredBuildBytes: Int64 = 13_100_000_000
+
+/// Said under a red free-space row: statfs does not count purgeable space, and on a Mac with Time Machine most of
+/// it is often local snapshots (plan 13 Task 8: 19.4 GB free by statfs, 220 GB "for important usage").
+public let snapshotNote = ". Time Machine's local snapshots may be holding some of this disk's space."
 
 public func diskSpaceCheck(available: Int64, required: Int64 = requiredBuildBytes, disk: String? = nil) -> CheckState {
     let gb = { (b: Int64) in String(format: "%.1f GB", Double(b) / 1_000_000_000) }
@@ -71,7 +75,7 @@ public func diskSpaceCheck(available: Int64, required: Int64 = requiredBuildByte
         return .ready("\(gb(available)) free")
     }
     let on = disk.map { " on \($0)" } ?? ""
-    return .blocked("Only \(gb(available)) free\(on), \(gb(required)) needed")
+    return .blocked("Only \(gb(available)) free\(on), \(gb(required)) needed" + snapshotNote)
 }
 
 /// The space free on the volume `url` is on (its nearest existing folder), or nil: statfs's blocks available to

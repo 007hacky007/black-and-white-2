@@ -3,16 +3,17 @@ import XCTest
 
 final class DiskSpaceTests: XCTestCase {
     func testRequiredBytesIsTheMeasuredNeed() {
-        XCTAssertEqual(requiredBuildBytes, 20_100_000_000)
+        XCTAssertEqual(requiredBuildBytes, 13_100_000_000)
     }
 
     func testEnoughAndNotEnough() {
-        XCTAssertEqual(diskSpaceCheck(available: requiredBuildBytes), .ready("20.1 GB free"))
+        let snapshotNote = ". Time Machine's local snapshots may be holding some of this disk's space."
+        XCTAssertEqual(diskSpaceCheck(available: requiredBuildBytes), .ready("13.1 GB free"))
         XCTAssertEqual(diskSpaceCheck(available: 53_000_000_000), .ready("53.0 GB free"))
-        XCTAssertEqual(diskSpaceCheck(available: requiredBuildBytes - 1), .blocked("Only 20.1 GB free, 20.1 GB needed"))
-        XCTAssertEqual(diskSpaceCheck(available: 4_000_000_000, required: 5_000_000_000), .blocked("Only 4.0 GB free, 5.0 GB needed"))
+        XCTAssertEqual(diskSpaceCheck(available: requiredBuildBytes - 1), .blocked("Only 13.1 GB free, 13.1 GB needed" + snapshotNote))
+        XCTAssertEqual(diskSpaceCheck(available: 4_000_000_000, required: 5_000_000_000), .blocked("Only 4.0 GB free, 5.0 GB needed" + snapshotNote))
         XCTAssertEqual(diskSpaceCheck(available: 1_000_000_000, required: 2_000_000_000, disk: "Macintosh HD"),
-                       .blocked("Only 1.0 GB free on Macintosh HD, 2.0 GB needed"))
+                       .blocked("Only 1.0 GB free on Macintosh HD, 2.0 GB needed" + snapshotNote))
     }
 
     func testAvailableBytesOfARealFolder() throws {

@@ -85,7 +85,7 @@ final class EndToEndTests: XCTestCase {
         }
         var states = evaluateChecks(paths: paths, version: version, sources: sources, choices: choices)
         // BW2_REQUIRED_BYTES (a test switch, never set by the window) lowers the space need on a Mac whose free space
-        // is short of the measured 20.1 GB; the row and the build's own check then both use it.
+        // is short of requiredBuildBytes; the row and the build's own check then both use it.
         let spaceNeed = env["BW2_REQUIRED_BYTES"].flatMap { Int64($0) }
         if let need = spaceNeed {
             print("E2E space: BW2_REQUIRED_BYTES=\(need) in place of \(requiredBuildBytes); the row said: \(states[.diskSpace]!.text)")

@@ -660,8 +660,9 @@ Rows:
    folder or picked one by one).
 3. Patch 1.1, 1.2, fan 1.42: each "Download" or "I have it" (file picker);
    fingerprint checked.
-4. Free disk space enough for extraction + build (plan 13 measured it: 20.1 GB
-   on the workspace's volume, the peak `du` of a build from the zips plus 20%).
+4. Free disk space enough for extraction + build (plan 13 measured it: 13.1 GB
+   on the workspace's volume, the largest fall of free space in a build from
+   the zips plus 20%).
 5. Build: extract installer data from the discs (no Windows installer run),
    and `d3dx9_25.dll` from disc 1's DirectX CAB (`/usr/bin/tar`);
    lay out the install tree as the Windows installer would, apply 1.1, 1.2,

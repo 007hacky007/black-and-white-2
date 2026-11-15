@@ -60,10 +60,11 @@ STEPS = [("tools", "Building the tools"), ("discs", "Reading the discs"), ("inst
 # Each step's share of the bar, from the wall times of the end-to-end build (plan 13 Task 6 Step 6, 2026-11-14:
 # 32.6, 12.6, 17.9, 160.1, 125.3, 185.5 and 21.8 s, 555.8 s in all, on a busy Mac), rounded to add up to 100.
 WEIGHTS = {"tools": 6, "discs": 2, "install": 3, "patches": 29, "lift": 23, "compile": 33, "package": 4}
-# The peak extra bytes a build from the four zips needs in the workspace: the sampled peak of `du -sk` of the
-# workspace (16,345,136 KB, while the app was made) plus 20%. du counts the app's APFS clone of the game in full,
-# so this also holds on a volume where the clone falls back to a copy.
-REQUIRED_BYTES = 20_100_000_000
+# The peak extra bytes a build from the four zips needs in the workspace: the largest fall of the volume's free
+# space in Task 6's end-to-end build (10,604,712 KB, other processes included) plus 20%, rounded up. Not the
+# workspace's `du` peak (16,345,136 KB): du counts the APFS clones (install to game, game to app) in full, and the
+# workspace is always on the APFS home volume. Each step's own ensure_free still fails loudly by name.
+REQUIRED_BYTES = 13_100_000_000
 
 PATCH_KINDS = ("patch-1.1", "patch-1.2", "fanpatch-installer")
 WHAT = {"patch-1.1": "patch 1.1", "patch-1.2": "patch 1.2", "fanpatch-installer": "fan patch 1.42"}
