@@ -42,7 +42,8 @@ public enum ZipDirectory {
     static func entries(size: Int64, read: (Int64, Int) throws -> Data, name: () -> String) throws -> [ZipEntry] {
         let damaged = ZipError(message: "\(name()) is not a complete zip")
         func bytes(_ offset: Int64, _ length: Int) throws -> [UInt8] {
-            guard offset >= 0, length >= 0, offset + Int64(length) <= size else { throw damaged }
+            // Written so that no offset or length read from the file can overflow (a trap is not a red row).
+            guard offset >= 0, length >= 0, offset <= size, Int64(length) <= size - offset else { throw damaged }
             let b = [UInt8](try read(offset, length))
             guard b.count == length else { throw damaged }
             return b
@@ -75,13 +76,15 @@ public enum ZipDirectory {
             let locatorAt = tailStart + Int64(eocd) - 20
             let locator = try bytes(locatorAt, 20)
             guard u32(locator, 0) == 0x0706_4B50 else { throw damaged }
-            let end64 = try bytes(Int64(u64(locator, 8)), 56)
+            let end64At = u64(locator, 8)
+            guard end64At <= UInt64(size) else { throw damaged }
+            let end64 = try bytes(Int64(end64At), 56)
             guard u32(end64, 0) == 0x0606_4B50 else { throw damaged }
             count = u64(end64, 32)
             dirSize = u64(end64, 40)
             dirOffset = u64(end64, 48)
         }
-        guard dirSize <= UInt64(Int.max), dirOffset <= UInt64(Int64.max) else { throw damaged }
+        guard dirOffset <= UInt64(size), dirSize <= UInt64(size) - dirOffset else { throw damaged }
         let dir = try bytes(Int64(dirOffset), Int(dirSize))
         var result: [ZipEntry] = []
         var p = 0

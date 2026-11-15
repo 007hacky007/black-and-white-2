@@ -82,4 +82,29 @@ final class ZipDirectoryTests: XCTestCase {
         let zip = try writeFile(Data(file), to: tmp.appendingPathComponent("z64.zip"))
         XCTAssertEqual(try ZipDirectory.entries(zip), [ZipEntry(name: "big.bin", size: Int64(size), crc32: 0xDEAD_BEEF)])
     }
+
+    /// A damaged zip64 end record or locator throws, whatever offsets and sizes it states (no overflow trap).
+    func testDamagedZip64ValuesThrow() throws {
+        func le16(_ v: Int) -> [UInt8] { [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)] }
+        func le32(_ v: UInt32) -> [UInt8] { (0..<4).map { UInt8((v >> (8 * $0)) & 0xFF) } }
+        func le64(_ v: UInt64) -> [UInt8] { (0..<8).map { UInt8((v >> (8 * UInt64($0))) & 0xFF) } }
+        let eocd = le32(0x0605_4B50) + le16(0xFFFF) + le16(0xFFFF) + le16(0xFFFF) + le16(0xFFFF)
+            + le32(0xFFFF_FFFF) + le32(0xFFFF_FFFF) + le16(0)
+        func locator(_ end64At: UInt64) -> [UInt8] { le32(0x0706_4B50) + le32(0) + le64(end64At) + le32(1) }
+        func end64(dirSize: UInt64, dirOffset: UInt64) -> [UInt8] {
+            le32(0x0606_4B50) + le64(44) + le16(45) + le16(45) + le32(0) + le32(0)
+                + le64(1) + le64(1) + le64(dirSize) + le64(dirOffset)
+        }
+        let shapes: [(String, [UInt8])] = [
+            ("locator past Int64.max", [UInt8](repeating: 0, count: 110) + locator(0xFFFF_FFFF_FFFF_FFF0) + eocd),
+            ("directory offset near Int64.max",
+             [UInt8](repeating: 0, count: 54) + end64(dirSize: 100, dirOffset: 0x7FFF_FFFF_FFFF_FFF0) + locator(54) + eocd),
+            ("directory size of Int64.max",
+             [UInt8](repeating: 0, count: 54) + end64(dirSize: UInt64(Int64.max), dirOffset: 16) + locator(54) + eocd),
+        ]
+        for (label, bytes) in shapes {
+            let zip = try writeFile(Data(bytes), to: tmp.appendingPathComponent("\(label).zip"))
+            XCTAssertThrowsError(try ZipDirectory.entries(zip), label)
+        }
+    }
 }
