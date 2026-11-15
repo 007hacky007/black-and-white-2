@@ -22,4 +22,16 @@ final class DiskSpaceTests: XCTestCase {
         XCTAssertGreaterThan(free, 0)
         XCTAssertNotNil(volumeName(of: tmp))
     }
+
+    /// The row counts the space the build's own check counts (bw2/builder_cli.py check_space: shutil.disk_usage,
+    /// statfs's f_bavail), not purgeable space, or the row could be green while the build refuses at once.
+    func testAvailableBytesIsWhatStatfsSays() throws {
+        let tmp = try makeTempFolder("space")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        var info = statfs()
+        XCTAssertEqual(statfs(tmp.path, &info), 0)
+        let statfsFree = Int64(info.f_bavail) * Int64(info.f_bsize)
+        let free = try XCTUnwrap(availableBytes(at: tmp))
+        XCTAssertLessThan(abs(free - statfsFree), 512 << 20, "\(free) against statfs \(statfsFree)")
+    }
 }

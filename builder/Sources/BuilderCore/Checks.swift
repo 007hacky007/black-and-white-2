@@ -74,12 +74,16 @@ public func diskSpaceCheck(available: Int64, required: Int64 = requiredBuildByte
     return .blocked("Only \(gb(available)) free\(on), \(gb(required)) needed")
 }
 
-/// The space free for important use on the volume `url` is on (its nearest existing folder), or nil.
+/// The space free on the volume `url` is on (its nearest existing folder), or nil: statfs's blocks available to
+/// the user, the figure the build's own check uses (bw2/builder_cli.py check_space, shutil.disk_usage) and `df`
+/// shows. Not "available for important usage", which also counts purgeable space the build cannot count on: with
+/// it the row was green at 220 GB while the build refused 19.4 GB (plan 13 Task 8).
 public func availableBytes(at url: URL) -> Int64? {
     var path = url.standardizedFileURL
     while !FileManager.default.fileExists(atPath: path.path) && path.path != "/" { path.deleteLastPathComponent() }
-    let values = try? path.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-    return values?.volumeAvailableCapacityForImportantUsage
+    var info = statfs()
+    guard statfs(path.path, &info) == 0 else { return nil }
+    return Int64(info.f_bavail) * Int64(info.f_bsize)
 }
 
 /// The name Finder shows for the volume `url` is on.

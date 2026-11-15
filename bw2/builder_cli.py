@@ -28,14 +28,25 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import app, disc, ffmpeg, gametree, install, pipeline, tools
-from .d3dx import d3dx_dll
+from . import disc, ffmpeg, install, tools
 from .diskspace import NotEnoughSpace, ensure_free
 from .download import PATCH_SOURCES, FingerprintMismatch, fetch, fetch_pcgw
 from .fanpatch import FAN_PATCH_URL
 from .paths import REPO
 from .releases import Release, identify, load_releases, sha256_file
 from .workspace import SOURCES
+
+# The build's packages (requirements-builder.txt). The Builder runs `setup` with its bare private Python, before
+# they are installed, so only `build` needs them; without them it stops with an error naming the package.
+PACKAGES = ("capstone", "pefile", "unicorn")
+try:
+    from . import app, gametree, pipeline
+    from .d3dx import d3dx_dll
+    MISSING_PACKAGE = None
+except ModuleNotFoundError as e:
+    if e.name not in PACKAGES:
+        raise
+    MISSING_PACKAGE = e.name
 
 ROOT = REPO
 FIXED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -278,8 +289,19 @@ def volume_of(path: Path) -> str:
     return str(p)
 
 
+def required_bytes() -> int:
+    """REQUIRED_BYTES, or BW2_REQUIRED_BYTES when set: a test switch for the end-to-end builds on a Mac whose free
+    space is short of the measured need (the Builder never sets it)."""
+    v = os.environ.get("BW2_REQUIRED_BYTES")
+    if v is None:
+        return REQUIRED_BYTES
+    if not v.isdigit():
+        raise ValueError(f"BW2_REQUIRED_BYTES must be a number of bytes, not {v!r}")
+    return int(v)
+
+
 def check_space(root: Path, need: int | None = None) -> None:
-    need = REQUIRED_BYTES if need is None else need
+    need = required_bytes() if need is None else need
     try:
         ensure_free(root, need)
     except NotEnoughSpace:
@@ -408,6 +430,8 @@ def _fail(message: str) -> int:
 
 
 def cmd_build(a) -> int:
+    if MISSING_PACKAGE:
+        return _fail(f"the build's package {MISSING_PACKAGE} is not installed: run setup first")
     try:
         inputs = classify(a.input)
     except InputError as e:
@@ -415,7 +439,7 @@ def cmd_build(a) -> int:
     try:
         app_version = a.app_version or app.version()
         check_space(ROOT)
-    except (app.PackageError, NotEnoughSpace, OSError) as e:
+    except (app.PackageError, NotEnoughSpace, OSError, ValueError) as e:
         return _fail(str(e))
     os.environ["BW2_FFMPEG_PREFIX"] = str(ffmpeg.LGPL_PREFIX)
     ctx = Context(root=ROOT, inputs=inputs, app_version=app_version, builder_version=a.builder_version)

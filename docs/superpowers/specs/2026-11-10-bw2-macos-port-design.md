@@ -160,7 +160,8 @@ What we expect to take from it (each to be confirmed by trying it):
 | Need | pcrecomp piece |
 |---|---|
 | Read BIN/CUE, ISO | `tools/assets/bin2iso.js`, `iso_peek.py` |
-| InstallShield 9 multi-volume | **unshield** (MIT, Homebrew) instead: `isextract.py` fails on files spanning cabinets (phase 0) |
+| InstallShield 9 multi-volume | **unshield** (MIT) instead: `isextract.py` fails on files spanning cabinets (phase 0). Plan 13: unshield 1.6.2 is vendored as source under `third_party/unshield/` and built by the pipeline with the Command Line Tools' clang (`bw2/tools.py`), not taken from Homebrew |
+| Inno Setup (the fan patch's installer) | none needed: plan 13 reads the pinned installer's one LZMA2 chunk and undoes Inno's call-instruction transform in Python (`bw2/inno.py`), instead of innoextract |
 | PE analysis, imports, resources | `tools/pe/*` |
 | Function discovery | `tools/disasm/disasm32.py`, `cpp/rtti.py`, `cpp/vtable_scan.py`, `lift/recover`, scoring tools |
 | SafeDisc leftovers | `tools/drm/*` (for understanding `stxt774`/`.name0`) |
@@ -632,6 +633,15 @@ These are traps NFSU2 hit; the design takes them as requirements.
   removed from built files.
 - If a launcher process exists, it runs the engine as a child, not via
   `exec`, so folder permissions it was granted are inherited.
+  Plan 13: there is no launcher process. The engine is the app's
+  `CFBundleExecutable` (`Contents/MacOS/bw2`); started with no arguments it
+  finds `Contents/Resources/game` and `Contents/Resources/d3dx9_25.dll` (the
+  DLL sits in `Resources` because `codesign` refuses it in `MacOS`), and a
+  log watcher (the same binary, spawned at start, never touching AppKit)
+  copies its output to `~/Library/Application Support/Black & White 2/Logs/bw2.log`
+  and shows an alert when a run ends in a loud stop, so a stop from Finder is
+  never a silent vanish. FFmpeg's LGPL dylibs sit in `Contents/Frameworks`
+  under their install names, found through `@executable_path/../Frameworks`.
 - AppKit event loop basics: `finishLaunching`, pump the run loop, a menu,
   `NSHighResolutionCapable`, `NSTerminateCancel` (not `NSTerminateLater`).
 
@@ -650,7 +660,8 @@ Rows:
    folder or picked one by one).
 3. Patch 1.1, 1.2, fan 1.42: each "Download" or "I have it" (file picker);
    fingerprint checked.
-4. Free disk space enough for extraction + build (number to be measured).
+4. Free disk space enough for extraction + build (plan 13 measured it: 20.1 GB
+   on the workspace's volume, the peak `du` of a build from the zips plus 20%).
 5. Build: extract installer data from the discs (no Windows installer run),
    and `d3dx9_25.dll` from disc 1's DirectX CAB (`/usr/bin/tar`);
    lay out the install tree as the Windows installer would, apply 1.1, 1.2,
@@ -673,6 +684,31 @@ Unicorn therefore joins the Builder's pinned Python. The built tree is
 checked against `bw2/manifests/game-usa-1.2-fan1.42.tsv`; see
 `docs/research/patch-application.md`.
 
+**Plan 13 (as built; `docs/research/builder.md`):** `BW2 Builder.app`
+(`python -m bw2.make_builder`, SwiftUI, adapted from the NFSU2 Builder) holds
+the git-tracked pipeline sources in `Contents/Resources/source`. Its rows, in
+order: Mac (Apple Silicon, macOS 13 or newer), Xcode Command Line Tools
+(`Install` runs `xcode-select --install`), build tools (`Set Up` downloads the
+pinned Python, then runs `setup`), discs 1-4 (`Choose...`: files or a
+folder), patch 1.1, patch 1.2 and fan patch 1.42 (each `Download`, enabled
+once the build tools are ready, or `I have it...`), destination (`Change...`;
+`/Applications`, else `~/Applications`) and free disk space. Build is enabled
+when every row is green; the window then shows the step and a bar with
+Cancel, installs the app, cleans the workspace and offers Play and Show in
+Finder, or on a failure names the step and the error with the log's last 200
+lines and Copy Log. `BW2Builder --support DIR --print-checks` prints the rows
+as JSON lines without a window. Every step is one command,
+`python -m bw2.builder_cli setup | download | build | clean`, run in its own
+process group with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which reports through
+`BW2-EVENT <json>` lines (`step`, `progress`, `done`, `error`); `build` checks
+every input before it writes anything and names all problems at once. The
+workspace is `~/Library/Application Support/BW2 Builder/<Builder version>/`,
+a copy of the bundled sources; after the app is installed, `clean` removes
+its `gamefiles/`, `gen/` and `out/` but `out/tools/` (unshield and FFmpeg stay
+for the next build), and saves and settings are never touched. Downloads go
+through the CLI and are pinned by SHA-256; for patches 1.1 and 1.2 the row
+says that downloading accepts PCGamingWiki's download terms for the user.
+
 ## 9. Repo and identity
 
 - Local git repo at `~/src/black-and-white-2`, branch
@@ -687,7 +723,13 @@ checked against `bw2/manifests/game-usa-1.2-fan1.42.tsv`; see
   separate library). No NFSU2Recomp code. FFmpeg (LGPL-2.1+) is used only as
   separate dynamic libraries (`libavformat`, `libavcodec`, `libavutil`). Development
   links Homebrew's GPL-enabled build, which never leaves the Mac; the shipped app
-  bundles a minimal LGPL-only build from the pinned 9.0.2 release (plan 10, Ruling 2).
+  bundles a minimal LGPL-only build from the pinned 9.0.2 release (plan 10, Ruling 2),
+  which plan 13's Builder builds on the user's Mac (`bw2/ffmpeg.py`) and copies into
+  `Contents/Frameworks`. unshield 1.6.2 (MIT) is vendored byte-identical under
+  `third_party/unshield/`, with our build files under `tools/unshield/`. The Builder
+  downloads python-build-standalone (CPython 3.14.10, release 20261026) and the
+  build's three wheels (capstone, pefile, unicorn), each pinned by SHA-256
+  (`requirements-builder.txt`, installed with `--require-hashes --only-binary=:all:`).
 - Commit messages: short, imperative, no AI attribution.
 - What may be committed (my call): facts *about* the exe that contain none of
   its content: addresses, function catalogs and seed lists, import argument
@@ -777,6 +819,12 @@ Left to the builder:
 - Bink decoder (plan 10, Ruling 2: FFmpeg's, as separate LGPL dynamic libraries).
 - Nothing new from plan 11: its mingw-w64 (Ruling 6, Homebrew) builds the Windows
   probe on this Mac and is a development tool only, not part of the Builder.
+- Plan 13 (the Builder and packaging): the fan patch is read in Python, not with
+  innoextract (Ruling 2); unshield is vendored as source and built with clang
+  (Ruling 3); the app's FFmpeg is the LGPL-only Bink build (Ruling 4); the Builder's
+  Python is python-build-standalone 20261026 with three hash-pinned wheels
+  (Ruling 5); no launcher process, the engine is the app's executable with a log
+  watcher, and the DLL lives in `Resources` (Ruling 6).
 - Nothing new from plan 12: its rulings are test scripts and measured places
   (`docs/research/land1.md`), and its `long` marker is a test switch.
 - Exact phasing after phase 0.

@@ -200,6 +200,22 @@ def test_space_check_names_volume_and_numbers(tmp_path, monkeypatch):
     assert builder_cli.volume_of(tmp_path) == "/" or os.path.ismount(builder_cli.volume_of(tmp_path))
 
 
+def test_space_check_test_override(tmp_path, monkeypatch):
+    """BW2_REQUIRED_BYTES (a test switch for the end-to-end builds) replaces REQUIRED_BYTES; an explicit need wins."""
+    from bw2.diskspace import NotEnoughSpace
+    monkeypatch.setattr(builder_cli.shutil, "disk_usage", lambda p: type("U", (), {"free": 1000})())
+    monkeypatch.setattr("bw2.diskspace.shutil.disk_usage", lambda p: type("U", (), {"free": 1000})())
+    with pytest.raises(NotEnoughSpace):
+        builder_cli.check_space(tmp_path)
+    monkeypatch.setenv("BW2_REQUIRED_BYTES", "999")
+    builder_cli.check_space(tmp_path)
+    with pytest.raises(NotEnoughSpace, match="1001"):
+        builder_cli.check_space(tmp_path, 1001)
+    monkeypatch.setenv("BW2_REQUIRED_BYTES", "lots")
+    with pytest.raises(ValueError, match="BW2_REQUIRED_BYTES"):
+        builder_cli.check_space(tmp_path)
+
+
 def test_build_refuses_without_space(tmp_path, monkeypatch, capsys, cli_env):
     fs = FakeSet(tmp_path / "in")
     inputs = Inputs(discs={1: fs.zip1, 2: fs.cue2, 3: fs.bin3, 4: fs.iso4}, patch11=fs.p11, patch12=fs.p12, fan=fs.fan)
@@ -355,6 +371,49 @@ def test_setup_venv(tmp_path):
     assert r2.stdout == "ok\n", r2.stderr
     want = hashlib.sha256((REPO / "requirements-builder.txt").read_bytes()).hexdigest()
     assert (venv / ".build-requirements-sha256").read_text().strip() == want
+
+
+# The Builder runs setup with its bare private Python, before the build's packages exist (found by plan 13
+# Task 8's window end to end). This prelude makes the three packages unimportable, as in that Python.
+BARE = ("import sys, subprocess\n"
+        "for n in ('pefile', 'capstone', 'unicorn'): sys.modules[n] = None\n"
+        "from bw2 import builder_cli\n")
+
+
+def _bare(code: str, tmp_path) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-c", BARE + code], cwd=REPO, capture_output=True, text=True,
+                          env={"PATH": FIXED_PATH, "HOME": str(tmp_path)}, timeout=120)
+
+
+def test_setup_without_the_packages(tmp_path):
+    venv = tmp_path / "venv"
+    code = ("calls = []\n"
+            "def run(argv, **kw):\n"
+            "    calls.append(argv)\n"
+            "    return subprocess.CompletedProcess(argv, 0)\n"
+            "builder_cli.subprocess.run = run\n"
+            f"rc = builder_cli.main(['setup', '--venv', {str(venv)!r}])\n"
+            "print('calls', len(calls))\n"
+            "sys.exit(rc)\n")
+    venv.mkdir()
+    r = _bare(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "calls 2" in r.stdout
+    assert {"done": str(venv)} in _events(r.stdout)
+    assert (venv / ".build-requirements-sha256").is_file()
+
+
+def test_build_without_the_packages_names_them(tmp_path):
+    r = _bare("sys.exit(builder_cli.main(['build', '--input', 'x', '--builder-version', '1']))", tmp_path)
+    assert r.returncode == 1, r.stdout + r.stderr
+    errors = [e["error"] for e in _events(r.stdout) if "error" in e]
+    assert len(errors) == 1 and "pefile" in errors[0] and "setup" in errors[0], r.stdout + r.stderr
+
+
+def test_clean_and_download_without_the_packages(tmp_path):
+    r = _bare("sys.exit(builder_cli.main(['clean']))", tmp_path)
+    assert r.returncode == 1                       # the repo is not a workspace: refused by name, not by import
+    assert "only a Builder workspace is cleaned" in r.stdout, r.stdout + r.stderr
 
 
 # ---- the steps -----------------------------------------------------------------------------------------------------
