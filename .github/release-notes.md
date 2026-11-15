@@ -7,8 +7,8 @@ This release contains no game files. `BW2 Builder.app` turns your own copy of th
 
 It needs the Xcode Command Line Tools (the Builder offers to install them), an internet connection for its pinned Python and packages, and about 20 GB free on the startup disk while it builds.
 
-**Opening it:** the Builder is ad-hoc signed, not notarized, so macOS blocks it the first time. Either open it once, then allow it under System Settings > Privacy & Security > "Open Anyway", or run:
+**Opening it:** download `BW2-Builder.dmg` and open it. The Builder is ad-hoc signed, not notarized, so macOS blocks it the first time; the disk image's window shows the steps: open BW2 Builder, click Done, then System Settings > Privacy & Security > "Open Anyway". On macOS 14 or older, right-click BW2 Builder and choose Open. Or, before opening the image:
 
-    xattr -dr com.apple.quarantine "/path/to/BW2 Builder.app"
+    xattr -d com.apple.quarantine ~/Downloads/BW2-Builder.dmg
 
 This is an early test release: the first land, saves, loads and settings work; the rest of the campaign is still being tested.
