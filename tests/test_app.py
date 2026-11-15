@@ -103,8 +103,8 @@ def test_info_plist():
 
 
 def test_version():
-    assert version() == "0.0.2"
-    assert (paths.REPO / "VERSION").read_text() == "0.0.2\n"
+    assert version() == "0.0.3"
+    assert (paths.REPO / "VERSION").read_text() == "0.0.3\n"
 
 
 def test_package_small(tmp_path):
@@ -319,7 +319,7 @@ def test_cli_defaults(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "package_app", fake)
     assert app_mod.main(["--engine", "e/bw2", "--ffmpeg", "p", "--out", str(tmp_path)]) == 0
     assert got == dict(engine=Path("e/bw2"), dll=paths.REPO / "out" / "d3dx9_25.dll", prefix=Path("p"),
-                       game=paths.GAMEFILES / "game", dest=tmp_path, app_version="0.0.2", builder_version="0.0.2")
+                       game=paths.GAMEFILES / "game", dest=tmp_path, app_version="0.0.3", builder_version="0.0.3")
     assert app_mod.main(["--engine", "e", "--ffmpeg", "p", "--out", str(tmp_path), "--app-version", "2.0",
                          "--builder-version", "3.0"]) == 0
     assert (got["app_version"], got["builder_version"]) == ("2.0", "3.0")
