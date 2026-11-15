@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach the Builder to (e.g. v0.0.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  builder:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Check the tag matches VERSION
+        id: ver
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="$(cat VERSION)"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "tag $TAG does not match VERSION $VERSION" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install Python packages
+        run: python -m pip install -r requirements.txt
+
+      - name: Test the Builder's Swift core
+        run: swift test --package-path builder
+
+      - name: Make BW2 Builder.app
+        run: python -m bw2.make_builder --out out
+
+      - name: Zip the Builder
+        run: |
+          ZIP="BW2-Builder-${{ steps.ver.outputs.version }}.zip"
+          ditto -c -k --keepParent "out/BW2 Builder.app" "$ZIP"
+          shasum -a 256 "$ZIP" > "$ZIP.sha256"
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            if [ -f .github/release-notes.md ]; then
+              gh release create "$TAG" --verify-tag --title "$TAG" --notes-file .github/release-notes.md --prerelease
+            else
+              gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes --prerelease
+            fi
+          fi
+          gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
